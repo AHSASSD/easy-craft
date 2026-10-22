@@ -3,4 +3,5 @@ dist/
 src-tauri/target/
 test-results/
 playwright-report/
+output/
 *.local

@@ -14,3 +14,14 @@
 - Windows，Node 24.15.0，npm 11.12.1。
 - 当前终端找不到 Rust / Cargo，因此采用规格允许的浏览器运行路径；保留完整 Tauri 工程。不自动安装系统级构建工具。
 - 新项目单独初始化 Git，阶段提交只涉及 easy-craft。
+
+## A 验证
+
+`dev` 已启动（127.0.0.1:1420）；`build`、`typecheck`、`test`（1 项）、`lint`、`format:check` 通过。
+`tauri info` 确认 WebView2 可用，缺少 MSVC/SDK、Rust/Cargo。桌面端未编译。
+
+## B 验证
+
+实现双栏、鼠标/键盘调整分隔栏、主题、搜索与空态、实例选择/收藏/重命名/元数据复制/添加、详情、账户占位、下载占位、设置和本地背景预览。
+`build`、`typecheck`、`test`（3 项）、`lint`、`format:check` 通过；Edge 浏览器流程测试 2 项通过，验证刷新持久化、右键重命名、键盘栏宽与 800×540 布局及 Escape 弹窗关闭。
+浏览器截图保存于 output/playwright（不纳入 Git）。
