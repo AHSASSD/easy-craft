@@ -14,7 +14,7 @@ use tokio_util::sync::CancellationToken;
 pub const MANIFEST: &str = "https://piston-meta.mojang.com/mc/game/version_manifest_v2.json";
 pub fn client() -> Result<Client> {
     Client::builder()
-        .user_agent("EasyCraft/0.2.0")
+        .user_agent("EasyCraft/0.3.0")
         .connect_timeout(Duration::from_secs(15))
         .timeout(Duration::from_secs(90))
         .redirect(reqwest::redirect::Policy::none())
@@ -34,6 +34,8 @@ pub fn trusted_url(raw: &str) -> Result<Url> {
             "launcher.mojang.com",
             "libraries.minecraft.net",
             "resources.download.minecraft.net",
+            "meta.fabricmc.net",
+            "maven.fabricmc.net",
         ]
         .contains(&url.host_str().unwrap_or_default())
     {
@@ -68,6 +70,33 @@ pub async fn get_json(
         bytes.extend_from_slice(&chunk);
     }
     serde_json::from_slice(&bytes).map_err(|_| "官方元数据格式无效".into())
+}
+pub async fn checksum(client: &Client, url: &str, cancel: &CancellationToken) -> Result<String> {
+    let url = trusted_url(url)?;
+    if url.host_str() != Some("maven.fabricmc.net") {
+        return Err("校验值来源无效".into());
+    }
+    let response = tokio::select! { _ = cancel.cancelled() => return Err("操作已取消".into()), result = client.get(url).send() => result.map_err(|_| "无法读取 Fabric 校验值")? };
+    if !response.status().is_success() {
+        return Err("Fabric 校验值服务返回失败".into());
+    }
+    let mut stream = response.bytes_stream();
+    let mut bytes = vec![];
+    while let Some(chunk) = tokio::select! { _ = cancel.cancelled() => return Err("操作已取消".into()), result = stream.next() => result }
+    {
+        let chunk = chunk.map_err(|_| "校验值接收中断")?;
+        if bytes.len() + chunk.len() > 256 {
+            return Err("校验值响应过长".into());
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    let hash = std::str::from_utf8(&bytes)
+        .map_err(|_| "校验值编码无效")?
+        .trim();
+    if !valid_sha1(hash) {
+        return Err("Fabric SHA-1 无效".into());
+    }
+    Ok(hash.to_ascii_lowercase())
 }
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Artifact {

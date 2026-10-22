@@ -11,6 +11,89 @@ fn root() -> PathBuf {
     root
 }
 #[test]
+fn automatic_memory_reserves_system_space_and_bounds_heap() {
+    assert_eq!(crate::memory::recommend(8192, 6144), (4096, 1024));
+    assert_eq!(crate::memory::recommend(32768, 8192), (4096, 4096));
+    assert_eq!(crate::memory::recommend(8192, 256), (512, 1024));
+    assert_eq!(crate::memory::recommend(131072, 120000), (16384, 4096));
+    let status = crate::memory::status().unwrap();
+    assert!(status.total_mb > 0 && status.available_mb <= status.total_mb);
+    assert!(crate::memory::optimize().is_ok());
+    assert!(!crate::memory::process_ids().unwrap().is_empty());
+}
+#[test]
+fn fabric_coordinates_are_bounded_and_cannot_escape_cache() {
+    assert_eq!(
+        crate::fabric::maven_path("net.fabricmc:fabric-loader:0.16.14").unwrap(),
+        "net/fabricmc/fabric-loader/0.16.14/fabric-loader-0.16.14.jar"
+    );
+    for name in [
+        "../x:loader:1",
+        "net.fabricmc:../bad:1",
+        "x:y:../../evil",
+        "x:y:z:classifier",
+        "x:y:",
+        "x..y:z:1",
+    ] {
+        assert!(crate::fabric::maven_path(name).is_err(), "{name}");
+    }
+}
+fn pack_zip(entries: &[(&str, &[u8])]) -> Vec<u8> {
+    use std::io::Write;
+    let mut writer = zip::ZipWriter::new(std::io::Cursor::new(vec![]));
+    for (name, bytes) in entries {
+        writer
+            .start_file(*name, zip::write::SimpleFileOptions::default())
+            .unwrap();
+        writer.write_all(bytes).unwrap();
+    }
+    writer.finish().unwrap().into_inner()
+}
+#[test]
+fn pack_preview_reads_real_index_and_rejects_traversal_conflicts_and_bad_hashes() {
+    let manifest = json!({"formatVersion":1,"game":"minecraft","name":"测试包","versionId":"1","dependencies":{"minecraft":"1.21.1","fabric-loader":"0.16.14"},"files":[{"path":"mods/test.jar","hashes":{"sha1":"0".repeat(40),"sha512":"0".repeat(128)},"downloads":["https://cdn.modrinth.com/data/test.jar"],"fileSize":10}]});
+    let bytes = serde_json::to_vec(&manifest).unwrap();
+    let fixtures = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .join(".native/fixtures");
+    fs::create_dir_all(&fixtures).unwrap();
+    fs::write(
+        fixtures.join("preview.mrpack"),
+        pack_zip(&[
+            ("modrinth.index.json", &bytes),
+            ("overrides/config/example.json", b"{}"),
+        ]),
+    )
+    .unwrap();
+    let preview = crate::packs::preview(&pack_zip(&[
+        ("modrinth.index.json", &bytes),
+        ("overrides/config/example.json", b"{}"),
+    ]))
+    .unwrap();
+    assert_eq!(preview.kind, "MRPACK");
+    assert_eq!(preview.downloads, 1);
+    assert!(preview.dependencies.contains(&"minecraft: 1.21.1".into()));
+    assert!(crate::packs::preview(&pack_zip(&[("../escape.txt", b"x")])).is_err());
+    assert!(
+        crate::packs::preview(&pack_zip(&[("Mods/A.jar", b"x"), ("mods/a.jar", b"x")])).is_err()
+    );
+    let mut bad = manifest.clone();
+    bad["files"][0]["hashes"]["sha1"] = json!("bad");
+    assert!(crate::packs::preview(&pack_zip(&[(
+        "modrinth.index.json",
+        &serde_json::to_vec(&bad).unwrap()
+    )]))
+    .is_err());
+    let mut bad = manifest;
+    bad["files"][0]["downloads"] = json!(["https://cdn.modrinth.com.evil.test/file.jar"]);
+    assert!(crate::packs::preview(&pack_zip(&[(
+        "modrinth.index.json",
+        &serde_json::to_vec(&bad).unwrap()
+    )]))
+    .is_err());
+}
+#[test]
 fn rejects_path_traversal_and_windows_devices() {
     let root = root();
     for path in [
@@ -229,6 +312,8 @@ fn offline_and_microsoft_arguments_stay_distinct() {
         version: "1.21.1".into(),
         manifest_sha1: "0".repeat(40),
         java_major: 21,
+        fabric_version: String::new(),
+        fabric_sha1: String::new(),
     };
     let mut settings = host.status().settings;
     settings.launch_mode = model::LaunchMode::Offline;
@@ -412,4 +497,54 @@ async fn cached_offline_preparation_integration() {
         minecraft::command_args(&host, &instance, &prepared, &profile, "0", &settings).unwrap();
     assert!(args.iter().all(|arg| !arg.contains("${")));
     println!("PASS: cached 1.21.1 resources verified and offline arguments prepared with all HTTP routed to an unavailable local proxy; no account needed.");
+}
+
+#[tokio::test]
+#[ignore = "Downloads official Fabric 0.16.14 and verifies a new isolated 1.21.1 instance"]
+async fn official_fabric_install_integration() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .join(".native/integration");
+    let host = host::Host::new(root).unwrap();
+    host.start_install_fabric("1.21.1".into(), "Fabric 集成验证".into(), "0.16.14".into())
+        .unwrap();
+    let start = std::time::Instant::now();
+    loop {
+        let state = host.status();
+        if state.task.status != "running" {
+            assert_eq!(state.task.status, "succeeded", "{}", state.task.message);
+            break;
+        }
+        assert!(start.elapsed().as_secs() < 900, "Fabric install timed out");
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    }
+    let instance = host.status().instances.last().unwrap().clone();
+    assert_eq!(instance.fabric_version, "0.16.14");
+    assert!(model::valid_sha1(&instance.fabric_sha1));
+    let entry = model::Version {
+        id: instance.version.clone(),
+        sha1: instance.manifest_sha1.clone(),
+        url: format!(
+            "https://piston-meta.mojang.com/v1/packages/{}/{}.json",
+            instance.manifest_sha1, instance.version
+        ),
+        kind: "release".into(),
+    };
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let mut prepared = minecraft::prepare(&host, &entry, &cancel).await.unwrap();
+    crate::fabric::prepare(&host, &instance, &mut prepared, &cancel)
+        .await
+        .unwrap();
+    assert_eq!(
+        prepared.metadata["mainClass"],
+        "net.fabricmc.loader.impl.launch.knot.KnotClient"
+    );
+    assert!(prepared
+        .classpath
+        .iter()
+        .any(|path| path.to_string_lossy().contains("fabric-loader-0.16.14.jar")));
+    println!(
+        "PASS: real Fabric 0.16.14 installed and verified in isolated Minecraft 1.21.1 instance"
+    );
 }

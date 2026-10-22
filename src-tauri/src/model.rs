@@ -13,12 +13,23 @@ pub enum LaunchMode {
     Microsoft,
     Offline,
 }
+#[derive(Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum MemoryMode {
+    Auto,
+    #[default]
+    Manual,
+}
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Settings {
     pub client_id: String,
     pub java_path: String,
     pub memory_mb: u32,
+    #[serde(default)]
+    pub memory_mode: MemoryMode,
+    #[serde(default)]
+    pub optimize_memory: bool,
     #[serde(default)]
     pub launch_mode: LaunchMode,
     #[serde(default)]
@@ -31,6 +42,8 @@ impl Default for Settings {
             client_id: String::new(),
             java_path: java,
             memory_mb: 2048,
+            memory_mode: MemoryMode::Auto,
+            optimize_memory: false,
             launch_mode: LaunchMode::Microsoft,
             offline_name: String::new(),
         }
@@ -44,6 +57,10 @@ pub struct Instance {
     pub version: String,
     pub manifest_sha1: String,
     pub java_major: u32,
+    #[serde(default)]
+    pub fabric_version: String,
+    #[serde(default)]
+    pub fabric_sha1: String,
 }
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Profile {

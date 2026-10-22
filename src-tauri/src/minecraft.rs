@@ -97,7 +97,7 @@ pub async fn prepare(host: &Host, entry: &Version, cancel: &CancellationToken) -
         || metadata.get("minecraftArguments").is_some()
         || !metadata["arguments"]["game"].is_array()
     {
-        return Err("V0.2 仅支持现代原版格式，不支持旧式参数或继承版本".into());
+        return Err("V0.3 仅支持现代原版格式，不支持旧式参数或继承版本".into());
     }
     let java_major = metadata["javaVersion"]["majorVersion"]
         .as_u64()
@@ -327,7 +327,7 @@ pub fn command_args(
         ),
         ("natives_directory", natives.to_string_lossy().into()),
         ("launcher_name", "EasyCraft".into()),
-        ("launcher_version", "0.2.0".into()),
+        ("launcher_version", "0.3.0".into()),
         ("classpath", classpath),
         ("classpath_separator", ";".into()),
         (

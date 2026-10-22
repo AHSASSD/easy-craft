@@ -81,6 +81,10 @@ impl Host {
             !model::valid_id(&item.id)
                 || !model::valid_id(&item.version)
                 || !model::valid_sha1(&item.manifest_sha1)
+                || (item.fabric_version.is_empty() != item.fabric_sha1.is_empty())
+                || (!item.fabric_version.is_empty()
+                    && (!crate::fabric::valid_version(&item.fabric_version)
+                        || !model::valid_sha1(&item.fabric_sha1)))
         }) {
             return Err("实例清单无效，原文件保留".into());
         }
@@ -143,7 +147,8 @@ impl Host {
         {
             return Err("Client ID 或内存设置无效（512–16384 MB）".into());
         }
-        if !settings.java_path.is_empty() {
+        if !settings.java_path.is_empty() && settings.java_path != self.status().settings.java_path
+        {
             let java = minecraft::probe_java(&settings.java_path).await?;
             if !java.is_64_bit {
                 return Err("请选择 64 位 Java".into());
@@ -202,13 +207,32 @@ impl Host {
         }
     }
     pub fn start_install(self: &Arc<Self>, version: String, name: String) -> Result<()> {
+        self.start_install_inner(version, name, None)
+    }
+    pub fn start_install_fabric(
+        self: &Arc<Self>,
+        version: String,
+        name: String,
+        loader: String,
+    ) -> Result<()> {
+        if !crate::fabric::valid_version(&loader) {
+            return Err("无效 Fabric 版本".into());
+        }
+        self.start_install_inner(version, name, Some(loader))
+    }
+    fn start_install_inner(
+        self: &Arc<Self>,
+        version: String,
+        name: String,
+        loader: Option<String>,
+    ) -> Result<()> {
         if !model::valid_id(&version) || name.trim().is_empty() || name.chars().count() > 60 {
             return Err("实例名称或版本无效".into());
         }
         let cancel = self.begin_task("读取官方版本清单")?;
         let host = self.clone();
         tauri::async_runtime::spawn(async move {
-            let result = host.install(version, name, &cancel).await;
+            let result = host.install(version, name, loader, &cancel).await;
             host.finish(result, &cancel);
         });
         Ok(())
@@ -217,6 +241,7 @@ impl Host {
         &self,
         version: String,
         name: String,
+        loader: Option<String>,
         cancel: &CancellationToken,
     ) -> Result<()> {
         let entry = minecraft::versions(self, cancel)
@@ -225,6 +250,12 @@ impl Host {
             .find(|entry| entry.id == version)
             .ok_or("官方清单中找不到该正式版本")?;
         let prepared = minecraft::prepare(self, &entry, cancel).await?;
+        let fabric_sha1 = if let Some(loader) = &loader {
+            self.progress("fabric", "下载并校验 Fabric 加载器", 0, 1);
+            crate::fabric::install(self, &version, loader, cancel).await?
+        } else {
+            String::new()
+        };
         if cancel.is_cancelled() {
             return Err("操作已取消".into());
         }
@@ -234,6 +265,8 @@ impl Host {
             version,
             manifest_sha1: entry.sha1,
             java_major: prepared.java_major,
+            fabric_version: loader.unwrap_or_default(),
+            fabric_sha1,
         };
         minecraft::extract_natives(
             &prepared.native_archives,
@@ -277,7 +310,20 @@ impl Host {
         Ok(())
     }
     async fn launch(&self, instance: Instance, cancel: &CancellationToken) -> Result<()> {
-        let settings = self.status().settings;
+        let mut settings = self.status().settings;
+        if settings.optimize_memory {
+            match crate::memory::optimize_system() {
+                Ok(_) => self.log("已请求系统整理可访问进程的工作集", &[]),
+                Err(error) => self.log(&format!("内存整理未完成，继续启动：{error}"), &[]),
+            }
+        }
+        if settings.memory_mode == model::MemoryMode::Auto {
+            settings.memory_mb = crate::memory::status()?.recommended_mb;
+        }
+        self.log(
+            &format!("本次游戏最大堆内存：{} MB", settings.memory_mb),
+            &[],
+        );
         let java = minecraft::probe_java(&settings.java_path).await?;
         if !java.is_64_bit || java.major != instance.java_major {
             return Err(format!(
@@ -299,7 +345,10 @@ impl Host {
             ),
             kind: "release".into(),
         };
-        let prepared = minecraft::prepare(self, &entry, cancel).await?;
+        let mut prepared = minecraft::prepare(self, &entry, cancel).await?;
+        if !instance.fabric_version.is_empty() {
+            crate::fabric::prepare(self, &instance, &mut prepared, cancel).await?;
+        }
         minecraft::extract_natives(
             &prepared.native_archives,
             &self.root,

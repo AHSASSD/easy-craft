@@ -18,9 +18,14 @@ test('real features are explicitly unavailable in browser and never simulated', 
   await expect(
     page.getByRole('button', { name: '下载并安装原版' }),
   ).toBeDisabled();
+  await page.getByRole('button', { name: '管理游戏账户' }).click();
   await expect(
-    page.getByRole('button', { name: '获取 Microsoft 登录设备码' }),
+    page.getByRole('button', { name: '正版登录', exact: true }),
   ).toBeDisabled();
+  await expect(
+    page.getByRole('button', { name: '离线登录', exact: true }),
+  ).toBeDisabled();
+  await page.getByRole('button', { name: '关闭弹窗' }).click();
   await page.screenshot({
     path: 'output/playwright/native-browser-boundary.png',
   });
@@ -181,7 +186,7 @@ test('minimum desktop size and keyboard dialog work', async ({ page }) => {
   await page.setViewportSize({ width: 800, height: 540 });
   await page.goto('/');
   await expect(page.getByRole('button', { name: /模拟启动/ })).toBeVisible();
-  await page.getByRole('button', { name: /访客玩家/ }).click();
+  await page.getByRole('button', { name: '管理游戏账户' }).click();
   await expect(page.getByRole('dialog')).toBeVisible();
   await page.keyboard.press('Escape');
   await expect(page.getByRole('dialog')).toHaveCount(0);

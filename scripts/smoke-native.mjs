@@ -95,6 +95,22 @@ try {
   await page.getByRole('button', { name: '刷新官方版本' }).click();
   await page.getByText('已读取官方正式版本清单。', { exact: true }).waitFor();
   assert((await page.locator('#official-versions option').count()) > 50);
+  await page
+    .getByRole('combobox', { name: '真实实例加载器' })
+    .selectOption('fabric');
+  await page.getByRole('button', { name: '刷新 Fabric 版本' }).click();
+  await page.getByText('已读取 Fabric 稳定版本。', { exact: true }).waitFor();
+  assert((await page.locator('#fabric-versions option').count()) > 0);
+  await page
+    .getByRole('combobox', { name: '真实实例加载器' })
+    .selectOption('vanilla');
+  await page
+    .getByLabel('选择整合包', { exact: true })
+    .setInputFiles(path.join(project, '.native/fixtures/preview.mrpack'));
+  await page
+    .getByRole('heading', { name: '测试包 · MRPACK', exact: true })
+    .waitFor();
+  await page.getByText('fabric-loader: 0.16.14', { exact: true }).waitFor();
   assert(
     await page
       .getByRole('button', { name: '启动游戏', exact: true })
@@ -115,14 +131,66 @@ try {
     denial.includes('登录'),
     'Host must reject an unsigned launch even if UI guard is bypassed',
   );
-  await page
-    .getByRole('combobox', { name: '启动账户模式', exact: true })
-    .selectOption('offline');
+  await page.getByRole('button', { name: '管理游戏账户', exact: true }).click();
+  await page.getByRole('button', { name: '离线登录', exact: true }).click();
   await page
     .getByRole('textbox', { name: '离线用户名', exact: true })
     .fill('EC_OfflineTest');
-  await page.getByRole('button', { name: '保存原生配置', exact: true }).click();
-  await page.getByText('原生配置已保存。', { exact: true }).waitFor();
+  await mkdir(path.join(project, 'output/playwright'), { recursive: true });
+  await page.getByRole('dialog', { name: '账户' }).screenshot({
+    path: path.join(project, 'output/playwright/account-panel.png'),
+  });
+  await page.getByRole('button', { name: '使用离线账户', exact: true }).click();
+  await page.getByRole('dialog', { name: '账户' }).waitFor({ state: 'hidden' });
+  assert(
+    (
+      await page.getByRole('button', { name: '管理游戏账户' }).textContent()
+    ).includes('EC_OfflineTest'),
+  );
+  await page
+    .getByRole('navigation')
+    .getByRole('button', { name: '设置', exact: true })
+    .click();
+  await page.getByRole('meter', { name: '系统已使用内存' }).waitFor();
+  await page
+    .getByRole('combobox', { name: '内存分配方式' })
+    .selectOption('manual');
+  await page
+    .getByRole('spinbutton', { name: '最大内存', exact: true })
+    .fill('3072');
+  await page.getByRole('checkbox', { name: '启动前内存整理' }).check();
+  await page.getByRole('button', { name: '保存内存设置' }).click();
+  await page
+    .getByText('内存设置已保存，下次启动生效。', { exact: true })
+    .waitFor();
+  const memorySettings = await page.evaluate(
+    async () =>
+      (await window.__TAURI_INTERNALS__.invoke('native_status')).settings,
+  );
+  assert.equal(memorySettings.memoryMb, 3072);
+  assert.equal(memorySettings.memoryMode, 'manual');
+  assert.equal(memorySettings.optimizeMemory, true);
+  await page.getByRole('button', { name: '仅整理启动器', exact: true }).click();
+  await page
+    .getByText('已请求 Windows 整理启动器工作集，当前可用内存已刷新。', {
+      exact: true,
+    })
+    .waitFor();
+  await page
+    .getByRole('combobox', { name: '内存分配方式' })
+    .selectOption('auto');
+  await page.getByRole('checkbox', { name: '启动前内存整理' }).uncheck();
+  await page.getByRole('button', { name: '保存内存设置' }).click();
+  await page
+    .getByText('内存设置已保存，下次启动生效。', { exact: true })
+    .waitFor();
+  await page.screenshot({
+    path: path.join(project, 'output/playwright/memory-panel.png'),
+  });
+  await page
+    .getByRole('navigation')
+    .getByRole('button', { name: '下载中心', exact: true })
+    .click();
   await page
     .getByText('当前启动身份：离线 · EC_OfflineTest（以已保存配置为准）', {
       exact: true,
@@ -135,10 +203,14 @@ try {
       .isEnabled(),
   );
   if (process.argv.includes('--launch-offline')) {
-    await page
-      .getByRole('button', { name: '启动游戏', exact: true })
-      .first()
-      .click();
+    const launchButton = process.argv.includes('--fabric')
+      ? page
+          .locator('.native-instances > div')
+          .filter({ hasText: 'Fabric 0.16.14' })
+          .getByRole('button', { name: '启动游戏', exact: true })
+          .first()
+      : page.getByRole('button', { name: '启动游戏', exact: true }).first();
+    await launchButton.click();
     let rendered = false;
     for (let attempt = 0; attempt < 120; attempt++) {
       const state = await page.evaluate(() =>
@@ -153,6 +225,15 @@ try {
         state.task.pid &&
         state.task.logs.some((line) => line.includes('OpenAL initialized'))
       ) {
+        assert(
+          state.task.logs.some((line) => line.includes('本次游戏最大堆内存')),
+        );
+        if (process.argv.includes('--fabric'))
+          assert(
+            state.task.logs.some((line) =>
+              line.includes('with Fabric Loader 0.16.14'),
+            ),
+          );
         rendered = true;
         console.log(
           `PASS: actual offline Minecraft process ${state.task.pid} initialized audio; no Microsoft account or Client ID used.`,

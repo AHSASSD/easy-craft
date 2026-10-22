@@ -1,5 +1,13 @@
 # 架构
 
+## V0.3 第一阶段
+
+AccountPanel 在现有头像弹窗中消费 NativeService，账户配置从下载表单移入该入口。MemoryPanel 在设置页显示原生内存状态、保存分配策略与整理开关。内存读取/整理使用 Windows API，启动宿主在创建 Java 进程前应用策略。
+
+fabric.rs 从受限官方来源读取版本和 profile，规范化 Maven 路径，下载前取得官方 SHA-1，保存内容寻址的锁定 profile；实例追加可选 Fabric 版本与配置哈希，旧实例默认为原版。准备启动时复用原版资源并合并已锁定的 Fabric classpath 和 KnotClient 入口。
+
+packs.rs 只读 ZIP 目录与索引，PackInspector 展示真实检查结果；此阶段没有解压或提交实例的路径。原有全窗口拖放仍是文件信息预览，新内容检查位于下载中心的整合包区域。
+
 ## V0.2 离线账户增强
 
 NativeSettings 增加 launchMode / offlineName；Rust 使用强类型枚举和旧配置默认值。NativeWorkspace 保存模式，实例列表显示实际使用的已保存身份，NativeService 验证新字段。Host 的启动路径在显式离线模式使用本地 Profile，不请求账户认证；Microsoft 模式仍使用 access 刷新/校验，二者不自动回退。游戏资源校验、参数数组、任务取消和进程回收复用同一实现。离线身份不进入正版 account 字段，不改动加密账户文件。

@@ -2,6 +2,8 @@ import { invoke, isTauri } from '@tauri-apps/api/core';
 import type {
   DeviceCode,
   JavaInfo,
+  MemoryInfo,
+  PackPreview,
   NativeService,
   NativeSnapshot,
   NativeState,
@@ -10,6 +12,19 @@ import { isRecord } from '../core/services';
 const string = (value: unknown): value is string => typeof value === 'string';
 const integer = (value: unknown): value is number =>
   typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
+function validMemory(value: unknown): value is MemoryInfo {
+  return (
+    isRecord(value) &&
+    integer(value.totalMb) &&
+    value.totalMb > 0 &&
+    integer(value.availableMb) &&
+    value.availableMb <= value.totalMb &&
+    integer(value.recommendedMb) &&
+    value.recommendedMb >= 512 &&
+    value.recommendedMb <= 16384 &&
+    integer(value.reserveMb)
+  );
+}
 export function validNativeState(value: unknown): value is NativeState {
   if (
     !isRecord(value) ||
@@ -26,6 +41,8 @@ export function validNativeState(value: unknown): value is NativeState {
     integer(settings.memoryMb) &&
     settings.memoryMb >= 512 &&
     settings.memoryMb <= 16384 &&
+    ['auto', 'manual'].includes(settings.memoryMode as string) &&
+    typeof settings.optimizeMemory === 'boolean' &&
     ['microsoft', 'offline'].includes(settings.launchMode as string) &&
     string(settings.offlineName) &&
     (settings.offlineName === '' ||
@@ -50,7 +67,13 @@ export function validNativeState(value: unknown): value is NativeState {
         string(item.version) &&
         string(item.manifestSha1) &&
         /^[0-9a-f]{40}$/i.test(item.manifestSha1) &&
-        integer(item.javaMajor),
+        integer(item.javaMajor) &&
+        string(item.fabricVersion) &&
+        string(item.fabricSha1) &&
+        (item.fabricVersion === ''
+          ? item.fabricSha1 === ''
+          : /^[A-Za-z0-9._+-]{1,100}$/.test(item.fabricVersion) &&
+            /^[a-f0-9]{40}$/.test(item.fabricSha1)),
     ) &&
     string(task.status) &&
     ['idle', 'running', 'succeeded', 'failed', 'cancelled'].includes(
@@ -151,6 +174,46 @@ export function createNativeService(
       return value.map((item: { id: string }) => item.id);
     },
     saveSettings: (settings) => operation('native_settings', { settings }),
+    previewPack: async (bytes) => {
+      if (bytes.length > 16 * 1024 * 1024)
+        throw new Error('预览文件须小于 16 MB');
+      const value = await request('native_pack_preview', { bytes });
+      if (
+        !isRecord(value) ||
+        !string(value.kind) ||
+        !string(value.name) ||
+        !integer(value.files) ||
+        !integer(value.expandedBytes) ||
+        !integer(value.downloads) ||
+        ![value.dependencies, value.paths, value.warnings].every(
+          (items: unknown) => Array.isArray(items) && items.every(string),
+        )
+      )
+        throw new Error('整合包预览响应无效');
+      return value as PackPreview;
+    },
+    optimizeMemory: async (system = false) => {
+      const value = await request('native_memory_optimize', { system });
+      if (!validMemory(value)) throw new Error('内存检测响应无效');
+      return value;
+    },
+    fabricVersions: async (version) => {
+      const value = await request('native_fabric_versions', { version });
+      if (
+        !Array.isArray(value) ||
+        !value.every(
+          (item: unknown) =>
+            string(item) && /^[A-Za-z0-9._+-]{1,100}$/.test(item),
+        )
+      )
+        throw new Error('Fabric 版本响应无效');
+      return value as string[];
+    },
+    memory: async () => {
+      const value = await request('native_memory');
+      if (!validMemory(value)) throw new Error('内存检测响应无效');
+      return value;
+    },
     probeJava: async (path) => {
       const value = await request('native_java', { path });
       if (
@@ -184,7 +247,8 @@ export function createNativeService(
     cancelLogin: () => operation('native_login_cancel'),
     openLogin: () => operation('native_open_login'),
     signOut: () => operation('native_sign_out'),
-    install: (version, name) => operation('native_install', { version, name }),
+    install: (version, name, fabricVersion) =>
+      operation('native_install', { version, name, fabricVersion }),
     launch: (id) => operation('native_launch', { id }),
     cancel: () => operation('native_cancel'),
   };

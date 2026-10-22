@@ -1,10 +1,13 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod auth;
+mod fabric;
 mod host;
+mod memory;
 mod minecraft;
 mod model;
 mod net;
+mod packs;
 #[cfg(test)]
 mod tests;
 use host::Host;
@@ -17,6 +20,12 @@ fn native_status(host: State<'_, Arc<Host>>) -> host::Status {
     host.status()
 }
 #[tauri::command]
+async fn native_pack_preview(bytes: Vec<u8>) -> Result<packs::PackPreview> {
+    tauri::async_runtime::spawn_blocking(move || packs::preview(&bytes))
+        .await
+        .map_err(|_| "压缩包检查任务失败".to_string())?
+}
+#[tauri::command]
 async fn native_versions(host: State<'_, Arc<Host>>) -> Result<Vec<model::Version>> {
     minecraft::versions(&host, &tokio_util::sync::CancellationToken::new()).await
 }
@@ -25,12 +34,50 @@ async fn native_settings(host: State<'_, Arc<Host>>, settings: model::Settings) 
     host.save_settings(settings).await
 }
 #[tauri::command]
+fn native_memory() -> Result<memory::MemoryInfo> {
+    memory::status()
+}
+#[tauri::command]
+async fn native_memory_optimize(
+    host: State<'_, Arc<Host>>,
+    system: Option<bool>,
+) -> Result<memory::MemoryInfo> {
+    if host.status().task.status == "running" {
+        return Err("请先结束当前游戏或任务，再整理内存".into());
+    }
+    tauri::async_runtime::spawn_blocking(move || {
+        if system.unwrap_or(false) {
+            memory::optimize_system()
+        } else {
+            memory::optimize()
+        }
+    })
+    .await
+    .map_err(|_| "内存整理任务失败".to_string())?
+}
+#[tauri::command]
 async fn native_java(path: String) -> Result<minecraft::JavaInfo> {
     minecraft::probe_java(&path).await
 }
 #[tauri::command]
-fn native_install(host: State<'_, Arc<Host>>, version: String, name: String) -> Result<()> {
-    host.start_install(version, name)
+fn native_install(
+    host: State<'_, Arc<Host>>,
+    version: String,
+    name: String,
+    fabric_version: Option<String>,
+) -> Result<()> {
+    if let Some(loader) = fabric_version {
+        host.start_install_fabric(version, name, loader)
+    } else {
+        host.start_install(version, name)
+    }
+}
+#[tauri::command]
+async fn native_fabric_versions(
+    host: State<'_, Arc<Host>>,
+    version: String,
+) -> Result<Vec<String>> {
+    fabric::versions(&host, &version, &tokio_util::sync::CancellationToken::new()).await
 }
 #[tauri::command]
 fn native_launch(host: State<'_, Arc<Host>>, id: String) -> Result<()> {
@@ -82,10 +129,14 @@ fn main() {
         .manage(state)
         .invoke_handler(tauri::generate_handler![
             native_status,
+            native_pack_preview,
             native_versions,
             native_settings,
+            native_memory,
+            native_memory_optimize,
             native_java,
             native_install,
+            native_fabric_versions,
             native_launch,
             native_cancel,
             native_login_begin,

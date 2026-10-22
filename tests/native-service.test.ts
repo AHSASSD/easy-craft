@@ -1,4 +1,15 @@
+// @vitest-environment jsdom
 import { afterEach, expect, test, vi } from 'vitest';
+import { createElement } from 'react';
+import {
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from '@testing-library/react';
+import { AccountPanel } from '../src/features/AccountPanel';
+import { MemoryPanel } from '../src/features/MemoryPanel';
 import type { invoke } from '@tauri-apps/api/core';
 import {
   createNativeService,
@@ -11,6 +22,8 @@ const state = (): NativeState => ({
     clientId: '',
     javaPath: 'E:/java/bin/java.exe',
     memoryMb: 2048,
+    memoryMode: 'manual',
+    optimizeMemory: false,
     launchMode: 'microsoft',
     offlineName: '',
   },
@@ -28,7 +41,83 @@ const state = (): NativeState => ({
   loginPending: false,
   loginCode: null,
 });
-afterEach(() => vi.useRealTimers());
+afterEach(() => {
+  vi.useRealTimers();
+  cleanup();
+});
+test('system memory trimming is optional and requires its explicit confirmation', async () => {
+  const current = state();
+  const memory = {
+    totalMb: 8192,
+    availableMb: 6144,
+    recommendedMb: 4096,
+    reserveMb: 1024,
+  };
+  const call = vi.fn(async (command: string) =>
+    command === 'native_status' ? structuredClone(current) : memory,
+  );
+  const service = createNativeService(true, call as typeof invoke);
+  await service.refresh();
+  render(createElement(MemoryPanel, { service }));
+  expect(
+    (
+      screen.getByRole('checkbox', {
+        name: '启动前内存整理',
+      }) as HTMLInputElement
+    ).checked,
+  ).toBe(false);
+  fireEvent.click(screen.getByRole('button', { name: '系统内存整理' }));
+  expect(
+    call.mock.calls.some(([command]) => command === 'native_memory_optimize'),
+  ).toBe(false);
+  fireEvent.click(screen.getByRole('button', { name: '确认整理系统工作集' }));
+  await waitFor(() =>
+    expect(call).toHaveBeenCalledWith('native_memory_optimize', {
+      system: true,
+    }),
+  );
+  await screen.findByText(
+    '已请求系统整理可访问进程工作集，当前可用内存已刷新。',
+  );
+  service.stop();
+});
+test('avatar account panel saves offline identity directly without a login request', async () => {
+  const current = state();
+  const call = vi.fn(
+    async (command: string, args?: Record<string, unknown>) => {
+      if (command === 'native_settings')
+        current.settings = args!.settings as NativeState['settings'];
+      return structuredClone(current);
+    },
+  );
+  const service = createNativeService(true, call as typeof invoke);
+  await service.refresh();
+  const done = vi.fn();
+  render(createElement(AccountPanel, { service, onDone: done }));
+  fireEvent.click(screen.getByRole('button', { name: /^离线登录$/ }));
+  fireEvent.change(screen.getByRole('textbox', { name: '离线用户名' }), {
+    target: { value: 'EasyPlayer' },
+  });
+  fireEvent.click(screen.getByRole('button', { name: '使用离线账户' }));
+  await waitFor(() => expect(done).toHaveBeenCalledOnce());
+  expect(current.settings.launchMode).toBe('offline');
+  expect(current.settings.offlineName).toBe('EasyPlayer');
+  expect(
+    call.mock.calls.some(([command]) => command === 'native_login_begin'),
+  ).toBe(false);
+  service.stop();
+});
+test('memory information is validated before it reaches controls', async () => {
+  const call = vi.fn(async () => ({
+    totalMb: 8192,
+    availableMb: 9000,
+    recommendedMb: 4096,
+    reserveMb: 1024,
+  }));
+  const service = createNativeService(true, call as typeof invoke);
+  await expect(service.memory()).rejects.toThrow('响应无效');
+  service.stop();
+});
 test('offline settings require an explicit valid local identity and keep online account separate', () => {
   const current = state();
   current.settings.launchMode = 'offline';

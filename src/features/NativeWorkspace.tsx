@@ -5,14 +5,24 @@ import {
   useSyncExternalStore,
   type FormEvent,
 } from 'react';
-import { Download, Play, ShieldCheck, UserRound } from 'lucide-react';
+import { Download, Play, ShieldCheck } from 'lucide-react';
 import type { NativeService, NativeSettings } from '../core/native-contracts';
+import { PackInspector } from './PackInspector';
 
-export function NativeWorkspace({ service }: { service: NativeService }) {
+export function NativeWorkspace({
+  service,
+  onAccount,
+}: {
+  service: NativeService;
+  onAccount(): void;
+}) {
   const snapshot = useSyncExternalStore(service.subscribe, service.snapshot);
   const [draft, setDraft] = useState<NativeSettings | null>(null);
   const [versions, setVersions] = useState<string[]>([]);
   const [version, setVersion] = useState('1.21.1');
+  const [loader, setLoader] = useState('vanilla');
+  const [fabricVersion, setFabricVersion] = useState('0.16.14');
+  const [fabricVersions, setFabricVersions] = useState<string[]>([]);
   const [name, setName] = useState('我的原版世界');
   const [busy, setBusy] = useState(false);
   const [feedback, setFeedback] = useState('');
@@ -23,6 +33,8 @@ export function NativeWorkspace({ service }: { service: NativeService }) {
       clientId: '',
       javaPath: '',
       memoryMb: 2048,
+      memoryMode: 'auto',
+      optimizeMemory: false,
       launchMode: 'microsoft',
       offlineName: '',
     };
@@ -48,7 +60,9 @@ export function NativeWorkspace({ service }: { service: NativeService }) {
   function save(event: FormEvent) {
     event.preventDefault();
     void run(async () => {
-      await service.saveSettings(settings);
+      const current = service.snapshot().state?.settings;
+      if (!current) throw new Error('运行配置尚未连接');
+      await service.saveSettings({ ...current, javaPath: settings.javaPath });
       setDraft(null);
     }, '原生配置已保存。');
   }
@@ -56,7 +70,7 @@ export function NativeWorkspace({ service }: { service: NativeService }) {
     <div className="native-workspace">
       <div className="eyebrow">VANILLA / 原版旅程</div>
       <h1>原版下载与启动</h1>
-      <p>V0.2 · 此处执行真实下载和游戏进程；左侧样例实例仍使用模拟流程。</p>
+      <p>V0.3 · 此处执行真实下载和游戏进程；左侧样例实例仍使用模拟流程。</p>
       {!snapshot.available && (
         <div className="notice" role="status">
           浏览器仅提供演示。请运行桌面版使用正版登录、资源下载和游戏启动；此页面不会在浏览器中模拟这些能力。
@@ -89,48 +103,6 @@ export function NativeWorkspace({ service }: { service: NativeService }) {
           </h2>
           <form onSubmit={save}>
             <label>
-              启动账户模式
-              <select
-                aria-label="启动账户模式"
-                value={settings.launchMode}
-                onChange={(event) =>
-                  setDraft({
-                    ...settings,
-                    launchMode: event.target
-                      .value as NativeSettings['launchMode'],
-                  })
-                }
-              >
-                <option value="offline">离线账户（本地游戏）</option>
-                <option value="microsoft">Microsoft 正版账户</option>
-              </select>
-            </label>
-            {settings.launchMode === 'offline' && (
-              <>
-                <label>
-                  离线用户名
-                  <input
-                    aria-label="离线用户名"
-                    value={settings.offlineName}
-                    required
-                    minLength={3}
-                    maxLength={16}
-                    pattern="[A-Za-z0-9_]{3,16}"
-                    placeholder="例如 EasyPlayer"
-                    onChange={(event) =>
-                      setDraft({ ...settings, offlineName: event.target.value })
-                    }
-                  />
-                </label>
-                <p className="hint">
-                  无需 Client ID 或 Microsoft
-                  登录。离线身份不代表正版授权，无法进入要求正版验证的服务器或
-                  Realms；资源完整后可断网启动。用户名决定
-                  UUID，更名或切换正版身份会影响背包、进度和宠物归属。
-                </p>
-              </>
-            )}
-            <label>
               Java 可执行文件
               <input
                 aria-label="Java 可执行文件"
@@ -157,40 +129,7 @@ export function NativeWorkspace({ service }: { service: NativeService }) {
                 检测 Java
               </button>
             </div>
-            <label>
-              最大内存（MB）
-              <input
-                aria-label="最大内存"
-                type="number"
-                min={512}
-                max={16384}
-                step={256}
-                required
-                value={settings.memoryMb}
-                onChange={(event) =>
-                  setDraft({
-                    ...settings,
-                    memoryMb: Number(event.target.value),
-                  })
-                }
-              />
-            </label>
-            <label>
-              Microsoft 应用 Client ID（仅正版登录需要）
-              <input
-                aria-label="Microsoft 应用 Client ID"
-                value={settings.clientId}
-                placeholder="自有应用的 Client ID（无需 Client Secret）"
-                onChange={(event) =>
-                  setDraft({ ...settings, clientId: event.target.value.trim() })
-                }
-              />
-            </label>
-            <p className="hint">
-              Client ID 需支持个人账户、公共客户端设备授权，并获准访问 Minecraft
-              API。不要填写密码、Client Secret 或令牌。更换 ID
-              前需退出当前账户。
-            </p>
+            <p className="hint">内存分配可在「设置 → 游戏内存」调整。</p>
             <button className="primary" type="submit" disabled={locked}>
               保存原生配置
             </button>
@@ -198,72 +137,9 @@ export function NativeWorkspace({ service }: { service: NativeService }) {
           {state && <p className="data-root">数据目录：{state.dataRoot}</p>}
         </section>
         <section className="card">
-          <h2>
-            <UserRound size={17} />
-            正版账户
-          </h2>
-          {state?.account ? (
-            <>
-              <p>
-                已授权：<strong>{state.account.name}</strong>
-              </p>
-              <p className="hint">
-                刷新令牌由原生端使用 Windows DPAPI 加密，只能由当前 Windows
-                用户解密。网页不接收访问令牌。
-              </p>
-              <button
-                disabled={locked}
-                onClick={() =>
-                  void run(service.signOut, '本地加密账户凭据已删除。')
-                }
-              >
-                退出正版账户
-              </button>
-            </>
-          ) : (
-            <>
-              <p>请使用拥有 Minecraft Java 正版档案的 Microsoft 账户。</p>
-              <button
-                disabled={locked || !state?.settings.clientId}
-                onClick={() => void run(service.beginLogin)}
-              >
-                获取 Microsoft 登录设备码
-              </button>
-            </>
-          )}
-          {state?.loginPending && (
-            <div className="device-login">
-              {state.loginCode ? (
-                <>
-                  <p>
-                    在系统浏览器访问 <strong>https://microsoft.com/link</strong>{' '}
-                    并输入：
-                  </p>
-                  <code className="device-code">
-                    {state.loginCode.userCode}
-                  </code>
-                  <p>
-                    约 {Math.ceil(state.loginCode.expiresIn / 60)}{' '}
-                    分钟后过期；授权结果会自动更新，切换页面不影响登录。
-                  </p>
-                  <button
-                    disabled={busy}
-                    onClick={() => void run(service.openLogin)}
-                  >
-                    打开 Microsoft 登录网页
-                  </button>
-                </>
-              ) : (
-                <p>正在完成 Microsoft / Xbox / Minecraft 认证…</p>
-              )}
-              <button
-                disabled={busy}
-                onClick={() => void run(service.cancelLogin)}
-              >
-                取消本次登录
-              </button>
-            </div>
-          )}
+          <h2>游戏账户</h2>
+          <p>点击左下角头像，选择正版登录或离线登录。</p>
+          <button onClick={onAccount}>切换游戏账户</button>
         </section>
         <section className="card">
           <div className="section-heading">
@@ -284,8 +160,8 @@ export function NativeWorkspace({ service }: { service: NativeService }) {
             </button>
           </div>
           <p>
-            下载只来自官方资源域名，逐文件校验 SHA-1。V0.2
-            支持现代原版格式；旧式参数、继承版本与加载器暂不支持。
+            下载只来自官方资源域名，逐文件校验 SHA-1。V0.3 支持现代原版与
+            Fabric；旧式参数和其他加载器暂不支持。
           </p>
           <label className="native-label">
             正式版本
@@ -302,6 +178,52 @@ export function NativeWorkspace({ service }: { service: NativeService }) {
             </datalist>
           </label>
           <label className="native-label">
+            加载器
+            <select
+              aria-label="真实实例加载器"
+              value={loader}
+              onChange={(event) => setLoader(event.target.value)}
+            >
+              <option value="vanilla">原版</option>
+              <option value="fabric">Fabric</option>
+            </select>
+          </label>
+          {loader === 'fabric' && (
+            <>
+              <label className="native-label">
+                Fabric Loader 版本
+                <input
+                  aria-label="Fabric Loader 版本"
+                  list="fabric-versions"
+                  value={fabricVersion}
+                  onChange={(event) => setFabricVersion(event.target.value)}
+                />
+              </label>
+              <datalist id="fabric-versions">
+                {fabricVersions.map((entry) => (
+                  <option key={entry} value={entry} />
+                ))}
+              </datalist>
+              <button
+                disabled={locked}
+                onClick={() =>
+                  void run(
+                    async () =>
+                      setFabricVersions(await service.fabricVersions(version)),
+                    '已读取 Fabric 稳定版本。',
+                  )
+                }
+              >
+                刷新 Fabric 版本
+              </button>
+              <p className="hint">
+                安装预览：Minecraft {version} + Fabric {fabricVersion}
+                ，创建新的独立实例；下载来源为 Fabric 官方元数据与
+                Maven，依赖逐项校验。不自动附带 Fabric API 或其他 Mod。
+              </p>
+            </>
+          )}
+          <label className="native-label">
             实例名称
             <input
               aria-label="原版实例名称"
@@ -313,9 +235,17 @@ export function NativeWorkspace({ service }: { service: NativeService }) {
           <button
             className="primary"
             disabled={locked || !version.trim() || !name.trim()}
-            onClick={() => void run(() => service.install(version, name))}
+            onClick={() =>
+              void run(() =>
+                service.install(
+                  version,
+                  name,
+                  loader === 'fabric' ? fabricVersion : undefined,
+                ),
+              )
+            }
           >
-            下载并安装原版
+            {loader === 'fabric' ? '下载并安装 Fabric' : '下载并安装原版'}
           </button>
           <p className="hint">
             取消后保留缓存；再次点击可复用已校验文件并续传未完成资源。安装不要求先登录；可选择离线账户或
@@ -344,7 +274,10 @@ export function NativeWorkspace({ service }: { service: NativeService }) {
                     <strong>{instance.name}</strong>
                     <small>
                       Minecraft {instance.version} · Java {instance.javaMajor} ·
-                      独立目录
+                      {instance.fabricVersion
+                        ? `Fabric ${instance.fabricVersion}`
+                        : '原版'}{' '}
+                      · 独立目录
                     </small>
                   </div>
                   <button
@@ -366,6 +299,7 @@ export function NativeWorkspace({ service }: { service: NativeService }) {
           )}
         </section>
       </fieldset>
+      <PackInspector service={service} />
       {state && state.task.status !== 'idle' && (
         <section className="card" aria-label="原版任务" ref={taskRef}>
           <h2>

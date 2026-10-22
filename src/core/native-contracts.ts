@@ -3,6 +3,8 @@ export type NativeSettings = {
   clientId: string;
   javaPath: string;
   memoryMb: number;
+  memoryMode: 'auto' | 'manual';
+  optimizeMemory: boolean;
   launchMode: 'microsoft' | 'offline';
   offlineName: string;
 };
@@ -12,6 +14,8 @@ export type NativeInstance = {
   version: string;
   manifestSha1: string;
   javaMajor: number;
+  fabricVersion: string;
+  fabricSha1: string;
 };
 export type NativeTask = {
   status: 'idle' | 'running' | 'succeeded' | 'failed' | 'cancelled';
@@ -42,17 +46,37 @@ export type DeviceCode = {
   expiresIn: number;
 };
 export type JavaInfo = { major: number; is64Bit: boolean; path: string };
+export type PackPreview = {
+  kind: string;
+  name: string;
+  files: number;
+  expandedBytes: number;
+  downloads: number;
+  dependencies: string[];
+  paths: string[];
+  warnings: string[];
+};
+export type MemoryInfo = {
+  totalMb: number;
+  availableMb: number;
+  recommendedMb: number;
+  reserveMb: number;
+};
 export interface NativeService extends Observable<NativeSnapshot> {
   refresh(): Promise<void>;
   versions(): Promise<string[]>;
+  previewPack(bytes: number[]): Promise<PackPreview>;
+  fabricVersions(version: string): Promise<string[]>;
   saveSettings(settings: NativeSettings): Promise<void>;
   probeJava(path: string): Promise<JavaInfo>;
+  memory(): Promise<MemoryInfo>;
+  optimizeMemory(system?: boolean): Promise<MemoryInfo>;
   beginLogin(): Promise<DeviceCode>;
   pollLogin(): Promise<boolean>;
   cancelLogin(): Promise<void>;
   openLogin(): Promise<void>;
   signOut(): Promise<void>;
-  install(version: string, name: string): Promise<void>;
+  install(version: string, name: string, fabricVersion?: string): Promise<void>;
   launch(id: string): Promise<void>;
   cancel(): Promise<void>;
 }

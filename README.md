@@ -1,4 +1,4 @@
-# Easy Craft V0.2 · 离线账户增强
+# Easy Craft V0.3 · 第一阶段
 
 Windows x64 的 Minecraft Java 原版启动器。保留 V0.1 双栏界面与演示流程，新增受限的 Rust 原生服务；本轮先完善功能，视觉调整可以后续独立进行。
 
@@ -21,8 +21,13 @@ npm ci
 ## 功能与边界
 
 - 左侧仍为明确标注的演示实例；深浅主题、搜索/排序/收藏、重命名与资料复制、可调整栏宽和本地背景保留。
-- “下载中心”新增原版工作区：官方正式版本清单、实例安装、Java 检测、正版账户和真实游戏进程入口。
-- 下载仅允许 Mojang/Minecraft 官方资源域名，禁止重定向到其他来源；逐文件 SHA-1 校验，校验成功才提交缓存。
+- 左下角头像直接打开账户弹窗，选择正版登录或离线登录，保存后显示当前真实身份；不必在下载中心寻找账户配置。
+- “设置 → 游戏内存”显示实际物理/可用内存，支持自动分配、手动滑块与数值输入；启动时应用最大堆上限并记入日志。
+- 内存整理默认关闭：可单独整理启动器工作集，或在确认后整理当前权限可访问进程的工作集；还可选择启动前执行系统整理。不会结束进程、提权或清空内核缓存，不保证固定释放量，可能短暂卡顿。
+- “下载中心”提供官方正式版本清单、原版/Fabric 实例安装、Java 检测和真实游戏进程入口。
+- Fabric 稳定版本查询、官方元数据与 Maven 下载、依赖 SHA-1 校验、锁定配置、独立实例和实际启动。不会自动附带 Fabric API 或其他 Mod。
+- ZIP/MRPACK 内容预览：本机读取压缩目录与清单、检查越界/重复路径、大小上限、MRPACK 依赖和哈希字段格式、Modrinth CDN 来源；识别 CurseForge 清单。此阶段不批量下载或安装整合包。
+- 基础资源仅允许 Mojang/Minecraft 官方域名，Fabric 依赖仅允许其官方元数据/Maven 域名；禁止重定向到其他来源，逐文件 SHA-1 校验成功才提交缓存。
 - 限制并发、连接超时、有限重试、取消、临时文件续传和已校验缓存复用。损坏缓存会重新下载，实例清单只在安装成功后提交。
 - 每个真实实例使用独立的 game/natives 目录；不删除或覆盖用户存档。
 - 检测所选 Java 的实际主版本与 64 位架构，启动前要求匹配实例元数据。已提供工作区 Java 21 和 Java 25；选择其他可信运行时需填写其 java.exe 完整路径。
@@ -35,15 +40,16 @@ npm ci
 
 离线模式已经实际启动 Minecraft 1.21.1 的 Java 进程并观察到 OpenAL 引擎初始化，结束任务可回收进程。尚未创建世界、操作存档或验证多人游戏。Microsoft 本人授权与正版启动仍未进行端到端验收。
 
-旧式 minecraftArguments、继承版本、Forge/Fabric 等加载器、整合包解压导入、自动下载 Java 的 UI 和第三方插件均未实现。不同现代版本仍需匹配的 Java；当前真实安装集成验收目标是 1.21.1。
+旧式 minecraftArguments、任意继承版本、Forge/NeoForge/Quilt、整合包解压导入、Mod 自动依赖补齐、实例文件复制、自动下载 Java 的 UI 和第三方插件均未实现。V0.3 按文档分步推进，本次为 Fabric 与整合包检查阶段，不宣称整个 V0.3 已完成。
 
 ## 使用顺序
 
 1. 进入“下载中心”，检测 Java，并保存原生配置。Minecraft 1.21.1 使用 Java 21。
-2. 普通本地游戏：将“启动账户模式”选为“离线账户”，输入例如 `EasyPlayer` 的用户名，点击“保存原生配置”。无需 Client ID。
-3. 需要正版账户时：改选 Microsoft 模式，配置自有应用的 Client ID，获取设备码并在微软官方页面授权。应用需支持个人账户、公共客户端设备授权，并能访问 Minecraft API；不要使用其他启动器的 Client ID。授权结果自动轮询，切换页面不中断。
-4. 选择官方版本并安装。安装本身不要求先登录；成功后才显示为“已安装的真实实例”。
+2. 点击左下角头像 → “离线登录” → 输入例如 `EasyPlayer` 的用户名 → “使用离线账户”，无需 Client ID。
+3. 需要正版账户时：同一弹窗选择“正版登录”，首次在登录配置中填写自有应用的 Client ID，点击登录并在微软官方页面授权。应用需支持个人账户、公共客户端设备授权，并能访问 Minecraft API；不要使用其他启动器的 Client ID。授权结果自动轮询，关闭弹窗不中断。
+4. 选择官方游戏版本，以及原版或 Fabric 后安装；Fabric 可刷新稳定版本。安装不要求先登录；成功后才显示为“已安装的真实实例”。
 5. 已保存离线账户或已完成 Microsoft 授权、Java 匹配后，点击真实实例的“启动游戏”。启动身份显示在实例列表上方；左侧“模拟启动”始终只用于演示。
+6. 在设置中选择自动/手动内存、按需开启整理；系统整理仅在内存不足时使用，机械硬盘尤其可能卡顿。
 
 离线用户名区分大小写，决定玩家 UUID。更名或改用正版身份可能导致背包、进度、宠物归属不同；不会自动迁移存档身份。
 
@@ -77,11 +83,13 @@ npm run test:e2e
 node scripts/smoke-native.mjs
 .\scripts\native.ps1 test -Integration offline
 node scripts/smoke-native.mjs release --launch-offline
+.\scripts\native.ps1 test -Integration fabric
+node scripts/smoke-native.mjs release --launch-offline --fabric
 ```
 
 安装集成测试会在 `.native/integration` 下载真实官方 1.21.1 资源、验证缓存修复和参数构造，不启动游戏。`-Integration offline` 将 HTTP 路由到不可用的本地代理，验证完整缓存无需联网即可准备离线参数。桌面检查使用该测试目录与临时 WebView2 调试端口，验证窗口、IPC、Java、官方清单、正版模式登录限制和离线配置；加 `--launch-offline` 才会实际启动游戏，观察初始化后结束进程。测试临时修改并还原测试目录的设置，不修改用户 data 目录，不进行 Microsoft 登录。
 
-实际验证结果见 [V0.2 验证记录](docs/V0.2-VERIFICATION.md) 和 [离线账户验证](docs/OFFLINE_MODE.md)。
+本轮结果见 [V0.3 验证与边界](docs/V0.3-VERIFICATION.md)，历史记录保留于 V0.2-VERIFICATION.md 和 OFFLINE_MODE.md。
 
 ## 架构
 
@@ -97,6 +105,9 @@ src-tauri/src/host.rs    设置、实例事务、任务和游戏进程
 src-tauri/src/auth.rs    设备授权、令牌交换/刷新与 DPAPI
 src-tauri/src/net.rs     官方来源、校验下载、续传与重试
 src-tauri/src/minecraft.rs 元数据、平台规则、参数与 Java
+src-tauri/src/fabric.rs  Fabric 元数据、Maven 依赖与启动配置
+src-tauri/src/memory.rs  实际内存检测、自动分配与可选工作集整理
+src-tauri/src/packs.rs   ZIP/MRPACK 内容检查（不写入实例）
 scripts/native.ps1      工作区便携工具链入口
 tests/                  前端单元/组件与浏览器流程测试
 ```
@@ -107,7 +118,7 @@ tests/                  前端单元/组件与浏览器流程测试
 
 开发脚本将真实数据放在项目的 data 目录。直接运行桌面程序时默认使用程序旁的 data；可以通过当前进程的 EASYCRAFT_DATA_DIR 指定其他目录。原生数据与浏览器演示的 localStorage 分开，V0.1 数据不会自动转换成真实实例。
 
-- settings.json：Client ID、Java 路径、内存、启动模式、离线用户名；无令牌。旧配置默认保持 Microsoft 模式，原账户数据保留。
+- settings.json：Client ID、Java 路径、内存/分配模式/整理开关、启动模式、离线用户名；无令牌。旧配置保留手动内存值，整理默认关闭，原账户数据保留。
 - instances.json：真实安装成功的实例清单。
 - account.dpapi：当前 Windows 用户绑定的加密账户，不能当作跨机器迁移文件。
 - assets/libraries/versions：官方资源缓存；instances/{UUID}/game：独立游戏目录。

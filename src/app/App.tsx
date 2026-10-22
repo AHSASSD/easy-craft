@@ -1,3 +1,5 @@
+import { AccountPanel } from '../features/AccountPanel';
+import { MemoryPanel } from '../features/MemoryPanel';
 import {
   useEffect,
   useRef,
@@ -52,6 +54,15 @@ const statusLabel = {
 };
 
 export function App({ services }: { services: Services }) {
+  const native = useSyncExternalStore(
+    services.native.subscribe,
+    services.native.snapshot,
+  );
+  const identity =
+    native.state?.settings.launchMode === 'offline'
+      ? native.state.settings.offlineName
+      : native.state?.account?.name;
+
   const preferences = useSyncExternalStore(
     services.preferences.subscribe,
     services.preferences.snapshot,
@@ -273,14 +284,23 @@ export function App({ services }: { services: Services }) {
           <div className="sidebar-bottom">
             <button
               className="account"
+              aria-label="管理游戏账户"
               onClick={() => setDialog({ kind: 'account' })}
             >
               <span className="avatar">
                 <UserRound size={19} />
               </span>
               <span>
-                <strong>访客玩家</strong>
-                <small>虚构账户 · 未登录</small>
+                <strong>{identity || '选择游戏账户'}</strong>
+                <small>
+                  {native.available
+                    ? native.state?.settings.launchMode === 'offline'
+                      ? '离线账户'
+                      : native.state?.account
+                        ? 'Microsoft 正版账户'
+                        : '点击登录或使用离线账户'
+                    : '浏览器预览 · 账户不可用'}
+                </small>
               </span>
               <ChevronRight size={16} />
             </button>
@@ -493,11 +513,11 @@ export function App({ services }: { services: Services }) {
                         左侧样例为演示实例；真实原版下载与启动请进入下载中心。
                       </p>
                     </div>
-                    <span>V0.2</span>
+                    <span>V0.3</span>
                   </div>
                 </section>
                 <footer>
-                  少一点繁琐，多一点探索。<span>Easy Craft · V0.2</span>
+                  少一点繁琐，多一点探索。<span>Easy Craft · V0.3</span>
                 </footer>
               </>
             )}
@@ -578,12 +598,16 @@ export function App({ services }: { services: Services }) {
               </>
             )}
             {page === '下载中心' && (
-              <NativeWorkspace service={services.native} />
+              <NativeWorkspace
+                service={services.native}
+                onAccount={() => setDialog({ kind: 'account' })}
+              />
             )}
             {page === '设置' && (
               <>
                 <div className="eyebrow">PREFERENCES / 随心而设</div>
                 <h1>让它更像你</h1>
+                <MemoryPanel service={services.native} />
                 <section className="card">
                   <h2>外观</h2>
                   <div className="theme-grid">
@@ -703,23 +727,10 @@ export function App({ services }: { services: Services }) {
           onClose={() => setDialog(null)}
         >
           {dialog.kind === 'account' && (
-            <div className="dialog-body">
-              <UserRound size={36} />
-              <h3>访客玩家</h3>
-              <p>这是虚构账户占位信息，尚未登录。</p>
-              <p>
-                左侧为演示账户入口。Microsoft
-                正版账户请在下载中心管理，密码仅在微软官方网页输入。
-              </p>
-              <button
-                onClick={() => {
-                  setDialog(null);
-                  setPage('下载中心');
-                }}
-              >
-                管理正版账户
-              </button>
-            </div>
+            <AccountPanel
+              service={services.native}
+              onDone={() => setDialog(null)}
+            />
           )}
           {(dialog.kind === 'add' || dialog.kind === 'rename') && (
             <form onSubmit={saveInstance}>
