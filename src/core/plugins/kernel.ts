@@ -89,11 +89,11 @@ export function validProgress(data: unknown): data is LaunchProgress {
   if (!data || typeof data !== 'object') return false;
   const item = data as Record<string, unknown>;
   return (
-    ['validate', 'prepare', 'arguments', 'finish'].includes(
-      String(item.step),
-    ) &&
+    typeof item.step === 'string' &&
+    ['validate', 'prepare', 'arguments', 'finish'].includes(item.step) &&
+    typeof item.status === 'string' &&
     ['pending', 'running', 'done', 'failed', 'cancelled'].includes(
-      String(item.status),
+      item.status,
     ) &&
     typeof item.message === 'string' &&
     (item.percent === undefined ||
@@ -333,6 +333,7 @@ export class PluginManager {
         throw new AggregateError(
           [error, cleanupError],
           '插件加载失败且清理发生错误',
+          { cause: cleanupError },
         );
       }
       throw error;

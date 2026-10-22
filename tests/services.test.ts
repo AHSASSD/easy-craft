@@ -52,4 +52,10 @@ test('invalid persisted data is preserved and mutation boundary rejects invalid 
   );
   expect(() => instances.add(' ', 'oops', 'vanilla')).toThrow('数据格式无效');
   expect(validPreferences({})).toBe(false);
+  expect(
+    validPreferences({ ...createPreferences().snapshot(), theme: ['slate'] }),
+  ).toBe(false);
+  expect(
+    validInstances([{ ...instances.snapshot()[0], status: ['ready'] }]),
+  ).toBe(false);
 });

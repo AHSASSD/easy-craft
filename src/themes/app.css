@@ -1,6 +1,119 @@
 * {
   box-sizing: border-box;
 }
+.diagnostics {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-size: 11px;
+  line-height: 1.7;
+}
+.launch-panel {
+  margin-top: 0;
+}
+.launch-panel .section-heading {
+  margin-top: 0;
+}
+.launch-panel > p {
+  font-size: 11px;
+}
+.launch-steps {
+  list-style: none;
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  padding: 0;
+  gap: 8px;
+  margin: 20px 0;
+}
+.launch-steps li {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 10px;
+}
+.launch-steps li > span {
+  width: 22px;
+  height: 22px;
+  display: grid;
+  place-items: center;
+  border: 1px solid var(--border);
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+.launch-steps li[data-state='done'],
+.launch-steps li[data-state='running'] {
+  color: var(--accent);
+}
+.launch-steps li[data-state='failed'] {
+  color: #df876d;
+}
+progress {
+  width: 100%;
+  height: 7px;
+  accent-color: var(--accent);
+}
+.task-status {
+  font-size: 11px;
+  line-height: 1.8;
+  margin: 14px 0;
+}
+details {
+  font-size: 11px;
+  color: var(--muted);
+}
+summary {
+  cursor: pointer;
+}
+.task-logs {
+  padding-left: 15px;
+  font-size: 10px;
+  line-height: 1.9;
+}
+.task-logs span {
+  margin-right: 8px;
+  color: var(--accent);
+}
+.drop-overlay {
+  position: fixed;
+  inset: 45px 0 0;
+  background: #102e25ef;
+  border: 3px dashed #8cd5a5;
+  color: #eef7ef;
+  z-index: 20;
+  pointer-events: none;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+}
+.import-list {
+  list-style: none;
+  padding: 0;
+  max-height: 45vh;
+  overflow-y: auto;
+}
+.import-list li {
+  display: flex;
+  gap: 12px;
+  padding: 12px 0;
+  border-bottom: 1px solid var(--border);
+}
+.import-list strong {
+  display: block;
+  overflow-wrap: anywhere;
+  font-size: 12px;
+}
+.import-list small {
+  display: block;
+  color: var(--muted);
+  margin-top: 5px;
+}
+@media (max-width: 850px) {
+  .launch-steps {
+    grid-template-columns: 1fr 1fr;
+    row-gap: 14px;
+  }
+}
 :root {
   font-family: Inter, 'Segoe UI', 'Microsoft YaHei', sans-serif;
   font-synthesis: none;

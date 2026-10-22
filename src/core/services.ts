@@ -53,14 +53,14 @@ export function isRecord(value: unknown): value is Record<string, unknown> {
 export function validPreferences(value: unknown): value is Preferences {
   return (
     isRecord(value) &&
-    ['slate', 'grass'].includes(String(value.theme)) &&
+    (value.theme === 'slate' || value.theme === 'grass') &&
     typeof value.sidebarWidth === 'number' &&
     value.sidebarWidth >= 240 &&
     value.sidebarWidth <= 420 &&
     typeof value.selectedId === 'string' &&
     typeof value.doubleClickLaunch === 'boolean' &&
     typeof value.developerEnabled === 'boolean' &&
-    ['name', 'recent'].includes(String(value.sort))
+    (value.sort === 'name' || value.sort === 'recent')
   );
 }
 export function validInstances(value: unknown): value is GameInstance[] {
@@ -83,9 +83,8 @@ export function validInstances(value: unknown): value is GameInstance[] {
         /^\d+\.\d+(\.\d+)?$/.test(item.minecraftVersion) &&
         loaders.some((loader) => loader === item.loader) &&
         typeof item.favorite === 'boolean' &&
-        ['ready', 'missing', 'installing', 'broken'].includes(
-          String(item.status),
-        ) &&
+        typeof item.status === 'string' &&
+        ['ready', 'missing', 'installing', 'broken'].includes(item.status) &&
         (item.lastPlayedAt === undefined ||
           (typeof item.lastPlayedAt === 'string' &&
             Number.isFinite(Date.parse(item.lastPlayedAt)))) &&

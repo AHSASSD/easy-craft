@@ -31,6 +31,9 @@ import { kernel, warnings } from './bootstrap';
 import type { Services } from '../core/contracts';
 import { Modal } from '../components/Modal';
 import { Titlebar } from '../components/Titlebar';
+import { createLaunchTask } from '../core/tasks/launch-task';
+import { LaunchPanel } from '../features/LaunchPanel';
+import { ImportPreview } from '../features/ImportPreview';
 import '../themes/app.css';
 
 type Page = '首页' | '实例详情' | '下载中心' | '设置' | '开发者工具';
@@ -62,7 +65,13 @@ export function App({ services }: { services: Services }) {
   const [notice, setNotice] = useState(warnings.at(-1) ?? '');
   const [collapsed, setCollapsed] = useState(false);
   const [background, setBackground] = useState('');
+  const [launchTask] = useState(() => createLaunchTask(services.launch));
+  const task = useSyncExternalStore(launchTask.subscribe, launchTask.snapshot);
   const dragging = useRef<number | null>(null);
+  const contentRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (contentRef.current) contentRef.current.scrollTop = 0;
+  }, [page]);
   const selected =
     instances.find((instance) => instance.id === preferences.selectedId) ??
     instances[0];
@@ -98,15 +107,7 @@ export function App({ services }: { services: Services }) {
     },
     [background],
   );
-  useEffect(() => {
-    const prevent = (event: DragEvent) => event.preventDefault();
-    window.addEventListener('dragover', prevent);
-    window.addEventListener('drop', prevent);
-    return () => {
-      window.removeEventListener('dragover', prevent);
-      window.removeEventListener('drop', prevent);
-    };
-  }, []);
+  useEffect(() => () => launchTask.dispose(), [launchTask]);
   function select(instance: GameInstance) {
     void services.instances
       .select(instance.id)
@@ -114,8 +115,9 @@ export function App({ services }: { services: Services }) {
         report(error instanceof Error ? error.message : '选择失败'),
       );
   }
-  function launch() {
-    report('模拟启动工作流将在 Milestone D 接入；当前不会启动游戏。');
+  function launch(instance = selected) {
+    if (contentRef.current) contentRef.current.scrollTop = 0;
+    if (instance) void launchTask.start(instance);
   }
   function saveInstance(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -211,7 +213,7 @@ export function App({ services }: { services: Services }) {
                     aria-pressed={selected?.id === instance.id}
                     onClick={() => select(instance)}
                     onDoubleClick={() => {
-                      if (preferences.doubleClickLaunch) launch();
+                      if (preferences.doubleClickLaunch) launch(instance);
                     }}
                   >
                     <span className="instance-icon">
@@ -285,9 +287,14 @@ export function App({ services }: { services: Services }) {
               <span>当前实例</span>
               <strong>{selected?.name ?? '尚未选择'}</strong>
             </div>
-            <button className="launch" disabled={!selected} onClick={launch}>
+            <button
+              className="launch"
+              disabled={!selected || task.status === 'running'}
+              onClick={() => launch()}
+            >
               <Play size={18} fill="currentColor" />
-              模拟启动<span>DEMO</span>
+              {task.status === 'running' ? '模拟启动中…' : '模拟启动'}
+              <span>DEMO</span>
             </button>
             <small className="safe-note">仅演示流程，不会运行 Minecraft</small>
           </div>
@@ -369,7 +376,18 @@ export function App({ services }: { services: Services }) {
               </button>
             ))}
           </nav>
-          <div className="page-content">
+          <div className="page-content" ref={contentRef}>
+            <LaunchPanel
+              task={task}
+              cancel={launchTask.cancel}
+              retry={() =>
+                launch(
+                  instances.find(
+                    (instance) => instance.id === task.instanceId,
+                  ) ?? selected,
+                )
+              }
+            />
             {notice && (
               <div className="notice" role="status">
                 <span>{notice}</span>
@@ -677,6 +695,7 @@ export function App({ services }: { services: Services }) {
           </div>
         </main>
       </div>
+      <ImportPreview />
       {dialog && (
         <Modal
           title={

@@ -1,6 +1,7 @@
 import type { Plugin } from '../../core/plugins/kernel';
 import type { StorageAdapter } from '../../core/persistence/store';
 import { createInstances, createThemes } from '../../core/services';
+import { createDemoLaunch } from '../../core/tasks/demo-launch';
 export function officialPlugins(
   storage?: StorageAdapter,
   warn?: (message: string) => void,
@@ -13,19 +14,15 @@ export function officialPlugins(
         apiVersion: '1.0.0',
         requires: { instances: '1.0.0' },
         provides: { launch: '1.0.0' },
-        permissions: ['services'],
+        permissions: ['services', 'events'],
       },
       setup(ctx) {
-        ctx.getService('instances');
-        ctx.registerService('launch', {
-          simulateLaunch: () => ({
-            [Symbol.asyncIterator]: () => ({
-              next: async () => {
-                throw new Error('模拟工作流将在 Milestone D 接入');
-              },
-            }),
-          }),
-        });
+        const launch = createDemoLaunch(
+          ctx.getService('instances'),
+          (progress) => ctx.emitEvent('launch:progress', progress),
+        );
+        ctx.registerService('launch', launch);
+        ctx.addDisposable(launch.stop);
       },
     },
     {
