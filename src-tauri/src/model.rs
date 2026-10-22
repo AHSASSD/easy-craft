@@ -6,12 +6,23 @@ use std::{
 };
 
 pub type Result<T> = std::result::Result<T, String>;
+#[derive(Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum LaunchMode {
+    #[default]
+    Microsoft,
+    Offline,
+}
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Settings {
     pub client_id: String,
     pub java_path: String,
     pub memory_mb: u32,
+    #[serde(default)]
+    pub launch_mode: LaunchMode,
+    #[serde(default)]
+    pub offline_name: String,
 }
 impl Default for Settings {
     fn default() -> Self {
@@ -20,6 +31,8 @@ impl Default for Settings {
             client_id: String::new(),
             java_path: java,
             memory_mb: 2048,
+            launch_mode: LaunchMode::Microsoft,
+            offline_name: String::new(),
         }
     }
 }
@@ -37,6 +50,40 @@ pub struct Profile {
     pub id: String,
     pub name: String,
     pub xuid: String,
+}
+pub fn valid_offline_name(name: &str) -> bool {
+    (3..=16).contains(&name.len()) && name.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'_')
+}
+pub fn offline_profile(name: &str) -> Result<Profile> {
+    use windows_sys::Win32::Security::Cryptography::{CryptHashCertificate2, BCRYPT_MD5_ALGORITHM};
+    if !valid_offline_name(name) {
+        return Err("离线用户名须为 3–16 位英文字母、数字或下划线".into());
+    }
+    // MD5 only reproduces Java's nameUUIDFromBytes identity; it is not an authentication proof.
+    let input = format!("OfflinePlayer:{name}");
+    let mut hash = [0u8; 16];
+    let mut size = hash.len() as u32;
+    let ok = unsafe {
+        CryptHashCertificate2(
+            BCRYPT_MD5_ALGORITHM,
+            0,
+            std::ptr::null(),
+            input.as_ptr(),
+            input.len() as u32,
+            hash.as_mut_ptr(),
+            &mut size,
+        )
+    };
+    if ok == 0 || size != 16 {
+        return Err("无法生成离线玩家 UUID".into());
+    }
+    hash[6] = (hash[6] & 0x0f) | 0x30;
+    hash[8] = (hash[8] & 0x3f) | 0x80;
+    Ok(Profile {
+        id: uuid::Uuid::from_bytes(hash).simple().to_string(),
+        name: name.into(),
+        xuid: String::new(),
+    })
 }
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Version {

@@ -1,6 +1,6 @@
 param(
     [ValidateSet('check', 'test', 'build', 'dev', 'bundle', 'fmt', 'clippy')][string]$Action = 'dev',
-    [ValidateSet('none', 'metadata', 'install')][string]$Integration = 'none'
+    [ValidateSet('none', 'metadata', 'install', 'offline')][string]$Integration = 'none'
 )
 $ErrorActionPreference = 'Stop'
 $projectRoot = Split-Path $PSScriptRoot -Parent
@@ -42,7 +42,7 @@ try {
         'test' {
             if ($Integration -eq 'none') { & $cargo test --manifest-path src-tauri/Cargo.toml --locked }
             else {
-                $filter = if ($Integration -eq 'metadata') { 'official_metadata_and_java_integration' } else { 'official_install_integration' }
+                $filter = switch ($Integration) { 'metadata' { 'official_metadata_and_java_integration' } 'install' { 'official_install_integration' } 'offline' { 'cached_offline_preparation_integration' } }
                 & $cargo test --manifest-path src-tauri/Cargo.toml --locked $filter -- --ignored --nocapture
             }
         }

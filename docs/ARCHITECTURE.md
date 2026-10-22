@@ -1,5 +1,11 @@
 # 架构
 
+## V0.2 离线账户增强
+
+NativeSettings 增加 launchMode / offlineName；Rust 使用强类型枚举和旧配置默认值。NativeWorkspace 保存模式，实例列表显示实际使用的已保存身份，NativeService 验证新字段。Host 的启动路径在显式离线模式使用本地 Profile，不请求账户认证；Microsoft 模式仍使用 access 刷新/校验，二者不自动回退。游戏资源校验、参数数组、任务取消和进程回收复用同一实现。离线身份不进入正版 account 字段，不改动加密账户文件。
+
+Host 将规范化后的 Win32 路径转换为 Java 可读的普通绝对路径；缓存完整时资源准备无需网络。具体测试与限制见 [离线账户验证](OFFLINE_MODE.md)。
+
 ## V0.2 当前增量
 
 保留下文 V0.1 分层与演示实现，增加 official.vanilla → NativeService → 受限 Tauri 命令 → Rust Host。UI 通过 src/core/native-contracts.ts 的 DTO 与服务访问真实功能，不持有令牌、不直接操纵磁盘/进程。

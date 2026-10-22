@@ -3,6 +3,8 @@ export type NativeSettings = {
   clientId: string;
   javaPath: string;
   memoryMb: number;
+  launchMode: 'microsoft' | 'offline';
+  offlineName: string;
 };
 export type NativeInstance = {
   id: string;

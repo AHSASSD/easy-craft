@@ -19,7 +19,13 @@ export function NativeWorkspace({ service }: { service: NativeService }) {
   const [error, setError] = useState('');
   const state = snapshot.state;
   const settings = draft ??
-    state?.settings ?? { clientId: '', javaPath: '', memoryMb: 2048 };
+    state?.settings ?? {
+      clientId: '',
+      javaPath: '',
+      memoryMb: 2048,
+      launchMode: 'microsoft',
+      offlineName: '',
+    };
   const active = state?.task.status === 'running';
   const taskRef = useRef<HTMLElement>(null);
   useEffect(() => {
@@ -83,6 +89,48 @@ export function NativeWorkspace({ service }: { service: NativeService }) {
           </h2>
           <form onSubmit={save}>
             <label>
+              启动账户模式
+              <select
+                aria-label="启动账户模式"
+                value={settings.launchMode}
+                onChange={(event) =>
+                  setDraft({
+                    ...settings,
+                    launchMode: event.target
+                      .value as NativeSettings['launchMode'],
+                  })
+                }
+              >
+                <option value="offline">离线账户（本地游戏）</option>
+                <option value="microsoft">Microsoft 正版账户</option>
+              </select>
+            </label>
+            {settings.launchMode === 'offline' && (
+              <>
+                <label>
+                  离线用户名
+                  <input
+                    aria-label="离线用户名"
+                    value={settings.offlineName}
+                    required
+                    minLength={3}
+                    maxLength={16}
+                    pattern="[A-Za-z0-9_]{3,16}"
+                    placeholder="例如 EasyPlayer"
+                    onChange={(event) =>
+                      setDraft({ ...settings, offlineName: event.target.value })
+                    }
+                  />
+                </label>
+                <p className="hint">
+                  无需 Client ID 或 Microsoft
+                  登录。离线身份不代表正版授权，无法进入要求正版验证的服务器或
+                  Realms；资源完整后可断网启动。用户名决定
+                  UUID，更名或切换正版身份会影响背包、进度和宠物归属。
+                </p>
+              </>
+            )}
+            <label>
               Java 可执行文件
               <input
                 aria-label="Java 可执行文件"
@@ -128,7 +176,7 @@ export function NativeWorkspace({ service }: { service: NativeService }) {
               />
             </label>
             <label>
-              Microsoft 应用 Client ID
+              Microsoft 应用 Client ID（仅正版登录需要）
               <input
                 aria-label="Microsoft 应用 Client ID"
                 value={settings.clientId}
@@ -270,12 +318,21 @@ export function NativeWorkspace({ service }: { service: NativeService }) {
             下载并安装原版
           </button>
           <p className="hint">
-            取消后保留缓存；再次点击可复用已校验文件并续传未完成资源。安装不要求先登录，真正启动需要正版授权和匹配版本的
-            64 位 Java。
+            取消后保留缓存；再次点击可复用已校验文件并续传未完成资源。安装不要求先登录；可选择离线账户或
+            Microsoft 账户启动，均需匹配版本的 64 位 Java。
           </p>
         </section>
         <section className="card">
           <h2>已安装的真实实例</h2>
+          <p>
+            当前启动身份：
+            {state?.settings.launchMode === 'offline'
+              ? `离线 · ${state.settings.offlineName}`
+              : state?.account
+                ? `Microsoft · ${state.account.name}`
+                : 'Microsoft · 尚未登录'}
+            （以已保存配置为准）
+          </p>
           <p className="hint">
             此版本关闭启动器时会结束由它启动的游戏，请先保存并退出世界。
           </p>
@@ -291,7 +348,11 @@ export function NativeWorkspace({ service }: { service: NativeService }) {
                     </small>
                   </div>
                   <button
-                    disabled={locked || !state.account}
+                    disabled={
+                      locked ||
+                      (state.settings.launchMode === 'microsoft' &&
+                        !state.account)
+                    }
                     onClick={() => void run(() => service.launch(instance.id))}
                   >
                     <Play size={15} />

@@ -1,4 +1,4 @@
-# Easy Craft V0.2
+# Easy Craft V0.2 · 离线账户增强
 
 Windows x64 的 Minecraft Java 原版启动器。保留 V0.1 双栏界面与演示流程，新增受限的 Rust 原生服务；本轮先完善功能，视觉调整可以后续独立进行。
 
@@ -27,22 +27,25 @@ npm ci
 - 每个真实实例使用独立的 game/natives 目录；不删除或覆盖用户存档。
 - 检测所选 Java 的实际主版本与 64 位架构，启动前要求匹配实例元数据。已提供工作区 Java 21 和 Java 25；选择其他可信运行时需填写其 java.exe 完整路径。
 - Microsoft 设备码授权 → Xbox → XSTS → Minecraft 令牌、所有权与档案校验；启动时可刷新账户。
+- 离线账户：无需 Microsoft 登录或 Client ID，自定义 3–16 位英文、数字或下划线用户名，按 Java 离线规则生成稳定 UUID。资源完整时启动器无需联网；首次下载、缺失或损坏资源的修复仍需网络。离线身份不代表正版授权，不能通过正版服务器或 Realms 的验证。
 - 刷新令牌只由 Rust 使用 Windows DPAPI 加密保存在 account.dpapi；前端不接收令牌，普通设置不存密码或 Client Secret。
 - 通过参数数组启动真实 Java 进程，展示退出状态与最近 200 条脱敏日志；可以结束游戏进程。
 
 **关闭启动器会结束由它启动的游戏，请先保存并退出世界。**
 
-V0.2 的真实登录与游戏启动代码已经接入，但尚未使用本人正版账户进行端到端验收，不能据此称“已成功进入 Minecraft”。
+离线模式已经实际启动 Minecraft 1.21.1 的 Java 进程并观察到 OpenAL 引擎初始化，结束任务可回收进程。尚未创建世界、操作存档或验证多人游戏。Microsoft 本人授权与正版启动仍未进行端到端验收。
 
 旧式 minecraftArguments、继承版本、Forge/Fabric 等加载器、整合包解压导入、自动下载 Java 的 UI 和第三方插件均未实现。不同现代版本仍需匹配的 Java；当前真实安装集成验收目标是 1.21.1。
 
 ## 使用顺序
 
 1. 进入“下载中心”，检测 Java，并保存原生配置。Minecraft 1.21.1 使用 Java 21。
-2. 配置 Easy Craft 自有 Microsoft 应用的 Client ID。该应用需支持个人账户、公共客户端设备授权，并能访问 Minecraft API；不要使用其他启动器的 Client ID。
-3. 获取设备码，在系统浏览器的微软官方页面完成授权。登录结果由应用级服务自动轮询，切换页面不中断。
+2. 普通本地游戏：将“启动账户模式”选为“离线账户”，输入例如 `EasyPlayer` 的用户名，点击“保存原生配置”。无需 Client ID。
+3. 需要正版账户时：改选 Microsoft 模式，配置自有应用的 Client ID，获取设备码并在微软官方页面授权。应用需支持个人账户、公共客户端设备授权，并能访问 Minecraft API；不要使用其他启动器的 Client ID。授权结果自动轮询，切换页面不中断。
 4. 选择官方版本并安装。安装本身不要求先登录；成功后才显示为“已安装的真实实例”。
-5. 授权成功、Java 匹配后，点击该真实实例的“启动游戏”。左侧“模拟启动”始终只用于演示。
+5. 已保存离线账户或已完成 Microsoft 授权、Java 匹配后，点击真实实例的“启动游戏”。启动身份显示在实例列表上方；左侧“模拟启动”始终只用于演示。
+
+离线用户名区分大小写，决定玩家 UUID。更名或改用正版身份可能导致背包、进度、宠物归属不同；不会自动迁移存档身份。
 
 Client ID 不是 Client Secret。请不要向聊天或配置文件发送密码、令牌或 Client Secret。注册指引见 [Microsoft 官方设备码流程](https://learn.microsoft.com/entra/identity-platform/v2-oauth2-device-code)。
 
@@ -72,11 +75,13 @@ npm run test:e2e
 .\scripts\native.ps1 test -Integration metadata
 .\scripts\native.ps1 test -Integration install
 node scripts/smoke-native.mjs
+.\scripts\native.ps1 test -Integration offline
+node scripts/smoke-native.mjs release --launch-offline
 ```
 
-安装集成测试会在 `.native/integration` 下载真实官方 1.21.1 资源、验证缓存修复和官方元数据参数构造，**不会启动游戏**。桌面冒烟检查使用该测试目录与临时 WebView2 调试端口，只验证本应用的实际窗口、IPC、Java、官方清单和未授权启动拒绝，不进行 Microsoft 登录。
+安装集成测试会在 `.native/integration` 下载真实官方 1.21.1 资源、验证缓存修复和参数构造，不启动游戏。`-Integration offline` 将 HTTP 路由到不可用的本地代理，验证完整缓存无需联网即可准备离线参数。桌面检查使用该测试目录与临时 WebView2 调试端口，验证窗口、IPC、Java、官方清单、正版模式登录限制和离线配置；加 `--launch-offline` 才会实际启动游戏，观察初始化后结束进程。测试临时修改并还原测试目录的设置，不修改用户 data 目录，不进行 Microsoft 登录。
 
-实际验证结果见 [V0.2 验证记录](docs/V0.2-VERIFICATION.md)。
+实际验证结果见 [V0.2 验证记录](docs/V0.2-VERIFICATION.md) 和 [离线账户验证](docs/OFFLINE_MODE.md)。
 
 ## 架构
 
@@ -102,7 +107,7 @@ tests/                  前端单元/组件与浏览器流程测试
 
 开发脚本将真实数据放在项目的 data 目录。直接运行桌面程序时默认使用程序旁的 data；可以通过当前进程的 EASYCRAFT_DATA_DIR 指定其他目录。原生数据与浏览器演示的 localStorage 分开，V0.1 数据不会自动转换成真实实例。
 
-- settings.json：Client ID、Java 路径、内存；无令牌。
+- settings.json：Client ID、Java 路径、内存、启动模式、离线用户名；无令牌。旧配置默认保持 Microsoft 模式，原账户数据保留。
 - instances.json：真实安装成功的实例清单。
 - account.dpapi：当前 Windows 用户绑定的加密账户，不能当作跨机器迁移文件。
 - assets/libraries/versions：官方资源缓存；instances/{UUID}/game：独立游戏目录。

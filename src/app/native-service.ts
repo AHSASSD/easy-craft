@@ -26,6 +26,11 @@ export function validNativeState(value: unknown): value is NativeState {
     integer(settings.memoryMb) &&
     settings.memoryMb >= 512 &&
     settings.memoryMb <= 16384 &&
+    ['microsoft', 'offline'].includes(settings.launchMode as string) &&
+    string(settings.offlineName) &&
+    (settings.offlineName === '' ||
+      /^[A-Za-z0-9_]{3,16}$/.test(settings.offlineName)) &&
+    (settings.launchMode !== 'offline' || settings.offlineName !== '') &&
     (account === null ||
       (isRecord(account) &&
         string(account.id) &&

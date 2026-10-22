@@ -41,6 +41,8 @@ child.stderr.on('data', (chunk) => {
   failure = (failure + chunk).slice(-64000);
 });
 let browser;
+let originalSettings;
+let page;
 try {
   for (let attempt = 0; attempt < 40; attempt++) {
     if (child.exitCode !== null) throw new Error(`Desktop exited: ${failure}`);
@@ -55,7 +57,7 @@ try {
   }
   assert(browser, `WebView2 debugging endpoint unavailable: ${failure}`);
   const context = browser.contexts()[0];
-  let page = context.pages()[0];
+  page = context.pages()[0];
   if (!page) page = await context.waitForEvent('page');
   const errors = [];
   page.on('pageerror', (error) => errors.push(error.message));
@@ -74,6 +76,13 @@ try {
     .getByRole('button', { name: '下载中心', exact: true })
     .click();
   await page.getByRole('heading', { name: '原版下载与启动' }).waitFor();
+  originalSettings = await page.evaluate(async () => {
+    const state = await window.__TAURI_INTERNALS__.invoke('native_status');
+    await window.__TAURI_INTERNALS__.invoke('native_settings', {
+      settings: { ...state.settings, launchMode: 'microsoft' },
+    });
+    return state.settings;
+  });
   const java = page.getByRole('textbox', { name: 'Java 可执行文件' });
   await page.waitForFunction(() =>
     document
@@ -106,6 +115,63 @@ try {
     denial.includes('登录'),
     'Host must reject an unsigned launch even if UI guard is bypassed',
   );
+  await page
+    .getByRole('combobox', { name: '启动账户模式', exact: true })
+    .selectOption('offline');
+  await page
+    .getByRole('textbox', { name: '离线用户名', exact: true })
+    .fill('EC_OfflineTest');
+  await page.getByRole('button', { name: '保存原生配置', exact: true }).click();
+  await page.getByText('原生配置已保存。', { exact: true }).waitFor();
+  await page
+    .getByText('当前启动身份：离线 · EC_OfflineTest（以已保存配置为准）', {
+      exact: true,
+    })
+    .waitFor();
+  assert(
+    await page
+      .getByRole('button', { name: '启动游戏', exact: true })
+      .first()
+      .isEnabled(),
+  );
+  if (process.argv.includes('--launch-offline')) {
+    await page
+      .getByRole('button', { name: '启动游戏', exact: true })
+      .first()
+      .click();
+    let rendered = false;
+    for (let attempt = 0; attempt < 120; attempt++) {
+      const state = await page.evaluate(() =>
+        window.__TAURI_INTERNALS__.invoke('native_status'),
+      );
+      assert.notEqual(
+        state.task.status,
+        'failed',
+        `${state.task.message}\n${state.task.logs.join('\n')}`,
+      );
+      if (
+        state.task.pid &&
+        state.task.logs.some((line) => line.includes('OpenAL initialized'))
+      ) {
+        rendered = true;
+        console.log(
+          `PASS: actual offline Minecraft process ${state.task.pid} initialized audio; no Microsoft account or Client ID used.`,
+        );
+        break;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 1000));
+    }
+    assert(
+      rendered,
+      'Actual game did not reach engine initialization within 120 seconds',
+    );
+    await page
+      .getByRole('button', { name: '结束游戏进程', exact: true })
+      .click();
+    await page
+      .getByRole('heading', { name: '原版任务已取消', exact: true })
+      .waitFor();
+  }
   assert.deepEqual(errors, []);
   await mkdir(path.join(project, 'output/playwright'), { recursive: true });
   await page.locator('.page-content').evaluate((element) => {
@@ -114,6 +180,12 @@ try {
   await page.screenshot({
     path: path.join(project, 'output/playwright/native-desktop.png'),
   });
+  await page.evaluate(
+    (settings) =>
+      window.__TAURI_INTERNALS__.invoke('native_settings', { settings }),
+    originalSettings,
+  );
+  originalSettings = undefined;
   const closing = new Promise((resolve) => child.once('exit', resolve));
   await page
     .getByRole('button', { name: '关闭窗口', exact: true })
@@ -126,9 +198,27 @@ try {
     ),
   ]);
   console.log(
-    'PASS: real Tauri/WebView2 renders, IPC Java detection and official version list work, unsigned launch is rejected, native close exits.',
+    'PASS: real Tauri/WebView2, Java, official versions, Microsoft login guard, offline configuration and native close.',
   );
 } finally {
+  if (originalSettings && page) {
+    await page
+      .evaluate(async (settings) => {
+        await window.__TAURI_INTERNALS__.invoke('native_cancel');
+        for (let attempt = 0; attempt < 50; attempt++) {
+          const state =
+            await window.__TAURI_INTERNALS__.invoke('native_status');
+          if (state.task.status !== 'running') {
+            await window.__TAURI_INTERNALS__.invoke('native_settings', {
+              settings,
+            });
+            return;
+          }
+          await new Promise((resolve) => setTimeout(resolve, 100));
+        }
+      }, originalSettings)
+      .catch(() => {});
+  }
   await browser?.close().catch(() => {});
   if (child.exitCode === null) child.kill();
 }

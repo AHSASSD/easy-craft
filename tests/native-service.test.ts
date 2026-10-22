@@ -7,7 +7,13 @@ import {
 import type { NativeState } from '../src/core/native-contracts';
 const state = (): NativeState => ({
   dataRoot: 'E:/EasyCraft/data',
-  settings: { clientId: '', javaPath: 'E:/java/bin/java.exe', memoryMb: 2048 },
+  settings: {
+    clientId: '',
+    javaPath: 'E:/java/bin/java.exe',
+    memoryMb: 2048,
+    launchMode: 'microsoft',
+    offlineName: '',
+  },
   account: null,
   instances: [],
   task: {
@@ -23,6 +29,22 @@ const state = (): NativeState => ({
   loginCode: null,
 });
 afterEach(() => vi.useRealTimers());
+test('offline settings require an explicit valid local identity and keep online account separate', () => {
+  const current = state();
+  current.settings.launchMode = 'offline';
+  expect(validNativeState(current)).toBe(false);
+  current.settings.offlineName = 'EasyPlayer';
+  expect(validNativeState(current)).toBe(true);
+  expect(current.account).toBeNull();
+  current.settings.offlineName = '../x';
+  expect(validNativeState(current)).toBe(false);
+  expect(
+    validNativeState({
+      ...state(),
+      settings: { ...state().settings, launchMode: 'unknown' },
+    }),
+  ).toBe(false);
+});
 test('browser cannot invoke native or pretend a real operation succeeded', async () => {
   const call = vi.fn();
   const service = createNativeService(false, call as typeof invoke);

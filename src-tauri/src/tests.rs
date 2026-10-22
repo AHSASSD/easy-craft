@@ -167,6 +167,94 @@ fn native_host_rejects_unsigned_launch_and_invalid_settings() {
     assert!(host.start_install("../x".into(), "name".into()).is_err());
 }
 #[test]
+fn offline_identity_matches_java_and_validates_names() {
+    let profile = model::offline_profile("Notch").unwrap();
+    assert_eq!(profile.id, "b50ad385829d3141a2167e7d7539ba7f");
+    assert_eq!(profile.name, "Notch");
+    assert!(profile.xuid.is_empty());
+    assert_ne!(model::offline_profile("notch").unwrap().id, profile.id);
+    for name in [
+        "",
+        "ab",
+        "12345678901234567",
+        "玩家",
+        "a b",
+        "../x",
+        "--user",
+    ] {
+        assert!(model::offline_profile(name).is_err(), "{name}");
+    }
+}
+#[tokio::test]
+async fn offline_settings_migrate_persist_and_do_not_claim_online_account() {
+    let root = root();
+    model::save_json(
+        &root,
+        "settings.json",
+        &json!({"clientId":"", "javaPath":"", "memoryMb":2048}),
+    )
+    .unwrap();
+    let host = host::Host::new(root.clone()).unwrap();
+    assert!(!host.root.to_string_lossy().starts_with("\\\\?\\"));
+    assert!(host.status().settings.launch_mode == model::LaunchMode::Microsoft);
+    let mut settings = host.status().settings;
+    settings.launch_mode = model::LaunchMode::Offline;
+    assert!(host.save_settings(settings.clone()).await.is_err());
+    settings.offline_name = "EasyPlayer".into();
+    host.save_settings(settings).await.unwrap();
+    assert!(host.status().account.is_none());
+    assert!(host
+        .start_launch("missing".into())
+        .unwrap_err()
+        .contains("本地实例不存在"));
+    drop(host);
+    let reopened = host::Host::new(root).unwrap();
+    assert!(reopened.status().settings.launch_mode == model::LaunchMode::Offline);
+    assert_eq!(reopened.status().settings.offline_name, "EasyPlayer");
+    assert!(reopened.status().account.is_none());
+}
+#[test]
+fn offline_and_microsoft_arguments_stay_distinct() {
+    let host = host::Host::new(root()).unwrap();
+    let prepared = minecraft::Prepared {
+        metadata: json!({"mainClass":"net.minecraft.client.main.Main", "assetIndex":{"id":"17"},
+            "arguments":{"jvm":["-cp","${classpath}"], "game":["--username","${auth_player_name}","--uuid","${auth_uuid}","--accessToken","${auth_access_token}","--userType","${user_type}","--clientId","${clientid}","--xuid","${auth_xuid}"]}}),
+        classpath: vec![host.root.join("client.jar")],
+        native_archives: vec![],
+        java_major: 21,
+    };
+    let instance = model::Instance {
+        id: "test".into(),
+        name: "test".into(),
+        version: "1.21.1".into(),
+        manifest_sha1: "0".repeat(40),
+        java_major: 21,
+    };
+    let mut settings = host.status().settings;
+    settings.launch_mode = model::LaunchMode::Offline;
+    settings.client_id = "online-app-must-not-leak".into();
+    let profile = model::offline_profile("Notch").unwrap();
+    let args =
+        minecraft::command_args(&host, &instance, &prepared, &profile, "0", &settings).unwrap();
+    assert!(args.windows(2).any(|pair| pair == ["--userType", "legacy"]));
+    assert!(args.windows(2).any(|pair| pair == ["--accessToken", "0"]));
+    assert!(!args.contains(&settings.client_id));
+    assert!(!args.contains(&"--demo".into()));
+    settings.launch_mode = model::LaunchMode::Microsoft;
+    let args = minecraft::command_args(
+        &host,
+        &instance,
+        &prepared,
+        &profile,
+        "test-online-token",
+        &settings,
+    )
+    .unwrap();
+    assert!(args.windows(2).any(|pair| pair == ["--userType", "msa"]));
+    assert!(args.contains(&settings.client_id));
+    assert!(args.contains(&"test-online-token".into()));
+}
+#[test]
 fn data_directory_is_exclusive_and_unlocks_on_shutdown() {
     let root = root();
     let first = host::Host::new(root.clone()).unwrap();
@@ -282,4 +370,46 @@ async fn official_install_integration() {
     assert!(args.iter().all(|arg| !arg.contains("${")));
     assert_eq!(prepared.java_major, 21);
     println!("Official metadata arguments validated; corrupted cache and full-size partial repaired. No game process launched.");
+}
+
+#[tokio::test]
+#[ignore = "Requires installed .native/integration assets; rejects all network through a closed local proxy"]
+async fn cached_offline_preparation_integration() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .join(".native/integration");
+    let mut host = host::Host::new(root).unwrap();
+    std::sync::Arc::get_mut(&mut host).unwrap().client = reqwest::Client::builder()
+        .proxy(reqwest::Proxy::all("http://127.0.0.1:1").unwrap())
+        .timeout(std::time::Duration::from_millis(100))
+        .build()
+        .unwrap();
+    let instance = host
+        .status()
+        .instances
+        .into_iter()
+        .find(|item| item.version == "1.21.1")
+        .expect("Run install integration first");
+    let entry = model::Version {
+        id: instance.version.clone(),
+        sha1: instance.manifest_sha1.clone(),
+        url: format!(
+            "https://piston-meta.mojang.com/v1/packages/{}/{}.json",
+            instance.manifest_sha1, instance.version
+        ),
+        kind: "release".into(),
+    };
+    let prepared = minecraft::prepare(&host, &entry, &tokio_util::sync::CancellationToken::new())
+        .await
+        .unwrap();
+    assert_eq!(prepared.java_major, 21);
+    let mut settings = host.status().settings;
+    settings.launch_mode = model::LaunchMode::Offline;
+    settings.offline_name = "EC_OfflineTest".into();
+    let profile = model::offline_profile(&settings.offline_name).unwrap();
+    let args =
+        minecraft::command_args(&host, &instance, &prepared, &profile, "0", &settings).unwrap();
+    assert!(args.iter().all(|arg| !arg.contains("${")));
+    println!("PASS: cached 1.21.1 resources verified and offline arguments prepared with all HTTP routed to an unavailable local proxy; no account needed.");
 }

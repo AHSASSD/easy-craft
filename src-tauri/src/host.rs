@@ -50,6 +50,13 @@ impl Host {
         let root = root
             .canonicalize()
             .map_err(|_| "无法定位 Easy Craft 数据目录")?;
+        // Java's classpath cannot open Win32 verbatim paths, even when the file exists.
+        let path = root.to_str().ok_or("数据目录包含无效 Unicode")?;
+        let root = if let Some(unc) = path.strip_prefix("\\\\?\\UNC\\") {
+            PathBuf::from(format!("\\\\{unc}"))
+        } else {
+            PathBuf::from(path.strip_prefix("\\\\?\\").unwrap_or(path))
+        };
         let lock = fs::OpenOptions::new()
             .read(true)
             .write(true)
@@ -62,6 +69,10 @@ impl Host {
         let settings: Settings = model::load_json(&root, "settings.json")?;
         if !(512..=16384).contains(&settings.memory_mb)
             || (!settings.client_id.is_empty() && !auth::valid_client(&settings.client_id))
+            || (!settings.offline_name.is_empty()
+                && !model::valid_offline_name(&settings.offline_name))
+            || (settings.launch_mode == model::LaunchMode::Offline
+                && settings.offline_name.is_empty())
         {
             return Err("运行配置值无效，原文件保留".into());
         }
@@ -121,6 +132,12 @@ impl Host {
         }
     }
     pub async fn save_settings(&self, settings: Settings) -> Result<()> {
+        if (!settings.offline_name.is_empty() && !model::valid_offline_name(&settings.offline_name))
+            || (settings.launch_mode == model::LaunchMode::Offline
+                && settings.offline_name.is_empty())
+        {
+            return Err("离线用户名须为 3–16 位英文字母、数字或下划线".into());
+        }
         if !(512..=16384).contains(&settings.memory_mb)
             || (!settings.client_id.is_empty() && !auth::valid_client(&settings.client_id))
         {
@@ -239,7 +256,9 @@ impl Host {
     pub fn start_launch(self: &Arc<Self>, id: String) -> Result<()> {
         let instance = {
             let inner = self.inner.lock().map_err(|_| "宿主状态不可用")?;
-            if inner.account.is_none() {
+            if inner.settings.launch_mode == model::LaunchMode::Offline {
+                model::offline_profile(&inner.settings.offline_name)?;
+            } else if inner.account.is_none() {
                 return Err("请先登录拥有 Minecraft Java 档案的 Microsoft 账户".into());
             }
             inner
@@ -266,7 +285,11 @@ impl Host {
                 instance.java_major, java.major
             ));
         }
-        let (profile, token) = self.access(cancel).await?;
+        let (profile, token) = if settings.launch_mode == model::LaunchMode::Offline {
+            (model::offline_profile(&settings.offline_name)?, "0".into())
+        } else {
+            self.access(cancel).await?
+        };
         let entry = Version {
             id: instance.version.clone(),
             sha1: instance.manifest_sha1.clone(),
@@ -309,7 +332,11 @@ impl Host {
             1,
             1,
         );
-        let secrets = vec![token];
+        let secrets = if settings.launch_mode == model::LaunchMode::Offline {
+            vec![]
+        } else {
+            vec![token]
+        };
         let stdout = child.stdout.take().ok_or("无法读取游戏输出")?;
         let stderr = child.stderr.take().ok_or("无法读取游戏错误输出")?;
         let read_output = async {

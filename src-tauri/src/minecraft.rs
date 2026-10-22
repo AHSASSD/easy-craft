@@ -296,8 +296,23 @@ pub fn command_args(
         ("auth_uuid", profile.id.clone()),
         ("auth_access_token", token.into()),
         ("auth_xuid", profile.xuid.clone()),
-        ("clientid", settings.client_id.clone()),
-        ("user_type", "msa".into()),
+        (
+            "clientid",
+            if settings.launch_mode == crate::model::LaunchMode::Offline {
+                String::new()
+            } else {
+                settings.client_id.clone()
+            },
+        ),
+        (
+            "user_type",
+            if settings.launch_mode == crate::model::LaunchMode::Offline {
+                "legacy"
+            } else {
+                "msa"
+            }
+            .into(),
+        ),
         ("user_properties", "{}".into()),
         ("version_name", instance.version.clone()),
         ("version_type", "release".into()),
