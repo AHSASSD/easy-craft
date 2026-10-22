@@ -1,11 +1,27 @@
 [package]
 name = "easy-craft"
-version = "0.1.0"
-description = "Easy Craft Phase 0 demo"
+version = "0.2.0"
+description = "Easy Craft vanilla launcher"
 edition = "2021"
+
+[features]
+custom-protocol = ["tauri/custom-protocol"]
 
 [build-dependencies]
 tauri-build = { version = "=2.7.4", features = [] }
 
 [dependencies]
 tauri = { version = "=2.12.5", features = [] }
+serde = { version = "=1.0.229", features = ["derive"] }
+serde_json = "=1.0.154"
+reqwest = { version = "=0.12.28", features = ["json", "stream"] }
+tokio = { version = "=1.54.1", features = ["process", "io-util", "time", "sync", "fs", "macros"] }
+tokio-util = { version = "=0.7.20", features = ["rt"] }
+futures-util = "=0.3.34"
+uuid = { version = "=1.28.0", features = ["v4"] }
+sha1 = "=0.11.0"
+zip = { version = "=9.0.5", default-features = false, features = ["deflate"] }
+windows-sys = { version = "=0.61.2", features = ["Win32_Foundation", "Win32_Security_Cryptography", "Win32_System_Memory", "Win32_UI_WindowsAndMessaging"] }
+
+[profile.dev]
+debug = 0

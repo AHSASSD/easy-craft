@@ -1,0 +1,285 @@
+use crate::{auth, host, minecraft, model, net};
+use serde_json::json;
+use std::{collections::HashMap, fs, path::PathBuf};
+fn root() -> PathBuf {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .join(".native/tests")
+        .join(uuid::Uuid::new_v4().to_string());
+    fs::create_dir_all(&root).unwrap();
+    root
+}
+#[test]
+fn rejects_path_traversal_and_windows_devices() {
+    let root = root();
+    for path in [
+        "../saves",
+        "a/../../b",
+        "C:/x",
+        "a\\..\\x",
+        "/absolute",
+        "NUL.txt",
+        "lib/CON",
+        "hello.",
+        "hello ",
+        "a:stream",
+    ] {
+        assert!(model::safe_path(&root, path).is_err(), "{path}");
+    }
+    assert!(model::safe_path(&root, "assets/objects/ab/abcdef").is_ok());
+}
+#[test]
+fn official_origin_allowlist_rejects_redirect_targets_and_credentials() {
+    for url in [
+        "http://libraries.minecraft.net/x",
+        "https://libraries.minecraft.net.evil.test/x",
+        "https://user@libraries.minecraft.net/x",
+        "https://libraries.minecraft.net:444/x",
+        "file:///C:/x",
+    ] {
+        assert!(net::trusted_url(url).is_err());
+    }
+    assert!(net::trusted_url("https://resources.download.minecraft.net/ab/hash").is_ok());
+}
+#[test]
+fn sha1_requires_content_match() {
+    let file = root().join("blob");
+    fs::write(&file, b"hello").unwrap();
+    assert!(net::matches(&file, "aaf4c61ddcc5e8a2dabede0f3b482cd9aea9434d", Some(5)).unwrap());
+    assert!(!net::matches(&file, "aaf4c61ddcc5e8a2dabede0f3b482cd9aea9434d", Some(6)).unwrap());
+    assert!(!net::matches(&file, "0000000000000000000000000000000000000000", Some(5)).unwrap());
+}
+#[test]
+fn resumes_only_at_confirmed_range_and_restarts_on_200() {
+    assert_eq!(net::resume_offset(206, 5, Some("bytes 5-9/10")).unwrap(), 5);
+    assert_eq!(net::resume_offset(200, 5, None).unwrap(), 0);
+    assert!(net::resume_offset(206, 5, Some("bytes 0-9/10")).is_err());
+    assert!(net::resume_offset(416, 5, None).is_err());
+}
+#[test]
+fn platform_rules_respect_order_os_arch_and_features() {
+    assert!(minecraft::allowed(None).unwrap());
+    assert!(!minecraft::allowed(Some(&json!([]))).unwrap());
+    assert!(minecraft::allowed(Some(
+        &json!([{"action":"allow"},{"action":"disallow","os":{"name":"osx"}}])
+    ))
+    .unwrap());
+    assert!(!minecraft::allowed(Some(&json!([{"action":"allow","os":{"arch":"x86"}}]))).unwrap());
+    assert!(!minecraft::allowed(Some(
+        &json!([{"action":"allow","features":{"is_demo_user":true}}])
+    ))
+    .unwrap());
+}
+#[test]
+fn command_arguments_preserve_spaces_and_never_use_shell_splitting() {
+    let values = json!(["--gameDir","${game_directory}",{"rules":[{"action":"allow","os":{"name":"windows"}}],"value":["-cp","${classpath}"]}]);
+    let vars = HashMap::from([
+        ("game_directory", "E:\\MC worlds\\我的世界".to_string()),
+        ("classpath", "A B.jar;C.jar".to_string()),
+    ]);
+    assert_eq!(
+        minecraft::arguments(&values, &vars).unwrap(),
+        [
+            "--gameDir",
+            "E:\\MC worlds\\我的世界",
+            "-cp",
+            "A B.jar;C.jar"
+        ]
+    );
+    assert!(minecraft::arguments(&json!(["${unknown}"]), &vars).is_err());
+}
+#[test]
+fn java_detection_parses_real_property_format() {
+    assert_eq!(
+        minecraft::parse_java(
+            "    java.specification.version = 21\n    sun.arch.data.model = 64\n"
+        )
+        .unwrap(),
+        (21, true)
+    );
+    assert_eq!(
+        minecraft::parse_java("java.specification.version = 1.8\nsun.arch.data.model = 32")
+            .unwrap(),
+        (8, false)
+    );
+    assert!(minecraft::parse_java("broken java").is_err());
+}
+#[test]
+fn windows_dpapi_roundtrip_and_tamper_detection() {
+    let original = b"test-refresh-token-not-a-real-credential";
+    let encrypted = auth::protect(original, true).unwrap();
+    assert_ne!(encrypted, original);
+    assert_eq!(auth::protect(&encrypted, false).unwrap(), original);
+    assert!(auth::protect(b"invalid blob", false).is_err());
+}
+#[test]
+fn native_archive_extracts_only_dlls_into_its_owned_directory() {
+    use std::io::Write;
+    let root = root();
+    let archive = root.join("native.jar");
+    let mut writer = zip::ZipWriter::new(fs::File::create(&archive).unwrap());
+    let options = zip::write::SimpleFileOptions::default();
+    writer.start_file("windows/test.dll", options).unwrap();
+    writer.write_all(b"test-native-bytes").unwrap();
+    writer.start_file("META-INF/LICENSE", options).unwrap();
+    writer.write_all(b"test-license").unwrap();
+    writer.finish().unwrap();
+    minecraft::extract_natives(&[archive], &root, "instances/test/natives").unwrap();
+    assert_eq!(
+        fs::read(root.join("instances/test/natives/windows/test.dll")).unwrap(),
+        b"test-native-bytes"
+    );
+    assert!(!root
+        .join("instances/test/natives/META-INF/LICENSE")
+        .exists());
+}
+#[test]
+fn credentials_are_redacted_from_bounded_logs() {
+    let line = model::redact(
+        "access super-secret and super-secret",
+        &["super-secret".to_string()],
+    );
+    assert!(!line.contains("super-secret"));
+    assert!(line.contains("[REDACTED]"));
+    assert_eq!(model::redact(&"x".repeat(10000), &[]).len(), 8192);
+}
+#[test]
+fn atomic_save_preserves_invalid_source_on_read_failure() {
+    let root = root();
+    fs::write(root.join("settings.json"), b"{broken").unwrap();
+    assert!(model::load_json::<model::Settings>(&root, "settings.json").is_err());
+    assert_eq!(fs::read(root.join("settings.json")).unwrap(), b"{broken");
+    model::save_json(&root, "test.json", &json!({"n":1})).unwrap();
+    model::save_json(&root, "test.json", &json!({"n":2})).unwrap();
+    assert!(fs::read_to_string(root.join("test.json"))
+        .unwrap()
+        .contains('2'));
+}
+#[test]
+fn native_host_rejects_unsigned_launch_and_invalid_settings() {
+    let host = host::Host::new(root()).unwrap();
+    assert!(host
+        .start_launch("anything".into())
+        .unwrap_err()
+        .contains("登录"));
+    assert!(!auth::valid_client("not-a-client-id"));
+    assert!(host.start_install("../x".into(), "name".into()).is_err());
+}
+#[test]
+fn data_directory_is_exclusive_and_unlocks_on_shutdown() {
+    let root = root();
+    let first = host::Host::new(root.clone()).unwrap();
+    assert!(host::Host::new(root.clone())
+        .err()
+        .unwrap()
+        .contains("另一个 Easy Craft"));
+    drop(first);
+    assert!(host::Host::new(root).is_ok());
+}
+#[tokio::test]
+#[ignore = "Requires public Mojang network and workspace Java"]
+async fn official_metadata_and_java_integration() {
+    let host = host::Host::new(root()).unwrap();
+    let versions = minecraft::versions(&host, &tokio_util::sync::CancellationToken::new())
+        .await
+        .unwrap();
+    assert!(versions.iter().any(|entry| entry.id == "1.21.1"));
+    let java = minecraft::probe_java(&std::env::var("EASYCRAFT_JAVA").unwrap())
+        .await
+        .unwrap();
+    assert_eq!(java.major, 21);
+    assert!(java.is_64_bit);
+    println!(
+        "Official manifest {} releases; Java {} x64",
+        versions.len(),
+        java.major
+    );
+}
+#[tokio::test]
+#[ignore = "Downloads official 1.21.1 assets into .native/integration; never launches Minecraft"]
+async fn official_install_integration() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .join(".native/integration");
+    let host = host::Host::new(root).unwrap();
+    host.start_install("1.21.1".into(), "原版集成验证".into())
+        .unwrap();
+    let start = std::time::Instant::now();
+    let mut last = String::new();
+    loop {
+        let status = host.status();
+        let label = format!(
+            "{} {}/{}",
+            status.task.phase, status.task.completed, status.task.total
+        );
+        if label != last {
+            println!("{label}");
+            last = label;
+        }
+        if status.task.status != "running" {
+            assert_eq!(status.task.status, "succeeded", "{}", status.task.message);
+            assert!(status
+                .instances
+                .iter()
+                .any(|entry| entry.version == "1.21.1"));
+            break;
+        }
+        assert!(start.elapsed().as_secs() < 900, "Install timed out");
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    }
+    let instance = host.status().instances.last().unwrap().clone();
+    let entry = model::Version {
+        id: instance.version.clone(),
+        sha1: instance.manifest_sha1.clone(),
+        url: format!(
+            "https://piston-meta.mojang.com/v1/packages/{}/{}.json",
+            instance.manifest_sha1, instance.version
+        ),
+        kind: "release".into(),
+    };
+    let index: serde_json::Value =
+        serde_json::from_slice(&fs::read(host.root.join("assets/indexes/17.json")).unwrap())
+            .unwrap();
+    let asset = index["objects"]
+        .as_object()
+        .unwrap()
+        .values()
+        .find(|value| {
+            value["size"]
+                .as_u64()
+                .is_some_and(|size| size > 0 && size < 1024)
+        })
+        .unwrap();
+    let hash = asset["hash"].as_str().unwrap();
+    let size = asset["size"].as_u64().unwrap();
+    let relative = format!("assets/objects/{}/{hash}", &hash[..2]);
+    let file = model::safe_path(&host.root, &relative).unwrap();
+    let partial = model::safe_path(&host.root, &format!("{relative}.part")).unwrap();
+    fs::write(&file, vec![b'X'; size as usize]).unwrap();
+    fs::write(&partial, vec![b'X'; size as usize]).unwrap();
+    let prepared = minecraft::prepare(&host, &entry, &tokio_util::sync::CancellationToken::new())
+        .await
+        .unwrap();
+    assert!(net::matches(&file, hash, Some(size)).unwrap());
+    let settings = host.status().settings;
+    let profile = model::Profile {
+        id: "0".repeat(32),
+        name: "IntegrationFixture".into(),
+        xuid: String::new(),
+    };
+    let args = minecraft::command_args(
+        &host,
+        &instance,
+        &prepared,
+        &profile,
+        "fixture-token-not-used",
+        &settings,
+    )
+    .unwrap();
+    assert!(args.contains(&"net.minecraft.client.main.Main".into()));
+    assert!(args.iter().all(|arg| !arg.contains("${")));
+    assert_eq!(prepared.java_major, 21);
+    println!("Official metadata arguments validated; corrupted cache and full-size partial repaired. No game process launched.");
+}

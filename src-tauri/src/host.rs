@@ -1,0 +1,535 @@
+use crate::{
+    auth::{self, DeviceCode, Pending, Session, Stored},
+    minecraft,
+    model::{self, Instance, Profile, Result, Settings, Task, Version},
+    net,
+};
+use serde::Serialize;
+use std::{
+    fs,
+    path::PathBuf,
+    sync::{Arc, Mutex},
+};
+use tokio::{
+    io::{AsyncRead, AsyncReadExt},
+    process::Command,
+};
+use tokio_util::sync::CancellationToken;
+
+struct Inner {
+    settings: Settings,
+    instances: Vec<Instance>,
+    account: Option<Stored>,
+    session: Option<Session>,
+    task: Task,
+    cancel: Option<CancellationToken>,
+    login: Option<Pending>,
+    auth_cancel: Option<CancellationToken>,
+    auth_busy: bool,
+}
+pub struct Host {
+    _lock: fs::File,
+    pub root: PathBuf,
+    pub client: reqwest::Client,
+    inner: Mutex<Inner>,
+}
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Status {
+    pub data_root: String,
+    pub settings: Settings,
+    pub account: Option<Profile>,
+    pub instances: Vec<Instance>,
+    pub task: Task,
+    pub login_pending: bool,
+    pub login_code: Option<DeviceCode>,
+}
+impl Host {
+    pub fn new(root: PathBuf) -> Result<Arc<Self>> {
+        fs::create_dir_all(&root).map_err(|_| "无法创建 Easy Craft 数据目录")?;
+        let root = root
+            .canonicalize()
+            .map_err(|_| "无法定位 Easy Craft 数据目录")?;
+        let lock = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(model::safe_path(&root, "launcher.lock")?)
+            .map_err(|_| "无法锁定启动器数据目录")?;
+        lock.try_lock()
+            .map_err(|_| "此数据目录已由另一个 Easy Craft 使用，请先关闭已有窗口")?;
+        let settings: Settings = model::load_json(&root, "settings.json")?;
+        if !(512..=16384).contains(&settings.memory_mb)
+            || (!settings.client_id.is_empty() && !auth::valid_client(&settings.client_id))
+        {
+            return Err("运行配置值无效，原文件保留".into());
+        }
+        let instances: Vec<Instance> = model::load_json(&root, "instances.json")?;
+        if instances.iter().any(|item| {
+            !model::valid_id(&item.id)
+                || !model::valid_id(&item.version)
+                || !model::valid_sha1(&item.manifest_sha1)
+        }) {
+            return Err("实例清单无效，原文件保留".into());
+        }
+        let account = auth::load(&root)?;
+        Ok(Arc::new(Self {
+            _lock: lock,
+            root,
+            client: net::client()?,
+            inner: Mutex::new(Inner {
+                settings,
+                instances,
+                account,
+                session: None,
+                task: Task::default(),
+                cancel: None,
+                login: None,
+                auth_cancel: None,
+                auth_busy: false,
+            }),
+        }))
+    }
+    pub fn status(&self) -> Status {
+        let inner = self.inner.lock().expect("host state poisoned");
+        Status {
+            data_root: self.root.to_string_lossy().into_owned(),
+            settings: inner.settings.clone(),
+            account: inner
+                .account
+                .as_ref()
+                .map(|account| account.profile.clone()),
+            instances: inner.instances.clone(),
+            task: inner.task.clone(),
+            login_pending: inner.auth_cancel.is_some(),
+            login_code: inner.login.as_ref().map(Pending::public),
+        }
+    }
+    pub fn progress(&self, phase: &str, message: &str, completed: usize, total: usize) {
+        let mut inner = self.inner.lock().expect("host state poisoned");
+        inner.task.phase = phase.into();
+        inner.task.message = message.into();
+        inner.task.completed = completed;
+        inner.task.total = total;
+    }
+    fn log(&self, line: &str, secrets: &[String]) {
+        let mut inner = self.inner.lock().expect("host state poisoned");
+        inner.task.logs.push(model::redact(line, secrets));
+        if inner.task.logs.len() > 200 {
+            inner.task.logs.remove(0);
+        }
+    }
+    pub async fn save_settings(&self, settings: Settings) -> Result<()> {
+        if !(512..=16384).contains(&settings.memory_mb)
+            || (!settings.client_id.is_empty() && !auth::valid_client(&settings.client_id))
+        {
+            return Err("Client ID 或内存设置无效（512–16384 MB）".into());
+        }
+        if !settings.java_path.is_empty() {
+            let java = minecraft::probe_java(&settings.java_path).await?;
+            if !java.is_64_bit {
+                return Err("请选择 64 位 Java".into());
+            }
+        }
+        let mut inner = self.inner.lock().map_err(|_| "宿主状态不可用")?;
+        if inner.cancel.is_some() || inner.auth_cancel.is_some() {
+            return Err("请先结束当前任务或登录，再修改配置".into());
+        }
+        if inner
+            .account
+            .as_ref()
+            .is_some_and(|account| account.client_id != settings.client_id)
+        {
+            return Err("更换 Client ID 前请先退出当前账户".into());
+        }
+        model::save_json(&self.root, "settings.json", &settings)?;
+        inner.settings = settings;
+        Ok(())
+    }
+    fn begin_task(&self, message: &str) -> Result<CancellationToken> {
+        let mut inner = self.inner.lock().map_err(|_| "宿主状态不可用")?;
+        if inner.cancel.is_some() || inner.auth_cancel.is_some() {
+            return Err("已有任务或登录进行中，请先结束".into());
+        }
+        let cancel = CancellationToken::new();
+        inner.cancel = Some(cancel.clone());
+        inner.task = Task {
+            status: "running".into(),
+            message: message.into(),
+            ..Task::default()
+        };
+        Ok(cancel)
+    }
+    fn finish(&self, result: Result<()>, cancel: &CancellationToken) {
+        let mut inner = self.inner.lock().expect("host state poisoned");
+        inner.task.status = if cancel.is_cancelled() {
+            "cancelled"
+        } else if result.is_ok() {
+            "succeeded"
+        } else {
+            "failed"
+        }
+        .into();
+        inner.task.message = if cancel.is_cancelled() {
+            "任务已取消，已校验缓存保留".into()
+        } else {
+            result.err().unwrap_or_else(|| "任务完成".into())
+        };
+        inner.task.pid = None;
+        inner.cancel = None;
+    }
+    pub fn cancel(&self) {
+        if let Some(cancel) = &self.inner.lock().expect("host state poisoned").cancel {
+            cancel.cancel();
+        }
+    }
+    pub fn start_install(self: &Arc<Self>, version: String, name: String) -> Result<()> {
+        if !model::valid_id(&version) || name.trim().is_empty() || name.chars().count() > 60 {
+            return Err("实例名称或版本无效".into());
+        }
+        let cancel = self.begin_task("读取官方版本清单")?;
+        let host = self.clone();
+        tauri::async_runtime::spawn(async move {
+            let result = host.install(version, name, &cancel).await;
+            host.finish(result, &cancel);
+        });
+        Ok(())
+    }
+    async fn install(
+        &self,
+        version: String,
+        name: String,
+        cancel: &CancellationToken,
+    ) -> Result<()> {
+        let entry = minecraft::versions(self, cancel)
+            .await?
+            .into_iter()
+            .find(|entry| entry.id == version)
+            .ok_or("官方清单中找不到该正式版本")?;
+        let prepared = minecraft::prepare(self, &entry, cancel).await?;
+        if cancel.is_cancelled() {
+            return Err("操作已取消".into());
+        }
+        let instance = Instance {
+            id: uuid::Uuid::new_v4().to_string(),
+            name: name.trim().into(),
+            version,
+            manifest_sha1: entry.sha1,
+            java_major: prepared.java_major,
+        };
+        minecraft::extract_natives(
+            &prepared.native_archives,
+            &self.root,
+            &format!("instances/{}/natives", instance.id),
+        )?;
+        let game = model::safe_path(&self.root, &format!("instances/{}/game", instance.id))?;
+        fs::create_dir_all(game).map_err(|_| "无法创建隔离实例目录")?;
+        if cancel.is_cancelled() {
+            return Err("操作已取消".into());
+        }
+        let mut inner = self.inner.lock().map_err(|_| "宿主状态不可用")?;
+        let mut instances = inner.instances.clone();
+        instances.push(instance);
+        model::save_json(&self.root, "instances.json", &instances)?;
+        inner.instances = instances;
+        inner.task.phase = "installed".into();
+        Ok(())
+    }
+    pub fn start_launch(self: &Arc<Self>, id: String) -> Result<()> {
+        let instance = {
+            let inner = self.inner.lock().map_err(|_| "宿主状态不可用")?;
+            if inner.account.is_none() {
+                return Err("请先登录拥有 Minecraft Java 档案的 Microsoft 账户".into());
+            }
+            inner
+                .instances
+                .iter()
+                .find(|instance| instance.id == id)
+                .cloned()
+                .ok_or("本地实例不存在")?
+        };
+        let cancel = self.begin_task("检查账户、Java 与已安装资源")?;
+        let host = self.clone();
+        tauri::async_runtime::spawn(async move {
+            let result = host.launch(instance, &cancel).await;
+            host.finish(result, &cancel);
+        });
+        Ok(())
+    }
+    async fn launch(&self, instance: Instance, cancel: &CancellationToken) -> Result<()> {
+        let settings = self.status().settings;
+        let java = minecraft::probe_java(&settings.java_path).await?;
+        if !java.is_64_bit || java.major != instance.java_major {
+            return Err(format!(
+                "该实例需要 64 位 Java {}，当前为 Java {}",
+                instance.java_major, java.major
+            ));
+        }
+        let (profile, token) = self.access(cancel).await?;
+        let entry = Version {
+            id: instance.version.clone(),
+            sha1: instance.manifest_sha1.clone(),
+            url: format!(
+                "https://piston-meta.mojang.com/v1/packages/{}/{}.json",
+                instance.manifest_sha1, instance.version
+            ),
+            kind: "release".into(),
+        };
+        let prepared = minecraft::prepare(self, &entry, cancel).await?;
+        minecraft::extract_natives(
+            &prepared.native_archives,
+            &self.root,
+            &format!("instances/{}/natives", instance.id),
+        )?;
+        let args =
+            minecraft::command_args(self, &instance, &prepared, &profile, &token, &settings)?;
+        if cancel.is_cancelled() {
+            return Err("操作已取消".into());
+        }
+        let mut child = Command::new(&settings.java_path)
+            .args(&args)
+            .current_dir(model::safe_path(
+                &self.root,
+                &format!("instances/{}/game", instance.id),
+            )?)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .kill_on_drop(true)
+            .creation_flags(0x08000000)
+            .spawn()
+            .map_err(|_| "无法创建 Minecraft Java 进程")?;
+        {
+            let mut inner = self.inner.lock().map_err(|_| "宿主状态不可用")?;
+            inner.task.pid = child.id();
+        }
+        self.progress(
+            "game",
+            "Minecraft 进程运行中；结束任务或关闭启动器将结束此进程",
+            1,
+            1,
+        );
+        let secrets = vec![token];
+        let stdout = child.stdout.take().ok_or("无法读取游戏输出")?;
+        let stderr = child.stderr.take().ok_or("无法读取游戏错误输出")?;
+        let read_output = async {
+            tokio::join!(
+                capture(self, stdout, cancel, &secrets),
+                capture(self, stderr, cancel, &secrets)
+            );
+        };
+        let wait = async {
+            tokio::select! { result = child.wait() => result.map_err(|_| "无法获取游戏退出状态"), _ = cancel.cancelled() => { child.kill().await.map_err(|_| "无法结束游戏进程")?; child.wait().await.map_err(|_| "无法回收游戏进程") } }
+        };
+        let (_, result) = tokio::join!(read_output, wait);
+        let status = result?;
+        if !status.success() && !cancel.is_cancelled() {
+            return Err(format!(
+                "游戏已退出，退出码 {}；请查看脱敏日志",
+                status
+                    .code()
+                    .map(|code| code.to_string())
+                    .unwrap_or_else(|| "unknown".into())
+            ));
+        }
+        Ok(())
+    }
+    async fn access(&self, cancel: &CancellationToken) -> Result<(Profile, String)> {
+        let stored = {
+            let inner = self.inner.lock().map_err(|_| "宿主状态不可用")?;
+            if let Some(session) = &inner.session {
+                if session.valid() {
+                    return Ok((session.stored.profile.clone(), session.access_token.clone()));
+                }
+            }
+            inner.account.clone().ok_or("请先登录 Microsoft 账户")?
+        };
+        self.progress("account", "刷新并验证正版账户", 0, 1);
+        let session = auth::refresh(&self.client, &stored, cancel).await?;
+        auth::save(&self.root, &session.stored)?;
+        let result = (session.stored.profile.clone(), session.access_token.clone());
+        let mut inner = self.inner.lock().map_err(|_| "宿主状态不可用")?;
+        inner.account = Some(session.stored.clone());
+        inner.session = Some(session);
+        Ok(result)
+    }
+    pub async fn begin_login(&self) -> Result<DeviceCode> {
+        let (client_id, cancel) = {
+            let mut inner = self.inner.lock().map_err(|_| "宿主状态不可用")?;
+            if inner.cancel.is_some() || inner.auth_cancel.is_some() || inner.auth_busy {
+                return Err("请先结束当前任务或登录".into());
+            }
+            let cancel = CancellationToken::new();
+            inner.auth_cancel = Some(cancel.clone());
+            (inner.settings.client_id.clone(), cancel)
+        };
+        match auth::begin(&self.client, &client_id, &cancel).await {
+            Ok(pending) => {
+                let code = pending.public();
+                let mut inner = self.inner.lock().map_err(|_| "宿主状态不可用")?;
+                if cancel.is_cancelled() {
+                    return Err("登录已取消".into());
+                }
+                inner.login = Some(pending);
+                Ok(code)
+            }
+            Err(error) => {
+                let mut inner = self.inner.lock().map_err(|_| "宿主状态不可用")?;
+                if !cancel.is_cancelled() {
+                    inner.auth_cancel = None;
+                }
+                Err(error)
+            }
+        }
+    }
+    pub async fn poll_login(&self) -> Result<bool> {
+        let (mut pending, client_id, cancel) = {
+            let mut inner = self.inner.lock().map_err(|_| "宿主状态不可用")?;
+            if inner.auth_busy {
+                return Ok(false);
+            }
+            let pending = inner.login.take().ok_or("没有进行中的设备登录")?;
+            let cancel = inner.auth_cancel.clone().ok_or("登录已取消")?;
+            inner.auth_busy = true;
+            (pending, inner.settings.client_id.clone(), cancel)
+        };
+        let result = auth::poll(&self.client, &client_id, &mut pending, &cancel).await;
+        let mut inner = self.inner.lock().map_err(|_| "宿主状态不可用")?;
+        inner.auth_busy = false;
+        if cancel.is_cancelled() {
+            return Err("登录已取消".into());
+        }
+        match result {
+            Ok(Some(session)) => {
+                inner.auth_cancel = None;
+                auth::save(&self.root, &session.stored)?;
+                inner.account = Some(session.stored.clone());
+                inner.session = Some(session);
+                Ok(true)
+            }
+            Ok(None) => {
+                inner.login = Some(pending);
+                Ok(false)
+            }
+            Err(error) => {
+                inner.auth_cancel = None;
+                Err(error)
+            }
+        }
+    }
+    pub fn cancel_login(&self) {
+        let mut inner = self.inner.lock().expect("host state poisoned");
+        if let Some(cancel) = inner.auth_cancel.take() {
+            cancel.cancel();
+        }
+        inner.login = None;
+    }
+    pub fn sign_out(&self) -> Result<()> {
+        let mut inner = self.inner.lock().map_err(|_| "宿主状态不可用")?;
+        if inner.cancel.is_some() || inner.auth_cancel.is_some() {
+            return Err("请先结束当前任务或登录".into());
+        }
+        let path = model::safe_path(&self.root, "account.dpapi")?;
+        if path.exists() {
+            fs::remove_file(path).map_err(|_| "无法删除当前账户的加密凭据")?;
+        }
+        inner.account = None;
+        inner.session = None;
+        Ok(())
+    }
+}
+async fn capture<R: AsyncRead + Unpin>(
+    host: &Host,
+    mut reader: R,
+    cancel: &CancellationToken,
+    secrets: &[String],
+) {
+    let mut buffer = [0; 4096];
+    let mut line = vec![];
+    let mut oversized = false;
+    loop {
+        let count = tokio::select! { _ = cancel.cancelled() => break, value = reader.read(&mut buffer) => match value { Ok(count) => count, Err(_) => break } };
+        if count == 0 {
+            if !line.is_empty() || oversized {
+                let text = String::from_utf8_lossy(&line);
+                host.log(
+                    if oversized {
+                        "[日志行过长，已省略]"
+                    } else {
+                        &text
+                    },
+                    secrets,
+                );
+            }
+            break;
+        }
+        for byte in &buffer[..count] {
+            if *byte == b'\n' {
+                let text = String::from_utf8_lossy(&line);
+                host.log(
+                    if oversized {
+                        "[日志行过长，已省略]"
+                    } else {
+                        &text
+                    },
+                    secrets,
+                );
+                line.clear();
+                oversized = false;
+            } else if line.len() < 8192 {
+                line.push(*byte);
+            } else {
+                oversized = true;
+            }
+        }
+    }
+}
+pub fn default_root() -> Result<PathBuf> {
+    if let Some(path) = std::env::var_os("EASYCRAFT_DATA_DIR") {
+        return Ok(PathBuf::from(path));
+    }
+    let executable = std::env::current_exe().map_err(|_| "无法定位应用目录")?;
+    Ok(executable.parent().ok_or("无法定位应用目录")?.join("data"))
+}
+pub fn find_java() -> Option<String> {
+    let executable = std::env::current_exe().ok()?;
+    for parent in executable.ancestors() {
+        let directory = parent.join("build-tools/easycraft/java21");
+        if let Ok(entries) = fs::read_dir(directory) {
+            for entry in entries.flatten() {
+                let java = entry.path().join("bin/java.exe");
+                if java.is_file() {
+                    return Some(java.to_string_lossy().into_owned());
+                }
+            }
+        }
+    }
+    None
+}
+
+#[cfg(test)]
+mod capture_tests {
+    use super::*;
+    #[tokio::test]
+    async fn output_capture_bounds_lines_and_redacts_before_publication() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join(".native/tests")
+            .join(uuid::Uuid::new_v4().to_string());
+        let host = Host::new(root).unwrap();
+        let data = format!("token secret-value\n{}\nlast-line", "x".repeat(20000));
+        capture(
+            &host,
+            data.as_bytes(),
+            &CancellationToken::new(),
+            &["secret-value".into()],
+        )
+        .await;
+        let logs = host.status().task.logs;
+        assert_eq!(logs.len(), 3);
+        assert_eq!(logs[0], "token [REDACTED]");
+        assert_eq!(logs[1], "[日志行过长，已省略]");
+        assert_eq!(logs[2], "last-line");
+    }
+}
