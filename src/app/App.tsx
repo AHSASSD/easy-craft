@@ -27,7 +27,8 @@ import {
   X,
 } from 'lucide-react';
 import { loaders, type GameInstance, type LoaderKind } from '../core/contracts';
-import { services, warnings } from './runtime';
+import { kernel, warnings } from './bootstrap';
+import type { Services } from '../core/contracts';
 import { Modal } from '../components/Modal';
 import { Titlebar } from '../components/Titlebar';
 import '../themes/app.css';
@@ -46,7 +47,7 @@ const statusLabel = {
   broken: '演示异常状态',
 };
 
-export function App() {
+export function App({ services }: { services: Services }) {
   const preferences = useSyncExternalStore(
     services.preferences.subscribe,
     services.preferences.snapshot,
@@ -665,9 +666,11 @@ export function App() {
                 <h1>开发者工具</h1>
                 <section className="card">
                   <p>
-                    插件内核将在 Milestone C
-                    接入。只允许随应用打包的可信官方模块。
+                    只允许随应用打包的可信官方模块。服务按契约依赖排序，停止时统一释放资源。
                   </p>
+                  <pre className="diagnostics">
+                    {JSON.stringify(kernel.inspect(), null, 2)}
+                  </pre>
                 </section>
               </>
             )}
