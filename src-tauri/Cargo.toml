@@ -1,0 +1,11 @@
+[package]
+name = "easy-craft"
+version = "0.1.0"
+description = "Easy Craft Phase 0 demo"
+edition = "2021"
+
+[build-dependencies]
+tauri-build = { version = "=2.7.4", features = [] }
+
+[dependencies]
+tauri = { version = "=2.12.5", features = [] }
