@@ -79,7 +79,9 @@ function validManifest(manifest: PluginManifest) {
   for (const entries of [manifest.requires, manifest.provides])
     for (const [id, contractVersion] of Object.entries(entries))
       if (
-        !['preferences', 'instances', 'themes', 'launch'].includes(id) ||
+        !['preferences', 'instances', 'themes', 'launch', 'native'].includes(
+          id,
+        ) ||
         typeof contractVersion !== 'string' ||
         !version.test(contractVersion)
       )
@@ -246,6 +248,22 @@ export class PluginManager {
         if (!version) throw new Error(`未声明服务提供：${id}`);
         if (this.services.has(id)) throw new Error(`重复服务注册：${id}`);
         const methods = {
+          native: [
+            'snapshot',
+            'subscribe',
+            'refresh',
+            'versions',
+            'saveSettings',
+            'probeJava',
+            'beginLogin',
+            'pollLogin',
+            'cancelLogin',
+            'openLogin',
+            'signOut',
+            'install',
+            'launch',
+            'cancel',
+          ],
           preferences: ['snapshot', 'subscribe', 'update'],
           instances: [
             'snapshot',

@@ -1,6 +1,79 @@
 * {
   box-sizing: border-box;
 }
+.native-fieldset {
+  border: 0;
+  padding: 0;
+  margin: 0;
+  min-width: 0;
+}
+.native-fieldset:disabled {
+  opacity: 0.65;
+}
+.native-workspace h2 {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.native-workspace > p,
+.native-workspace .card > p {
+  font-size: 12px;
+}
+.native-label {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 15px 0;
+  font-size: 12px;
+}
+.data-root {
+  font-size: 10px;
+  color: var(--muted);
+  overflow-wrap: anywhere;
+  margin-top: 20px;
+}
+.device-login {
+  padding: 16px;
+  margin-top: 20px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+.device-code {
+  display: block;
+  font-size: 28px;
+  letter-spacing: 4px;
+  margin: 16px 0;
+  color: var(--accent);
+}
+.device-login button {
+  margin: 6px 10px 0 0;
+}
+.native-instances > div {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 14px 0;
+  border-bottom: 1px solid var(--border);
+}
+.native-instances > div > div {
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.native-instances small {
+  display: block;
+  color: var(--muted);
+  font-size: 10px;
+  margin-top: 8px;
+}
+.game-log {
+  max-height: 300px;
+  overflow-y: auto;
+  background: var(--bg);
+  padding: 12px;
+  border-radius: 8px;
+}
 .diagnostics {
   white-space: pre-wrap;
   overflow-wrap: anywhere;

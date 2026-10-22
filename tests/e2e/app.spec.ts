@@ -1,4 +1,30 @@
 import { expect, test } from '@playwright/test';
+test('real features are explicitly unavailable in browser and never simulated', async ({
+  page,
+}) => {
+  await page.goto('/');
+  await page
+    .getByRole('navigation')
+    .getByRole('button', { name: '下载中心', exact: true })
+    .click();
+  await expect(
+    page.getByRole('heading', { name: '原版下载与启动' }),
+  ).toBeVisible();
+  await expect(
+    page.getByText(
+      '浏览器仅提供演示。请运行桌面版使用正版登录、资源下载和游戏启动；此页面不会在浏览器中模拟这些能力。',
+    ),
+  ).toBeVisible();
+  await expect(
+    page.getByRole('button', { name: '下载并安装原版' }),
+  ).toBeDisabled();
+  await expect(
+    page.getByRole('button', { name: '获取 Microsoft 登录设备码' }),
+  ).toBeDisabled();
+  await page.screenshot({
+    path: 'output/playwright/native-browser-boundary.png',
+  });
+});
 test('add, copy, favorite, double click opt-in and developer diagnostics work', async ({
   page,
 }) => {

@@ -34,6 +34,7 @@ import { Titlebar } from '../components/Titlebar';
 import { createLaunchTask } from '../core/tasks/launch-task';
 import { LaunchPanel } from '../features/LaunchPanel';
 import { ImportPreview } from '../features/ImportPreview';
+import { NativeWorkspace } from '../features/NativeWorkspace';
 import '../themes/app.css';
 
 type Page = '首页' | '实例详情' | '下载中心' | '设置' | '开发者工具';
@@ -141,7 +142,7 @@ export function App({ services }: { services: Services }) {
   };
   return (
     <div className="app" data-theme={preferences.theme}>
-      <Titlebar report={report} />
+      <Titlebar report={report} realMode={page === '下载中心'} />
       <div
         className="shell"
         style={
@@ -489,14 +490,14 @@ export function App({ services }: { services: Services }) {
                     <div>
                       <strong>Easy Craft 已就绪</strong>
                       <p>
-                        选择实例，体验主题与启动流程。此版本不会安装或运行游戏。
+                        左侧样例为演示实例；真实原版下载与启动请进入下载中心。
                       </p>
                     </div>
-                    <span>V0.1</span>
+                    <span>V0.2</span>
                   </div>
                 </section>
                 <footer>
-                  少一点繁琐，多一点探索。<span>Easy Craft · Phase 0</span>
+                  少一点繁琐，多一点探索。<span>Easy Craft · V0.2</span>
                 </footer>
               </>
             )}
@@ -577,17 +578,7 @@ export function App({ services }: { services: Services }) {
               </>
             )}
             {page === '下载中心' && (
-              <>
-                <div className="eyebrow">DOWNLOAD / 未来旅程</div>
-                <h1>下载中心</h1>
-                <section className="card empty">
-                  <Download size={42} />
-                  <h2>真实下载将在后续版本开放</h2>
-                  <p>V0.1 不下载 Minecraft、Java、加载器或模组。</p>
-                  <p>V0.2 将优先实现可信来源下载与完整性校验。</p>
-                  <button onClick={() => setPage('首页')}>返回首页</button>
-                </section>
-              </>
+              <NativeWorkspace service={services.native} />
             )}
             {page === '设置' && (
               <>
@@ -717,9 +708,17 @@ export function App({ services }: { services: Services }) {
               <h3>访客玩家</h3>
               <p>这是虚构账户占位信息，尚未登录。</p>
               <p>
-                Microsoft / Xbox 正版登录将在 V0.2 实现，本轮不收集任何凭据。
+                左侧为演示账户入口。Microsoft
+                正版账户请在下载中心管理，密码仅在微软官方网页输入。
               </p>
-              <button onClick={() => setDialog(null)}>知道了</button>
+              <button
+                onClick={() => {
+                  setDialog(null);
+                  setPage('下载中心');
+                }}
+              >
+                管理正版账户
+              </button>
             </div>
           )}
           {(dialog.kind === 'add' || dialog.kind === 'rename') && (

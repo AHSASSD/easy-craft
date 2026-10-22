@@ -1,6 +1,6 @@
 # 依赖和许可证
 
-所有 npm 直接依赖使用精确版本，完整传递依赖见 package-lock.json。通过 npm ci 复现。Rust 直接依赖精确锁定，因缺少 Cargo 尚未解析传递依赖和生成 Cargo.lock。
+所有 npm 直接依赖使用精确版本，完整传递依赖见 package-lock.json。通过 npm ci 复现。V0.2 Rust 直接依赖也已精确锁定，传递依赖见 src-tauri/Cargo.lock。
 
 ## 运行时
 
@@ -37,7 +37,7 @@
 
 - tauri 2.12.5：MIT OR Apache-2.0
 - tauri-build 2.7.4：MIT OR Apache-2.0
-- 版本通过 crates.io 元数据核对；原生编译仍待 Windows 工具链。
+- V0.2 已完成原生编译。完整锁定依赖、版本与许可证见 [NATIVE_DEPENDENCIES.md](NATIVE_DEPENDENCIES.md) 和 Cargo.lock；原文声明见 NATIVE_THIRD_PARTY_NOTICES.txt，随安装包分发。
 
 ## 本地素材
 

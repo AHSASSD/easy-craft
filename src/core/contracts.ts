@@ -1,3 +1,4 @@
+import type { NativeService } from './native-contracts';
 export type LoaderKind = 'vanilla' | 'fabric' | 'forge' | 'neoforge' | 'quilt';
 export type GameInstance = {
   id: string;
@@ -61,6 +62,7 @@ export interface Services {
   instances: InstanceService;
   themes: ThemeService;
   launch: LaunchService;
+  native: NativeService;
 }
 export const loaders: LoaderKind[] = [
   'vanilla',

@@ -43,3 +43,15 @@
 `npm run tauri -- build --no-bundle` **失败**，错误为 cargo metadata 的 program not found；不是 Rust 编译错误，也未进入原生编译。没有桌面安装包，未验证原生窗口控制与 WebView 实际文件拖放。工具链缺失保持为下一步任务。
 
 所有阶段均有本地 Git 提交；未推送远端，未修改工作区原有 PCL/HMCL 代码。
+
+## V0.2 原版服务迭代
+
+在用户授权补齐工具后，使用工作区内的 Rust/MSVC/Windows SDK 与 Java 21/25 完成 Windows 桌面编译；不需要安装完整 Visual Studio。工具路径和复现入口见 WINDOWS_TOOLCHAIN.md。
+
+增加 official.vanilla、NativeService、受限 Tauri 命令与 Rust Host，完成官方元数据、哈希校验下载、续传/重试、独立实例、Java 检测、设备码登录代码、DPAPI、进程与日志。保留原样例和演示流程，UI 不作整体重设计。
+
+实际通过：前端 24 项测试、Edge 7 项流程、Rust 14 项本地测试、2 项单独执行的公网集成、调试/Release 原生构建和 NSIS 生成。真实 1.21.1 安装校验 3,959 个文件；坏缓存和坏 .part 恢复、官方元数据参数构造通过，没有使用假令牌启动游戏。
+
+验证中修复了 Windows 临时文件 sync_all 需要写入句柄、损坏完整 .part 不能恢复、原生日志行无界、数据目录并发写入和 Tauri 缓存跨驱动器移动问题；启动失败现在显示原生错误提示并保留数据。ZIP 依赖升级至近期安全修复版本。
+
+自有 Client ID 与本人正版授权尚缺，真实登录、刷新和进入游戏的端到端验收未完成；不能将原生构建或下载成功等同于已进入游戏。完整记录见 V0.2-VERIFICATION.md。

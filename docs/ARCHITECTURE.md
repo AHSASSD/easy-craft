@@ -1,5 +1,19 @@
 # 架构
 
+## V0.2 当前增量
+
+保留下文 V0.1 分层与演示实现，增加 official.vanilla → NativeService → 受限 Tauri 命令 → Rust Host。UI 通过 src/core/native-contracts.ts 的 DTO 与服务访问真实功能，不持有令牌、不直接操纵磁盘/进程。
+
+- host.rs：原生任务所有权、实例提交、配置、游戏子进程与受限日志。
+- auth.rs：Microsoft 设备码、Xbox/XSTS/Minecraft 交换、所有权/档案、刷新与 Windows DPAPI。
+- net.rs：官方域名、证书校验、禁止跨域重定向、哈希下载、取消、临时文件续传和重试。
+- minecraft.rs：官方元数据、依赖/资源计划、平台规则、参数数组、受限 DLL 提取与 Java 版本检测。
+- model.rs：安全路径、原子保存、公共 DTO 与日志脱敏。
+
+真实任务和游戏进程由 Rust Host 持有，切换 React 页面不终止任务。桥接服务停用只回收前端轮询；窗口退出时由宿主结束其管理的游戏进程。数据独立于 V0.1 localStorage，只有成功安装的实例才写入原生清单。
+
+下文描述的是 V0.1 演示层；其中“宿主仅创建窗口”与“没有真实账户/下载/进程”只适用于 V0.1，不代表当前 V0.2。当前认证与进程代码已实现，真人账户端到端验收仍待完成。
+
 ## 运行链路
 
 main.tsx → bootstrap.ts → PluginManager.load → 官方插件注册服务 → App 接收 Services → UI 调用服务接口。

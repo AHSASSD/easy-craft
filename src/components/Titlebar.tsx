@@ -1,7 +1,13 @@
 import { isTauri } from '@tauri-apps/api/core';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { Box, Minus, Square, X } from 'lucide-react';
-export function Titlebar({ report }: { report(message: string): void }) {
+export function Titlebar({
+  report,
+  realMode = false,
+}: {
+  report(message: string): void;
+  realMode?: boolean;
+}) {
   const native = isTauri();
   const control = (
     action: 'minimize' | 'toggleMaximize' | 'close' | 'startDragging',
@@ -23,7 +29,7 @@ export function Titlebar({ report }: { report(message: string): void }) {
       >
         <Box size={21} />
         <strong>Easy Craft</strong>
-        <span>V0.1</span>
+        <span>V0.2</span>
       </div>
       <div
         className="title-drag"
@@ -31,7 +37,7 @@ export function Titlebar({ report }: { report(message: string): void }) {
           if (event.button === 0) control('startDragging');
         }}
       />
-      <span className="demo-pill">演示模式</span>
+      <span className="demo-pill">{realMode ? '原版模式' : '演示模式'}</span>
       {native ? (
         <div className="window-controls">
           <button aria-label="最小化" onClick={() => control('minimize')}>

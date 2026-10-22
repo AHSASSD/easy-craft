@@ -41,7 +41,13 @@ test('official plugins start in contract dependency order and reload without res
 });
 test('missing dependency is readable and starts nothing', async () => {
   const kernel = manager();
-  await expect(kernel.load([officialPlugins()[0]])).rejects.toThrow('缺少依赖');
+  await expect(
+    kernel.load([
+      officialPlugins().find(
+        (plugin) => plugin.manifest.id === 'official.demo-launch',
+      )!,
+    ]),
+  ).rejects.toThrow('缺少依赖');
   expect(kernel.inspect().plugins).toEqual([]);
 });
 test('cycles are detected before setup', async () => {

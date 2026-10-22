@@ -1,98 +1,112 @@
-# Easy Craft V0.1
+# Easy Craft V0.2
 
-一个属于你的 Minecraft Java 版启动器起点。当前交付为 **Phase 0 演示版**：可运行、可交互、可验证的 UI 和官方插件内核，**不会登录、下载、安装或启动 Minecraft**。
+Windows x64 的 Minecraft Java 原版启动器。保留 V0.1 双栏界面与演示流程，新增受限的 Rust 原生服务；本轮先完善功能，视觉调整可以后续独立进行。
 
-## Windows 快速启动
+## 运行桌面版
 
-需要 Node.js 22.12+ 或 24 LTS 和 npm。本机验证环境为 Node 24.15.0 / npm 11.12.1。无需 Minecraft 或 Java。
+构建后的程序位于 `src-tauri/target/release/easy-craft.exe`。可直接运行，无需完整 Visual Studio；CLion、PyCharm 或其他编辑器都可以继续使用。
+
+从 PowerShell 启动开发模式：
 
 ```powershell
 cd 'E:\PCL2 code comparison\easy-craft'
 npm ci
-npm run dev
+.\scripts\native.ps1 dev
 ```
 
-打开 <http://127.0.0.1:1420/>。终端保持运行；Ctrl+C 停止。开发服务只监听本机。端口占用时，先关闭旧的开发服务再启动。
+本机工具已放在 `E:\PCL2 code comparison\build-tools\easycraft`。脚本只设置当前进程环境，不修改全局 PATH。新机器需要先准备同样的工具，见 [Windows 工具链](docs/WINDOWS_TOOLCHAIN.md)。
 
-## 现在可以做什么
+浏览器预览仍可使用 `npm run dev`，地址 <http://127.0.0.1:1420/>。**浏览器里的真实下载、登录和启动按钮禁用，不会用模拟功能代替。**
 
-- 双栏界面、自定义标题栏、可拖动分隔栏；焦点移到分隔栏后也可用左右方向键调整。
-- 深板岩夜色 / 草方块亮色主题，本地背景图片预览（PNG/JPEG/WebP，最大 10 MB，不上传；重启需重选）。
-- 搜索、最近使用或名称排序、收藏置顶、选择实例、查看详情。
-- 添加、重命名、复制**演示实例资料**；复制不涉及游戏文件，删除与打开目录禁用。
-- 核心偏好与实例资料本地保存；同一版本可以有不同实例 ID。
-- 双击模拟启动默认关闭，可在设置启用。账户为虚构访客，下载中心明确标为后续功能。
-- 设置中显式开启开发者工具后，可查看当前官方插件、服务、主题、页面注册情况。
-- 三个可信官方插件：实例、主题、演示启动；支持依赖检查、精确版本兼容、权限检查、失败回滚和统一释放。
-- 模拟启动：检查环境 → 准备资源 → 构造参数 → 模拟完成，包含进度、日志、取消与重试。切换页面任务继续运行，应用卸载或插件停止时取消。
-- 拖入 `.zip` / `.mrpack` 查看文件名、类型与大小；每次最多预览 20 个文件，**不读取包内容、不解压、不安装**。
+## 功能与边界
 
-体验成功流程：选择“草原上的第一天”→模拟启动。体验失败流程：选择“山间工坊”（演示缺失状态）→模拟启动。失败状态只用于演示，不能据此判断真实游戏环境。
+- 左侧仍为明确标注的演示实例；深浅主题、搜索/排序/收藏、重命名与资料复制、可调整栏宽和本地背景保留。
+- “下载中心”新增原版工作区：官方正式版本清单、实例安装、Java 检测、正版账户和真实游戏进程入口。
+- 下载仅允许 Mojang/Minecraft 官方资源域名，禁止重定向到其他来源；逐文件 SHA-1 校验，校验成功才提交缓存。
+- 限制并发、连接超时、有限重试、取消、临时文件续传和已校验缓存复用。损坏缓存会重新下载，实例清单只在安装成功后提交。
+- 每个真实实例使用独立的 game/natives 目录；不删除或覆盖用户存档。
+- 检测所选 Java 的实际主版本与 64 位架构，启动前要求匹配实例元数据。已提供工作区 Java 21 和 Java 25；选择其他可信运行时需填写其 java.exe 完整路径。
+- Microsoft 设备码授权 → Xbox → XSTS → Minecraft 令牌、所有权与档案校验；启动时可刷新账户。
+- 刷新令牌只由 Rust 使用 Windows DPAPI 加密保存在 account.dpapi；前端不接收令牌，普通设置不存密码或 Client Secret。
+- 通过参数数组启动真实 Java 进程，展示退出状态与最近 200 条脱敏日志；可以结束游戏进程。
 
-## 检查与构建
+**关闭启动器会结束由它启动的游戏，请先保存并退出世界。**
+
+V0.2 的真实登录与游戏启动代码已经接入，但尚未使用本人正版账户进行端到端验收，不能据此称“已成功进入 Minecraft”。
+
+旧式 minecraftArguments、继承版本、Forge/Fabric 等加载器、整合包解压导入、自动下载 Java 的 UI 和第三方插件均未实现。不同现代版本仍需匹配的 Java；当前真实安装集成验收目标是 1.21.1。
+
+## 使用顺序
+
+1. 进入“下载中心”，检测 Java，并保存原生配置。Minecraft 1.21.1 使用 Java 21。
+2. 配置 Easy Craft 自有 Microsoft 应用的 Client ID。该应用需支持个人账户、公共客户端设备授权，并能访问 Minecraft API；不要使用其他启动器的 Client ID。
+3. 获取设备码，在系统浏览器的微软官方页面完成授权。登录结果由应用级服务自动轮询，切换页面不中断。
+4. 选择官方版本并安装。安装本身不要求先登录；成功后才显示为“已安装的真实实例”。
+5. 授权成功、Java 匹配后，点击该真实实例的“启动游戏”。左侧“模拟启动”始终只用于演示。
+
+Client ID 不是 Client Secret。请不要向聊天或配置文件发送密码、令牌或 Client Secret。注册指引见 [Microsoft 官方设备码流程](https://learn.microsoft.com/entra/identity-platform/v2-oauth2-device-code)。
+
+## 构建与检查
 
 ```powershell
+npm run build
 npm run typecheck
 npm test
 npm run lint
 npm run format:check
 npm run test:e2e
-npm run build
-npm run preview
+.\scripts\native.ps1 check
+.\scripts\native.ps1 test
+.\scripts\native.ps1 clippy
+.\scripts\native.ps1 fmt
+.\scripts\native.ps1 build
+.\scripts\native.ps1 bundle
 ```
 
-`test:e2e` 使用本机 Microsoft Edge；如未安装 Edge，需要先安装或将 playwright.config.ts 的 channel 改为已安装的浏览器。测试会自动启动开发服务，已有相同服务则复用。`preview` 预览 dist 中的生产构建。`npm run format` 修复格式。
-
-本轮实际结果见 [docs/PROGRESS.md](docs/PROGRESS.md)。最终验证：20 项 Vitest 测试、6 项 Edge 流程测试；构建、严格类型检查、Lint 与格式检查通过。
-
-## Tauri 桌面开发与 Windows 打包
-
-原生工程、窗口控制、权限清单、CSP 和本地图标已配置，但**本机未验证原生编译、窗口按钮或安装包**。
-
-环境检查发现 WebView2 已安装，Rust/Cargo 和 Microsoft C++ Build Tools / SDK 缺失。安装步骤以 [Tauri 官方 Windows 前置条件](https://v2.tauri.app/start/prerequisites/) 为准。需要 Rust stable MSVC 工具链、Microsoft C++ 桌面构建工具及 Windows SDK、WebView2。
-
-补齐工具后在新终端执行：
+- `build`：前端生产构建；native.ps1 build：可直接运行的调试桌面程序。
+- `bundle`：Release 程序和 NSIS 安装包，输出到 `src-tauri/target/release/bundle/nsis/`。
+- Edge 流程测试要求本机安装 Microsoft Edge。普通 Rust 测试不连接认证服务。
+- 公网集成检查单独执行，避免把联网结果混同于普通单测：
 
 ```powershell
-cd 'E:\PCL2 code comparison\easy-craft'
-npm ci
-npm run tauri -- info
-npm run tauri -- dev
-# 退出开发窗口后打包
-npm run tauri -- build
+.\scripts\native.ps1 test -Integration metadata
+.\scripts\native.ps1 test -Integration install
+node scripts/smoke-native.mjs
 ```
 
-首次成功构建会生成 Cargo.lock，应加入版本控制。Rust 直接依赖已经精确锁定，传递依赖当前尚未生成锁文件。NSIS 安装包预期位于 `src-tauri/target/release/bundle/nsis/`；这是配置目标，**本轮未生成安装包**。打包工具可能从官方源获取其构建组件，与 Minecraft 下载无关。
+安装集成测试会在 `.native/integration` 下载真实官方 1.21.1 资源、验证缓存修复和官方元数据参数构造，**不会启动游戏**。桌面冒烟检查使用该测试目录与临时 WebView2 调试端口，只验证本应用的实际窗口、IPC、Java、官方清单和未授权启动拒绝，不进行 Microsoft 登录。
 
-窗口尺寸统一放在 src-tauri/tauri.conf.json：初始 1120×720，最小 800×540。浏览器预览使用浏览器自身窗口，隐藏原生窗口控制按钮。
+实际验证结果见 [V0.2 验证记录](docs/V0.2-VERIFICATION.md)。
 
-## 项目结构
+## 架构
 
 ```text
-src/app/                 装配、顶层状态和页面组合
-src/components/          标题栏、原生 HTML dialog
-src/features/            演示任务面板、文件导入预览
-src/core/contracts.ts    数据和服务接口
-src/core/services.ts     实例、偏好、主题的基础实现
-src/core/persistence/    校验与本地存储适配
-src/core/plugins/        插件内核与可释放作用域
-src/core/tasks/          演示服务与应用任务控制器
-src/plugins/official/    三个官方插件
-src/themes/             主题 token、响应式布局
-src/assets/             自制立方体 SVG
-src-tauri/              受限 Tauri 原生宿主
-tests/                  单元、组件与浏览器流程
-docs/                   架构、API、路线、执行记录与许可证
+src/app/                 应用装配、原生桥接适配器、页面组合
+src/components/          标题栏、弹窗
+src/features/            原版工作区、演示任务与导入预览
+src/core/contracts.ts    演示数据与服务契约
+src/core/native-contracts.ts 原生服务 DTO 与接口
+src/core/plugins/        插件内核、权限、生命周期与回收
+src/plugins/official/    演示实例、主题、模拟启动、原版服务
+src-tauri/src/host.rs    设置、实例事务、任务和游戏进程
+src-tauri/src/auth.rs    设备授权、令牌交换/刷新与 DPAPI
+src-tauri/src/net.rs     官方来源、校验下载、续传与重试
+src-tauri/src/minecraft.rs 元数据、平台规则、参数与 Java
+scripts/native.ps1      工作区便携工具链入口
+tests/                  前端单元/组件与浏览器流程测试
 ```
 
-进一步阅读：[架构](docs/ARCHITECTURE.md)、[插件 API](docs/PLUGIN_API.md)、[路线图](docs/ROADMAP.md)、[依赖与许可证](docs/DEPENDENCIES.md)。
+原生 UI 只消费 NativeService，后续修改界面不需要重写下载或认证逻辑。只有随程序打包的可信官方插件可以执行，没有第三方代码沙箱。
 
-## 数据与边界
+## 数据与文档
 
-偏好保存在 `easycraft.preferences.v1`，实例资料保存在 `easycraft.instances.v1`。数据局限于当前浏览器配置或当前 Tauri WebView，二者不互通。非法持久化数据会提示并尝试备份到 `.invalid-backup`，备份失败则仅使用内存，不覆盖原数据。存储写入失败时提示本次更改只在当前窗口有效。
+开发脚本将真实数据放在项目的 data 目录。直接运行桌面程序时默认使用程序旁的 data；可以通过当前进程的 EASYCRAFT_DATA_DIR 指定其他目录。原生数据与浏览器演示的 localStorage 分开，V0.1 数据不会自动转换成真实实例。
 
-这里只保存虚构账户与演示资料，不保存账户密码、令牌或游戏存档。所有插件是打包进应用的可信代码；能力检查**不是第三方代码沙箱**，没有外部插件导入、动态执行或插件商店。
+- settings.json：Client ID、Java 路径、内存；无令牌。
+- instances.json：真实安装成功的实例清单。
+- account.dpapi：当前 Windows 用户绑定的加密账户，不能当作跨机器迁移文件。
+- assets/libraries/versions：官方资源缓存；instances/{UUID}/game：独立游戏目录。
 
-## 下一步
+设置或实例清单无效时保留原文件并报错；不要通过删除 data 来解决单个账户问题，应使用界面的“退出正版账户”。
 
-优先补齐原生工具链，执行 Tauri 编译和实际窗口/打包验收；之后再开始 V0.2 的正版认证、安全凭据和可信原版资源链路。V0.1 的演示服务不能用于启动真实游戏。
+[架构](docs/ARCHITECTURE.md) · [插件 API](docs/PLUGIN_API.md) · [执行记录](docs/PROGRESS.md) · [原生依赖](docs/NATIVE_DEPENDENCIES.md) · [路线图](docs/ROADMAP.md)

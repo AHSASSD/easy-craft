@@ -23,5 +23,6 @@ export async function bootstrap(): Promise<Services> {
     instances: kernel.getService('instances'),
     themes: kernel.getService('themes'),
     launch: kernel.getService('launch'),
+    native: kernel.getService('native'),
   };
 }

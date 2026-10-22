@@ -2,11 +2,30 @@ import type { Plugin } from '../../core/plugins/kernel';
 import type { StorageAdapter } from '../../core/persistence/store';
 import { createInstances, createThemes } from '../../core/services';
 import { createDemoLaunch } from '../../core/tasks/demo-launch';
+import { createNativeService } from '../../app/native-service';
 export function officialPlugins(
   storage?: StorageAdapter,
   warn?: (message: string) => void,
 ): Plugin[] {
   return [
+    {
+      manifest: {
+        id: 'official.vanilla',
+        version: '0.2.0',
+        apiVersion: '1.0.0',
+        requires: {},
+        provides: { native: '1.0.0' },
+        permissions: ['services'],
+      },
+      setup(ctx) {
+        const native = createNativeService();
+        ctx.registerService('native', native);
+        ctx.addDisposable(native.stop);
+      },
+      async start(ctx) {
+        await ctx.getService('native').refresh();
+      },
+    },
     {
       manifest: {
         id: 'official.demo-launch',
