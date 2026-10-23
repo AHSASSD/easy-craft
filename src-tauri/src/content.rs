@@ -3,7 +3,7 @@ use base64::{engine::general_purpose::STANDARD, Engine};
 use serde::{Deserialize, Serialize};
 use std::{
     fs,
-    io::{Cursor, Read, Write},
+    io::{Cursor, Read, Seek, SeekFrom},
     os::windows::{ffi::OsStrExt, fs::MetadataExt},
     path::{Path, PathBuf},
 };
@@ -131,7 +131,7 @@ pub fn list(root: &Path, kind: Kind) -> Result<Vec<Entry>> {
             && kind == Kind::Mods
             && (file.to_ascii_lowercase().ends_with(".jar")
                 || file.to_ascii_lowercase().ends_with(".jar.disabled"))
-            && meta.len() <= 256 * 1024 * 1024
+            && meta.len() <= crate::file_picker::MAX_FILE
         {
             if let Ok(input) = fs::File::open(path) {
                 if let Ok(mut zip) = zip::ZipArchive::new(input) {
@@ -194,10 +194,16 @@ fn move_no_replace(old: &Path, new: &Path) -> Result<()> {
     Ok(())
 }
 pub fn import(root: &Path, kind: Kind, file: &str, bytes: &[u8]) -> Result<()> {
+    if bytes.is_empty() || bytes.len() > MAX_IMPORT {
+        return Err("本地导入须为 16 MB 以内的模组或资源 ZIP".into());
+    }
+    import_reader(root, kind, file, Cursor::new(bytes))
+}
+pub fn import_reader(root: &Path, kind: Kind, file: &str, input: impl Read) -> Result<()> {
     let _locks = crate::worlds::lock_worlds(root)?;
     crate::resource_install::recover_all(root)?;
-    if kind == Kind::Screenshots || bytes.is_empty() || bytes.len() > MAX_IMPORT {
-        return Err("本地导入须为 16 MB 以内的模组或资源 ZIP".into());
+    if kind == Kind::Screenshots || kind == Kind::Datapacks {
+        return Err("此类别不支持实例级本地导入".into());
     }
     if !(if kind == Kind::Mods {
         file.to_ascii_lowercase().ends_with(".jar")
@@ -207,27 +213,34 @@ pub fn import(root: &Path, kind: Kind, file: &str, bytes: &[u8]) -> Result<()> {
         return Err("文件扩展名与资源类别不符".into());
     }
     let path = file_path(root, kind, file)?;
-    crate::packs::preview(bytes)?;
-    let mut zip = zip::ZipArchive::new(Cursor::new(bytes)).map_err(|_| "不是可读取的 ZIP")?;
-    validate_archive(kind, &mut zip)?;
     fs::create_dir_all(path.parent().ok_or("目录无效")?).map_err(|_| "无法创建资源目录")?;
     let staging = file_path(root, kind, &format!(".{}.importing", uuid::Uuid::new_v4()))?;
     let mut output = fs::OpenOptions::new()
+        .read(true)
         .write(true)
         .create_new(true)
         .open(&staging)
         .map_err(|_| "无法创建临时资源文件，未覆盖")?;
-    if output
-        .write_all(bytes)
-        .and_then(|_| output.sync_all())
-        .is_err()
-    {
-        drop(output);
-        let _ = fs::remove_file(&staging);
-        return Err("保存失败，未完成的导入已清理".into());
-    }
+    let result = (|| -> Result<()> {
+        let copied = std::io::copy(
+            &mut input.take(crate::file_picker::MAX_FILE + 1),
+            &mut output,
+        )
+        .map_err(|_| "复制所选文件失败")?;
+        if copied == 0 || copied > crate::file_picker::MAX_FILE {
+            return Err("本地文件超过 512 MiB 或为空".into());
+        }
+        output.sync_all().map_err(|_| "无法同步临时资源")?;
+        output.rewind().map_err(|_| "无法读取临时资源")?;
+        crate::packs::preview_reader(&mut output)?;
+        output
+            .seek(SeekFrom::Start(0))
+            .map_err(|_| "无法读取临时资源")?;
+        let mut zip = zip::ZipArchive::new(&mut output).map_err(|_| "不是可读取的 ZIP")?;
+        validate_archive(kind, &mut zip)
+    })();
     drop(output);
-    let result = move_no_replace(&staging, &path);
+    let result = result.and_then(|()| move_no_replace(&staging, &path));
     if result.is_err() {
         let _ = fs::remove_file(&staging);
     }
@@ -427,6 +440,58 @@ pub fn open(root: &Path, kind: Option<Kind>) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Write;
+    #[test]
+    fn streamed_file_import_exceeds_ipc_limit_and_cleans_failed_staging() {
+        let root = root();
+        let source = root.join("large.zip");
+        let mut zip = zip::ZipWriter::new(fs::File::create(&source).unwrap());
+        let options = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Stored);
+        zip.start_file("pack.mcmeta", options).unwrap();
+        zip.write_all(br#"{"pack":{"pack_format":34,"description":"large fixture"}}"#)
+            .unwrap();
+        zip.start_file("assets/fixture/large.bin", options).unwrap();
+        std::io::copy(&mut std::io::repeat(0).take(17 * 1024 * 1024), &mut zip).unwrap();
+        zip.finish().unwrap();
+        let fixture_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../.native/fixtures");
+        fs::create_dir_all(&fixture_dir).unwrap();
+        fs::copy(&source, fixture_dir.join("local-large-resource.zip")).unwrap();
+        let (name, mut file) = crate::file_picker::open(source.clone(), &["zip"]).unwrap();
+        assert!(file.metadata().unwrap().len() > MAX_IMPORT as u64);
+        crate::packs::preview_reader(&file).unwrap();
+        file.rewind().unwrap();
+        import_reader(&root, Kind::Resourcepacks, &name, file).unwrap();
+        assert_eq!(
+            fs::read(&source).unwrap(),
+            fs::read(root.join("resourcepacks/large.zip")).unwrap()
+        );
+        let (_, file) = crate::file_picker::open(source.clone(), &["zip"]).unwrap();
+        assert!(import_reader(&root, Kind::Resourcepacks, &name, file).is_err());
+        assert!(crate::file_picker::open(source, &["jar"]).is_err());
+        struct Broken;
+        impl Read for Broken {
+            fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::other("fixture"))
+            }
+        }
+        assert!(import_reader(&root, Kind::Resourcepacks, "broken.zip", Broken).is_err());
+        assert!(import_reader(
+            &root,
+            Kind::Resourcepacks,
+            "invalid.zip",
+            Cursor::new(b"invalid")
+        )
+        .is_err());
+        assert_eq!(fs::read_dir(root.join("resourcepacks")).unwrap().count(), 1);
+        let oversized = root.join("oversized.zip");
+        fs::File::create(&oversized)
+            .unwrap()
+            .set_len(crate::file_picker::MAX_FILE + 1)
+            .unwrap();
+        assert!(crate::file_picker::open(oversized, &["zip"]).is_err());
+        fs::remove_dir_all(root).unwrap();
+    }
     fn root() -> PathBuf {
         let root = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../.native/content-tests")

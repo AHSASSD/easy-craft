@@ -57,9 +57,9 @@ export function ContentPanel({
     setError('');
     setMessage('');
     try {
-      await action();
+      const result = await action();
       setEntries(await service.content(id, kind));
-      setMessage(success);
+      setMessage(result === false ? '' : success);
     } catch (error) {
       setError(error instanceof Error ? error.message : '操作失败');
     } finally {
@@ -130,32 +130,46 @@ export function ContentPanel({
               onChange={(event) => setClosed(event.target.checked)}
             />
           </label>
-          <label className="file-setting">
-            导入本地{titles[kind]}（不覆盖现有文件）
-            <input
-              type="file"
-              aria-label={`导入本地${titles[kind]}`}
-              accept={kind === 'mods' ? '.jar' : '.zip'}
-              disabled={locked || !closed}
-              onChange={(event) => {
-                const file = event.target.files?.[0];
-                event.target.value = '';
-                if (!file) return;
-                void run(async () => {
-                  if (file.size > 16 * 1024 * 1024)
-                    throw new Error(
-                      '本地文件导入暂限 16 MB；大文件请使用打开目录手动放入后刷新。',
+          <button
+            disabled={locked || !closed}
+            onClick={() =>
+              void run(
+                () => service.pickContent(id, kind),
+                '文件已导入；在游戏中是否启用仍需确认。',
+              )
+            }
+          >
+            选择本地{titles[kind]}（最大 512 MiB，不覆盖）
+          </button>
+          <details>
+            <summary>小文件导入（最大 16 MB）</summary>
+            <label className="file-setting">
+              导入本地{titles[kind]}（不覆盖现有文件）
+              <input
+                type="file"
+                aria-label={`导入本地${titles[kind]}`}
+                accept={kind === 'mods' ? '.jar' : '.zip'}
+                disabled={locked || !closed}
+                onChange={(event) => {
+                  const file = event.target.files?.[0];
+                  event.target.value = '';
+                  if (!file) return;
+                  void run(async () => {
+                    if (file.size > 16 * 1024 * 1024)
+                      throw new Error(
+                        '本地文件导入暂限 16 MB；大文件请使用打开目录手动放入后刷新。',
+                      );
+                    await service.importContent(
+                      id,
+                      kind,
+                      file.name,
+                      Array.from(new Uint8Array(await file.arrayBuffer())),
                     );
-                  await service.importContent(
-                    id,
-                    kind,
-                    file.name,
-                    Array.from(new Uint8Array(await file.arrayBuffer())),
-                  );
-                }, '文件已导入；在游戏中是否启用仍需确认。');
-              }}
-            />
-          </label>
+                  }, '文件已导入；在游戏中是否启用仍需确认。');
+                }}
+              />
+            </label>
+          </details>
           <p className="hint">
             本地导入会验证压缩路径和格式；未知文件保留。模组启停只识别 Fabric
             模组。外部游戏停留主菜单时无法可靠检测，请先退出。

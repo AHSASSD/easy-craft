@@ -3,6 +3,7 @@
 mod auth;
 mod content;
 mod fabric;
+mod file_picker;
 mod host;
 mod memory;
 mod minecraft;
@@ -144,6 +145,45 @@ async fn native_content_import(
     .map_err(|_| "资源导入任务失败".to_string())?
 }
 #[tauri::command]
+async fn native_content_pick(
+    window: tauri::WebviewWindow,
+    host: State<'_, Arc<Host>>,
+    id: String,
+    kind: content::Kind,
+) -> Result<bool> {
+    if kind == content::Kind::Screenshots {
+        return Err("截图目录不支持导入".into());
+    }
+    let owner = window.hwnd().map_err(|_| "无法读取窗口")?.0 as isize;
+    let host = host.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let Some((name, input)) = file_picker::pick(
+            owner,
+            if kind == content::Kind::Mods {
+                &["jar"]
+            } else {
+                &["zip"]
+            },
+        )?
+        else {
+            return Ok(false);
+        };
+        if kind == content::Kind::Mods
+            && !host
+                .status()
+                .instances
+                .iter()
+                .any(|item| item.id == id && !item.fabric_version.is_empty())
+        {
+            return Err("本轮本地模组导入需要 Fabric 实例".into());
+        }
+        host.instance_files(&id, |root| content::import_reader(root, kind, &name, input))?;
+        Ok(true)
+    })
+    .await
+    .map_err(|_| "本地文件导入任务失败".to_string())?
+}
+#[tauri::command]
 async fn native_content_image(
     host: State<'_, Arc<Host>>,
     id: String,
@@ -244,6 +284,17 @@ async fn native_pack_preview(bytes: Vec<u8>) -> Result<packs::PackPreview> {
     tauri::async_runtime::spawn_blocking(move || packs::preview(&bytes))
         .await
         .map_err(|_| "压缩包检查任务失败".to_string())?
+}
+#[tauri::command]
+async fn native_pack_pick(window: tauri::WebviewWindow) -> Result<Option<packs::PackPreview>> {
+    let owner = window.hwnd().map_err(|_| "无法读取窗口")?.0 as isize;
+    tauri::async_runtime::spawn_blocking(move || {
+        file_picker::pick(owner, &["zip", "mrpack"])?
+            .map(|(_, input)| packs::preview_reader(input))
+            .transpose()
+    })
+    .await
+    .map_err(|_| "压缩包检查任务失败".to_string())?
 }
 #[tauri::command]
 async fn native_versions(host: State<'_, Arc<Host>>) -> Result<Vec<model::Version>> {
@@ -353,6 +404,7 @@ fn main() {
             native_content,
             native_content_toggle,
             native_content_import,
+            native_content_pick,
             native_content_image,
             native_content_open,
             native_worlds,
@@ -363,6 +415,7 @@ fn main() {
             native_avatar,
             native_avatar_save,
             native_pack_preview,
+            native_pack_pick,
             native_resource_search,
             native_resource_detail,
             native_resource_plan,

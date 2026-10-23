@@ -23,6 +23,27 @@ const resourceId = (value: unknown): value is string =>
   string(value) && /^[A-Za-z0-9]{1,64}$/.test(value);
 const bounded = (value: unknown, max: number): value is string =>
   string(value) && value.length <= max;
+function packPreview(value: unknown): PackPreview {
+  if (
+    !isRecord(value) ||
+    !bounded(value.kind, 64) ||
+    !bounded(value.name, 100) ||
+    !integer(value.files) ||
+    value.files > 10000 ||
+    !integer(value.expandedBytes) ||
+    value.expandedBytes > 1024 * 1024 * 1024 ||
+    !integer(value.downloads) ||
+    value.downloads > 10000 ||
+    ![value.dependencies, value.paths, value.warnings].every(
+      (items: unknown) =>
+        Array.isArray(items) &&
+        items.length <= 100 &&
+        items.every((item) => bounded(item, 4096)),
+    )
+  )
+    throw new Error('整合包预览响应无效');
+  return value as PackPreview;
+}
 function contentEntries(value: unknown): ContentEntry[] {
   if (
     !Array.isArray(value) ||
@@ -437,6 +458,12 @@ export function createNativeService(
         throw new Error('本地导入暂限 16 MB');
       await operation('native_content_import', { id, kind, file, bytes });
     },
+    pickContent: async (id, kind) => {
+      const value = await request('native_content_pick', { id, kind });
+      if (typeof value !== 'boolean') throw new Error('本地导入响应无效');
+      if (value) await refresh(true);
+      return value;
+    },
     contentImage: async (id, file) => {
       const value = await request('native_content_image', { id, file });
       if (
@@ -509,20 +536,11 @@ export function createNativeService(
     previewPack: async (bytes) => {
       if (bytes.length > 16 * 1024 * 1024)
         throw new Error('预览文件须小于 16 MB');
-      const value = await request('native_pack_preview', { bytes });
-      if (
-        !isRecord(value) ||
-        !string(value.kind) ||
-        !string(value.name) ||
-        !integer(value.files) ||
-        !integer(value.expandedBytes) ||
-        !integer(value.downloads) ||
-        ![value.dependencies, value.paths, value.warnings].every(
-          (items: unknown) => Array.isArray(items) && items.every(string),
-        )
-      )
-        throw new Error('整合包预览响应无效');
-      return value as PackPreview;
+      return packPreview(await request('native_pack_preview', { bytes }));
+    },
+    pickPack: async () => {
+      const value = await request('native_pack_pick');
+      return value === null ? null : packPreview(value);
     },
     optimizeMemory: async (system = false) => {
       const value = await request('native_memory_optimize', { system });

@@ -23,7 +23,7 @@ fn check_path(path: &str) -> Result<()> {
     model::safe_path(Path::new("C:/EasyCraftArchivePreview"), path).map(|_| ())
 }
 pub fn preview(bytes: &[u8]) -> Result<PackPreview> {
-    // shortcut: IPC previews are limited to 16 MiB; use a streamed native picker before supporting large packs.
+    // Byte-array/drop previews remain bounded; the native picker uses preview_reader directly.
     if bytes.is_empty() || bytes.len() > 16 * 1024 * 1024 {
         return Err("预览文件须小于 16 MB".into());
     }

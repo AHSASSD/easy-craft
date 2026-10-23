@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { createServer } from 'node:net';
-import { mkdir, copyFile, readFile } from 'node:fs/promises';
+import { mkdir, copyFile, readFile, rm } from 'node:fs/promises';
 import { createHash, randomUUID } from 'node:crypto';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -45,6 +45,46 @@ child.stderr.on('data', (chunk) => {
 let browser;
 let originalSettings;
 let page;
+async function selectNativeFile(button, file) {
+  assert.equal(
+    profile,
+    'debug',
+    'Native picker automation is limited to this debug build',
+  );
+  await button.click();
+  const args = [
+    '-NoProfile',
+    '-ExecutionPolicy',
+    'Bypass',
+    '-File',
+    path.join(project, 'scripts/select-native-file.ps1'),
+    '-AppProcessId',
+    String(child.pid),
+  ];
+  args.push(...(file ? ['-File', file] : ['-Cancel']));
+  const helper = spawn('powershell.exe', args, {
+    windowsHide: true,
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  let output = '';
+  helper.stdout.on('data', (value) => (output = (output + value).slice(-8000)));
+  helper.stderr.on('data', (value) => (output = (output + value).slice(-8000)));
+  await new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      helper.kill();
+      reject(new Error('Native dialog helper timed out'));
+    }, 30000);
+    helper.once('error', (error) => {
+      clearTimeout(timeout);
+      reject(error);
+    });
+    helper.once('exit', (code) => {
+      clearTimeout(timeout);
+      if (code === 0) resolve();
+      else reject(new Error(output));
+    });
+  });
+}
 try {
   for (let attempt = 0; attempt < 40; attempt++) {
     if (child.exitCode !== null) throw new Error(`Desktop exited: ${failure}`);
@@ -452,6 +492,21 @@ try {
     }
   }
   await page.getByRole('button', { name: '整合包', exact: true }).click();
+  if (process.argv.includes('--native-picker')) {
+    const picker = page.getByRole('button', { name: /从电脑选择 ZIP/ });
+    await selectNativeFile(picker);
+    await picker.waitFor({ state: 'visible' });
+    await selectNativeFile(
+      picker,
+      path.join(project, '.native/fixtures/local-large-resource.zip'),
+    );
+    await page
+      .getByRole('heading', { name: '未命名 ZIP · ZIP', exact: true })
+      .waitFor();
+    assert(
+      (await page.getByText(/展开大小/).textContent()).includes('17.0 MB'),
+    );
+  }
   await page
     .getByLabel('选择整合包', { exact: true })
     .setInputFiles(path.join(project, '.native/fixtures/preview.mrpack'));
@@ -615,6 +670,47 @@ try {
     .locator('.content-file-row')
     .filter({ hasText: localResourceName })
     .waitFor();
+  if (process.argv.includes('--native-picker')) {
+    const fixture = path.join(
+      project,
+      `.native/fixtures/large-${randomUUID()}.zip`,
+    );
+    await copyFile(
+      path.join(project, '.native/fixtures/local-large-resource.zip'),
+      fixture,
+    );
+    try {
+      const picker = page.getByRole('button', { name: /选择本地资源包（最大/ });
+      await selectNativeFile(picker);
+      await page.waitForFunction(
+        () => !document.querySelector('.content-manager button')?.disabled,
+      );
+      assert.equal(await page.getByRole('status').count(), 0);
+      await selectNativeFile(picker, fixture);
+      await page
+        .locator('.content-file-row')
+        .filter({ hasText: path.basename(fixture) })
+        .waitFor();
+      const installed = path.join(
+        fabricGameDir,
+        'resourcepacks',
+        path.basename(fixture),
+      );
+      const sourceBytes = await readFile(fixture);
+      assert.deepEqual(await readFile(installed), sourceBytes);
+      await selectNativeFile(picker, fixture);
+      await page
+        .getByRole('alert')
+        .filter({ hasText: /目标已存在/ })
+        .waitFor();
+      assert.deepEqual(await readFile(installed), sourceBytes);
+      console.log(
+        'PASS: real Windows file picker cancellation, 17 MiB archive preview/import, exact bytes and duplicate protection. No pack activation claimed.',
+      );
+    } finally {
+      await rm(fixture);
+    }
+  }
   await page
     .locator('.content-subtabs')
     .getByRole('button', { name: '光影包', exact: true })

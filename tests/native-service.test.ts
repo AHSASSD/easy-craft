@@ -14,6 +14,7 @@ import { WorldSettingsPanel } from '../src/features/WorldSettingsPanel';
 import { JavaPanel } from '../src/features/JavaPanel';
 import { ContentPanel } from '../src/features/ContentPanel';
 import { ResourceBrowser } from '../src/features/ResourceBrowser';
+import { PackInspector } from '../src/features/PackInspector';
 import {
   UnsavedChanges,
   useNavigationGuard,
@@ -59,6 +60,42 @@ const state = (): NativeState => ({
   },
   loginPending: false,
   loginCode: null,
+});
+test('native file picking accepts cancellation, validates previews and does not report an import on cancel', async () => {
+  const preview = {
+    kind: 'MRPACK',
+    name: 'Native fixture',
+    files: 1,
+    expandedBytes: 12,
+    downloads: 0,
+    dependencies: [],
+    paths: [],
+    warnings: [],
+  };
+  let selection: unknown = null;
+  const call = vi.fn(async (command: string) => {
+    if (command === 'native_status') return state();
+    if (command === 'native_content_pick') return false;
+    if (command === 'native_pack_pick') return selection;
+    return [];
+  });
+  const service = createNativeService(true, call as typeof invoke);
+  await service.refresh();
+  expect(await service.pickContent('instance', 'mods')).toBe(false);
+  render(createElement(PackInspector, { service }));
+  fireEvent.click(screen.getByRole('button', { name: /从电脑选择/ }));
+  await waitFor(() => expect(screen.queryByRole('status')).toBeNull());
+  expect(screen.queryByRole('alert')).toBeNull();
+  selection = preview;
+  fireEvent.click(screen.getByRole('button', { name: /从电脑选择/ }));
+  await screen.findByText('Native fixture · MRPACK');
+  selection = { ...preview, files: 10001 };
+  await expect(service.pickPack()).rejects.toThrow('整合包预览响应无效');
+  expect(call).toHaveBeenCalledWith('native_content_pick', {
+    id: 'instance',
+    kind: 'mods',
+  });
+  service.stop();
 });
 function LeaveEditor({ onLeave }: { onLeave(): void }) {
   const guard = useNavigationGuard();

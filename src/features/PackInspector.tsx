@@ -8,12 +8,17 @@ export function PackInspector({ service }: { service: NativeService }) {
   const [preview, setPreview] = useState<PackPreview | null>(null);
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
-  async function inspect(file?: File) {
-    if (!file) return;
+  async function inspect(file?: File, native = false) {
+    if (!file && !native) return;
     setPreview(null);
     setError('');
     setBusy(true);
     try {
+      if (native) {
+        setPreview(await service.pickPack());
+        return;
+      }
+      if (!file) return;
       if (!/\.(zip|mrpack)$/i.test(file.name) || file.size > 16 * 1024 * 1024)
         throw new Error('请选择不超过 16 MB 的 ZIP 或 MRPACK 文件');
       setPreview(
@@ -43,19 +48,28 @@ export function PackInspector({ service }: { service: NativeService }) {
         选择或拖入 ZIP /
         MRPACK，检查内部目录、依赖和下载来源。仅本机读取，当前阶段不安装整合包。
       </p>
-      <label>
-        选择整合包
-        <input
-          aria-label="选择整合包"
-          type="file"
-          accept=".zip,.mrpack"
-          disabled={!available || busy}
-          onChange={(event) => {
-            void inspect(event.target.files?.[0]);
-            event.target.value = '';
-          }}
-        />
-      </label>
+      <button
+        disabled={!available || busy}
+        onClick={() => void inspect(undefined, true)}
+      >
+        从电脑选择 ZIP / MRPACK（最大 512 MiB）
+      </button>
+      <details>
+        <summary>拖放与小文件选择（最大 16 MB）</summary>
+        <label>
+          选择整合包
+          <input
+            aria-label="选择整合包"
+            type="file"
+            accept=".zip,.mrpack"
+            disabled={!available || busy}
+            onChange={(event) => {
+              void inspect(event.target.files?.[0]);
+              event.target.value = '';
+            }}
+          />
+        </label>
+      </details>
       {busy && <p role="status">正在检查压缩包目录与清单…</p>}
       {error && (
         <p role="alert" className="notice">

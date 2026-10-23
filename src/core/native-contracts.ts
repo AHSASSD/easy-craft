@@ -183,6 +183,7 @@ export interface NativeService extends Observable<NativeSnapshot> {
     file: string,
     bytes: number[],
   ): Promise<void>;
+  pickContent(id: string, kind: ContentKind): Promise<boolean>;
   contentImage(id: string, file: string): Promise<string>;
   openContent(id: string, kind?: ContentKind): Promise<void>;
   renameInstance(id: string, name: string): Promise<void>;
@@ -200,6 +201,7 @@ export interface NativeService extends Observable<NativeSnapshot> {
   saveAvatar(bytes: number[]): Promise<void>;
   versions(): Promise<string[]>;
   previewPack(bytes: number[]): Promise<PackPreview>;
+  pickPack(): Promise<PackPreview | null>;
   fabricVersions(version: string): Promise<string[]>;
   saveSettings(settings: NativeSettings): Promise<void>;
   probeJava(path: string): Promise<JavaInfo>;
