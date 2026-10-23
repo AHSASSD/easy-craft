@@ -41,6 +41,26 @@ test('real library is the default and remains usable at minimum size', async ({
   await page.getByRole('tab', { name: '存档', exact: true }).click();
   await page.setViewportSize({ width: 800, height: 540 });
   expect(
+    (await page.locator('.library-main').boundingBox())!.width,
+  ).toBeGreaterThan(450);
+  await page
+    .getByRole('button', { name: '展开或折叠实例栏', exact: true })
+    .click();
+  expect(
+    (await page.locator('.library-main').boundingBox())!.width,
+  ).toBeGreaterThan(700);
+  await expect(
+    page
+      .getByRole('navigation')
+      .getByRole('button', { name: '设置', exact: true }),
+  ).toBeVisible();
+  await page
+    .getByRole('button', { name: '展开或折叠实例栏', exact: true })
+    .click();
+  expect(
+    (await page.locator('.library-main').boundingBox())!.width,
+  ).toBeGreaterThan(450);
+  expect(
     await page.evaluate(
       () => document.documentElement.scrollWidth <= innerWidth,
     ),

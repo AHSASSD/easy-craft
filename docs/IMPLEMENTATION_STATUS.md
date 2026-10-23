@@ -24,13 +24,25 @@
 - 元数据使用独立 Modrinth 域名限制，未放宽原游戏下载来源。修复公网复测发现的连接提前关闭问题：只读 GET 在请求失败时最多三次尝试，可取消；资源查询整体限时 45 秒。受控本地服务验证断连恢复与取消。
 - 实际通过：前端 35 项、Rust 33 项（5 项外部集成默认忽略）、Edge 8 项，生产构建/类型检查/ESLint/格式/Rustfmt/Clippy/调试桌面构建。另显式通过 Modrinth 公网集成（五类搜索、Mod/资源包版本查询），真实 WebView2 查到 FerriteCore 7.0.3-fabric 的文件名与 SHA-1；截图在 output/playwright/resource-detail.png。
 - 最新桌面回归同时完成本地内容管理、截图缩略图、按实例搜索/分类记忆、世界与音画配置、内存与账户保护，并将 MC 1.21.1 + Fabric 离线启动到 OpenAL 初始化；关闭取消保留进程，结束游戏后正常退出。
-- 复现：`powershell -ExecutionPolicy Bypass -File scripts/native.ps1 test -Integration resources`；桌面联网检查：`node scripts/smoke-native.mjs debug --cached --resources`。追加 `--launch-offline --fabric` 验证现有测试游戏启动。普通离线回归无需 `--resources`。当前只查询，未实现资源安装或递归依赖解析，不宣称下载/启用成功。
+- 复现：`powershell -ExecutionPolicy Bypass -File scripts/native.ps1 test -Integration resources`；桌面联网检查：`node scripts/smoke-native.mjs debug --cached --resources`。追加 `--launch-offline --fabric` 验证现有测试游戏启动。普通离线回归无需 `--resources`。本段记录查询阶段；后续安装能力见下一节。
+
+## 在线资源安装与事务回归（增量 3）
+
+- Mod、资源包、光影包完成真实流程：选择固定文件和实例 → 必需依赖预览 → 确认游戏关闭 → 下载并校验 → 提交到对应目录 → 写来源记录。前端仅提交宿主保存的计划令牌，不接受前端任意 URL 或路径作为下载指令；数据包/整合包仍使用独立的后续流程。
+- 必需依赖按固定版本或游戏/加载器兼容的正式版递归解析，明确预览未固定依赖的选择；拒绝循环、同项目不同版本、不明依赖、声明冲突、同名不同内容。可选依赖不自动安装，内置依赖不重复下载。新旧 JAR 的 Fabric 声明会再次核对 Java、游戏、加载器、依赖与 breaks 条件。
+- 支持常用 Fabric 范围、空预发布范围和共享内置库候选。实测修复了 Mod Menu/Fabric API 内置库重复误判；不同顶层 JAR 的重复 ID 仍拒绝。此检查不是 Fabric 的完整求解器：复杂多级候选父节点、超出支持的版本格式、超过深度/节点/组合/检查量边界时明确拒绝，不默认为兼容。
+- 文件同时验证大小、SHA-1 和 SHA-512，来源限于 Modrinth CDN，保留原游戏下载来源限制。已存在同内容文件保留，不自动升级替换。提交使用同目录事务缓存、不覆盖硬链接和原子来源记录；下次启动游戏或修改内容前恢复未完成日志。恢复校验 Windows 文件身份，只回滚自己的新增链接，外部改动或损坏日志保留并报告。
+- 受控夹具通过提交、取消令牌、目标修订变化、缓存篡改、模拟中断恢复、外部替换/修改保留、嵌套依赖、共享候选、重复 ID 和 Java 不满足检查。真实桌面重复安装和回读通过：FerriteCore 7.0.3、Mod Menu 11.0.5、Fabric API 0.116.17+1.21.1、Placeholder API 2.4.2+1.21、Default Dark Mode、MakeUp Ultra Fast 9.6。每个落盘文件重新核对 SHA-512；来源记录在测试实例的 .easycraft-resources.json。
+- 实际游戏 latest.log 确认加载上述四个 Mod 并完成 OpenAL 初始化；随后结束进程与关闭保护通过。资源包与光影包只证明正确保存及校验，未启用，不宣称材质或光影效果已验收。所有下载仍在 .native/integration 内；日常游戏目录未写入。
+- 修复小窗口中旧 divider 样式隐藏导致主区落入 6px 网格列的问题，给三个区域固定列位置，折叠中间栏后右侧正常扩展；同时修复安装预览继承 notice 横排样式的问题。Edge 增加主区实际宽度/折叠检查，WebView2 在 800×540 验证预览无横向溢出且确认动作可达，截图在 output/playwright/resource-install-minimum.png。
+- 当前通过：前端 37 项、Rust 39 项（5 项外部集成默认忽略）、Edge 8 项、生产构建/类型检查/ESLint/格式/Rustfmt/Clippy、调试桌面构建及真实桌面安装。状态改变后的原生操作会重新读取最新宿主状态，避免旧轮询覆盖安装结果。
+- 完整资源复测命令：`node scripts/smoke-native.mjs debug --cached --resources --install-resources --install-dependencies --install-shader --launch-offline --fabric`。读 API、下载依赖和启动游戏属于可选联网/桌面检查，不混入普通离线单元测试。安装支持单文件 512 MiB、单计划 1 GiB、目标目录校验 2 GiB 的明确边界；当前不自动替换旧版或修改游戏内启用项。
 
 ## 尚需完成的目标（不能由上述通过结果替代）
 
 - 本地内容管理的较大文件导入及最终交付验证。
-- 在线资源安装计划、递归依赖/冲突检查、强哈希校验与事务提交，整合包事务导入和世界数据包。
+- 整合包事务导入和世界数据包；资源更新/替换、复杂兼容与更多异常场景随后验收。
 - 个性化跨重启背景保存、实例级参数继承/覆盖、配置备份恢复、适配与异常场景补齐。
 - 更新后的完整测试矩阵、发布构建和安装包；真人 Microsoft 授权需到对应验收阶段由本人完成，不阻止前述独立开发。
 
-下一步：在真实查询结果上实现固定版本的安装计划、依赖解析、下载校验与提交，继续补齐本地管理边界。正式源码、独立预览与发布安装包的状态分别记录，不以局部测试通过代替整个设计目标完成。
+下一步：整合包安装与世界数据包流程，同时补齐较大本地文件导入和恢复能力。正式源码、独立预览与发布安装包的状态分别记录，不以局部测试通过代替整个设计目标完成。

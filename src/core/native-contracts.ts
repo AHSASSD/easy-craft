@@ -75,6 +75,21 @@ export type ResourceDetail = {
   body: string;
   versions: ResourceVersion[];
 };
+export type ResourcePlan = {
+  token: string;
+  instanceId: string;
+  gameVersion: string;
+  files: {
+    project: string;
+    version: string;
+    path: string;
+    size: number;
+    sha512: string;
+    sha1: string;
+    action: 'add' | 'keep';
+  }[];
+  warnings: string[];
+};
 export type ContentKind =
   'mods' | 'resourcepacks' | 'shaderpacks' | 'screenshots';
 export type ContentEntry = {
@@ -132,6 +147,13 @@ export type MemoryInfo = {
   reserveMb: number;
 };
 export interface NativeService extends Observable<NativeSnapshot> {
+  planResources(
+    id: string,
+    kind: ResourceKind,
+    version: string,
+    filename: string,
+  ): Promise<ResourcePlan>;
+  installResources(token: string): Promise<void>;
   searchResources(
     kind: ResourceKind,
     query: string,

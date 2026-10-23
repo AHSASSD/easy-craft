@@ -56,9 +56,9 @@ fn file_path(root: &Path, kind: Kind, file: &str) -> Result<PathBuf> {
 fn revision(metadata: &fs::Metadata) -> String {
     format!("{}:{}", metadata.len(), metadata.last_write_time())
 }
-fn fabric_info<R: Read + std::io::Seek>(
+pub(crate) fn fabric_metadata<R: Read + std::io::Seek>(
     archive: &mut zip::ZipArchive<R>,
-) -> Result<(String, String)> {
+) -> Result<serde_json::Value> {
     let entry = archive
         .by_name("fabric.mod.json")
         .map_err(|_| "不是可识别的 Fabric 模组")?;
@@ -72,6 +72,12 @@ fn fabric_info<R: Read + std::io::Seek>(
         .map_err(|_| "无法读取模组信息")?;
     let value: serde_json::Value =
         serde_json::from_slice(&bytes).map_err(|_| "模组描述不是有效 JSON")?;
+    Ok(value)
+}
+fn fabric_info<R: Read + std::io::Seek>(
+    archive: &mut zip::ZipArchive<R>,
+) -> Result<(String, String)> {
+    let value = fabric_metadata(archive)?;
     let id = value
         .get("id")
         .and_then(|v| v.as_str())
@@ -151,6 +157,7 @@ pub fn list(root: &Path, kind: Kind) -> Result<Vec<Entry>> {
 }
 pub fn toggle(root: &Path, file: &str, expected: &str, enabled: bool) -> Result<()> {
     let _locks = crate::worlds::lock_worlds(root)?;
+    crate::resource_install::recover(root)?;
     let old = file_path(root, Kind::Mods, file)?;
     let entry = list(root, Kind::Mods)?
         .into_iter()
@@ -185,6 +192,7 @@ fn move_no_replace(old: &Path, new: &Path) -> Result<()> {
 }
 pub fn import(root: &Path, kind: Kind, file: &str, bytes: &[u8]) -> Result<()> {
     let _locks = crate::worlds::lock_worlds(root)?;
+    crate::resource_install::recover(root)?;
     if kind == Kind::Screenshots || bytes.is_empty() || bytes.len() > MAX_IMPORT {
         return Err("本地导入须为 16 MB 以内的模组或资源 ZIP".into());
     }
@@ -198,9 +206,37 @@ pub fn import(root: &Path, kind: Kind, file: &str, bytes: &[u8]) -> Result<()> {
     let path = file_path(root, kind, file)?;
     crate::packs::preview(bytes)?;
     let mut zip = zip::ZipArchive::new(Cursor::new(bytes)).map_err(|_| "不是可读取的 ZIP")?;
+    validate_archive(kind, &mut zip)?;
+    fs::create_dir_all(path.parent().ok_or("目录无效")?).map_err(|_| "无法创建资源目录")?;
+    let staging = file_path(root, kind, &format!(".{}.importing", uuid::Uuid::new_v4()))?;
+    let mut output = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&staging)
+        .map_err(|_| "无法创建临时资源文件，未覆盖")?;
+    if output
+        .write_all(bytes)
+        .and_then(|_| output.sync_all())
+        .is_err()
+    {
+        drop(output);
+        let _ = fs::remove_file(&staging);
+        return Err("保存失败，未完成的导入已清理".into());
+    }
+    drop(output);
+    let result = move_no_replace(&staging, &path);
+    if result.is_err() {
+        let _ = fs::remove_file(&staging);
+    }
+    result
+}
+pub(crate) fn validate_archive<R: Read + std::io::Seek>(
+    kind: Kind,
+    zip: &mut zip::ZipArchive<R>,
+) -> Result<()> {
     match kind {
         Kind::Mods => {
-            fabric_info(&mut zip)?;
+            fabric_info(zip)?;
         }
         Kind::Resourcepacks => {
             let entry = zip
@@ -238,28 +274,6 @@ pub fn import(root: &Path, kind: Kind, file: &str, bytes: &[u8]) -> Result<()> {
         }
         Kind::Screenshots => unreachable!(),
     }
-    fs::create_dir_all(path.parent().ok_or("目录无效")?).map_err(|_| "无法创建资源目录")?;
-    let staging = file_path(root, kind, &format!(".{}.importing", uuid::Uuid::new_v4()))?;
-    let mut output = fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&staging)
-        .map_err(|_| "无法创建临时资源文件，未覆盖")?;
-    if output
-        .write_all(bytes)
-        .and_then(|_| output.sync_all())
-        .is_err()
-    {
-        drop(output);
-        let _ = fs::remove_file(&staging);
-        return Err("保存失败，未完成的导入已清理".into());
-    }
-    drop(output);
-    let result = move_no_replace(&staging, &path);
-    if result.is_err() {
-        let _ = fs::remove_file(&staging);
-    }
-    result?;
     Ok(())
 }
 pub fn image(root: &Path, file: &str) -> Result<String> {

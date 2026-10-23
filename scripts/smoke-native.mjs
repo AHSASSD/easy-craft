@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { createServer } from 'node:net';
 import { mkdir, copyFile, readFile } from 'node:fs/promises';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { chromium } from '@playwright/test';
@@ -115,6 +115,99 @@ try {
       .selectOption('vanilla');
   }
   if (process.argv.includes('--resources')) {
+    const resourceTarget = await page.evaluate(async () => {
+      const state = await window.__TAURI_INTERNALS__.invoke('native_status');
+      return {
+        root: state.dataRoot,
+        id: state.instances.find(
+          (i) => i.fabricVersion && i.version === '1.21.1',
+        )?.id,
+      };
+    });
+    async function installCurrentResource() {
+      assert(resourceTarget.id, 'A workspace Fabric test instance is required');
+      await page.getByLabel('资源安装目标实例').selectOption(resourceTarget.id);
+      await page
+        .getByRole('button', { name: '预览安装变更', exact: true })
+        .click();
+      await page.getByLabel('资源安装变更预览').waitFor({ timeout: 100000 });
+      await page.getByLabel('资源安装变更预览').screenshot({
+        path: path.join(project, 'output/playwright/resource-install-plan.png'),
+      });
+      const normalViewport = await page.evaluate(() => ({
+        width: innerWidth,
+        height: innerHeight,
+      }));
+      await page.setViewportSize({ width: 800, height: 540 });
+      assert(
+        await page
+          .getByLabel('资源安装变更预览')
+          .evaluate(
+            (element) => element.scrollWidth <= element.clientWidth + 1,
+          ),
+      );
+      assert(
+        await page
+          .getByLabel('资源安装变更预览')
+          .evaluate((element) => getComputedStyle(element).display === 'block'),
+      );
+      await page
+        .getByRole('button', { name: '确认安装资源', exact: true })
+        .scrollIntoViewIfNeeded();
+      await page.screenshot({
+        path: path.join(
+          project,
+          'output/playwright/resource-install-minimum.png',
+        ),
+      });
+      await page.setViewportSize(normalViewport);
+      const confirmation = page.getByRole('button', {
+        name: '确认安装资源',
+        exact: true,
+      });
+      assert(await confirmation.isDisabled());
+      await page.getByLabel('确认在线安装前游戏已关闭').check();
+      await confirmation.click();
+      await page
+        .getByText('资源安装任务已开始，请在底部查看真实进度与结果。', {
+          exact: true,
+        })
+        .waitFor();
+      let task;
+      const deadline = Date.now() + 120000;
+      do {
+        task = await page.evaluate(
+          async () =>
+            (await window.__TAURI_INTERNALS__.invoke('native_status')).task,
+        );
+        if (['succeeded', 'failed', 'cancelled'].includes(task.status)) break;
+        await new Promise((resolve) => setTimeout(resolve, 200));
+      } while (Date.now() < deadline);
+      assert.equal(task.status, 'succeeded', task.message);
+      const game = path.resolve(
+        resourceTarget.root,
+        'instances',
+        resourceTarget.id,
+        'game',
+      );
+      assert(
+        game.startsWith(
+          path.join(project, '.native', 'integration') + path.sep,
+        ),
+      );
+      const catalog = JSON.parse(
+        await readFile(path.join(game, '.easycraft-resources.json'), 'utf8'),
+      );
+      for (const file of catalog.files) {
+        assert(/^(mods|resourcepacks|shaderpacks)\/[^/\\]+$/.test(file.path));
+        const bytes = await readFile(path.join(game, file.path));
+        assert.equal(
+          createHash('sha512').update(bytes).digest('hex'),
+          file.sha512,
+        );
+      }
+      return catalog;
+    }
     await page.getByRole('button', { name: '模组', exact: true }).click();
     await page.getByLabel('搜索在线资源').fill('FerriteCore');
     await page.getByLabel('在线资源游戏版本').fill('1.21.1');
@@ -127,7 +220,10 @@ try {
       .click();
     await page.getByLabel('在线资源兼容版本').waitFor({ timeout: 100000 });
     await page.getByLabel('在线资源兼容版本').selectOption('sOzRw3CG');
-    await page.getByText(/ferritecore-7.0.3-fabric.jar/).waitFor();
+    await page
+      .locator('.resource-detail li')
+      .filter({ hasText: 'ferritecore-7.0.3-fabric.jar' })
+      .waitFor();
     assert(
       (await page.locator('.resource-hash').first().textContent()).includes(
         'a8a6a34fcda177da2828cedef44e0e538cf78aad',
@@ -136,6 +232,17 @@ try {
     await page.locator('.resource-detail').screenshot({
       path: path.join(project, 'output/playwright/resource-detail.png'),
     });
+    if (process.argv.includes('--install-resources')) {
+      const catalog = await installCurrentResource();
+      assert(
+        catalog.files.some(
+          (f) => f.project === 'uXXizFIs' && f.version === 'sOzRw3CG',
+        ),
+      );
+      console.log(
+        'PASS: actual FerriteCore download, SHA-512 readback, target directory and source record.',
+      );
+    }
     await page
       .getByRole('button', { name: '返回搜索结果', exact: true })
       .click();
@@ -144,8 +251,77 @@ try {
       'FerriteCore',
     );
     console.log(
-      'PASS: real Modrinth search/detail/version/file-hash metadata in desktop UI; no resource installation claimed.',
+      'PASS: real Modrinth search/detail/version/file-hash metadata in desktop UI.',
     );
+    if (process.argv.includes('--install-resources')) {
+      await page.getByRole('button', { name: '资源包', exact: true }).click();
+      await page.getByLabel('搜索在线资源').fill('Default Dark Mode');
+      await page.getByLabel('在线资源游戏版本').fill('1.21.1');
+      await page.getByRole('button', { name: '搜索资源', exact: true }).click();
+      await page
+        .getByRole('button', { name: '查看 Default Dark Mode', exact: true })
+        .waitFor({ timeout: 100000 });
+      await page
+        .getByRole('button', { name: '查看 Default Dark Mode', exact: true })
+        .click();
+      await page.getByLabel('在线资源兼容版本').waitFor({ timeout: 100000 });
+      await page.getByLabel('在线资源兼容版本').selectOption('S7URnfmp');
+      const catalog = await installCurrentResource();
+      assert(
+        catalog.files.some(
+          (f) =>
+            f.project === '6SLU7tS5' && f.path.startsWith('resourcepacks/'),
+        ),
+      );
+      console.log(
+        'PASS: actual resource-pack install commits to resourcepacks and verifies SHA-512; in-game activation is not claimed.',
+      );
+    }
+    if (process.argv.includes('--install-dependencies')) {
+      assert(process.argv.includes('--install-resources'));
+      await page.getByRole('button', { name: '模组', exact: true }).click();
+      await page.getByLabel('搜索在线资源').fill('Mod Menu');
+      await page.getByLabel('在线资源游戏版本').fill('1.21.1');
+      await page.getByRole('button', { name: '搜索资源', exact: true }).click();
+      await page
+        .getByRole('button', { name: '查看 Mod Menu', exact: true })
+        .waitFor({ timeout: 100000 });
+      await page
+        .getByRole('button', { name: '查看 Mod Menu', exact: true })
+        .click();
+      await page.getByLabel('在线资源兼容版本').waitFor({ timeout: 100000 });
+      await page.getByLabel('在线资源兼容版本').selectOption('6lgOkclV');
+      const catalog = await installCurrentResource();
+      for (const projectId of ['mOgUt4GM', 'eXts2L7r', 'P7dR8mSH'])
+        assert(
+          catalog.files.some((f) => f.project === projectId),
+          `Missing required source project ${projectId}`,
+        );
+      console.log(
+        'PASS: actual Mod Menu install includes both required projects, verified catalog hashes and JAR metadata checks.',
+      );
+    }
+    if (process.argv.includes('--install-shader')) {
+      assert(process.argv.includes('--install-resources'));
+      await page.getByRole('button', { name: '光影包', exact: true }).click();
+      await page.getByLabel('搜索在线资源').fill('MakeUp');
+      await page.getByLabel('在线资源游戏版本').fill('1.21.1');
+      await page.getByRole('button', { name: '搜索资源', exact: true }).click();
+      const result = page.getByRole('button', { name: /查看 MakeUp/ }).first();
+      await result.waitFor({ timeout: 100000 });
+      await result.click();
+      await page.getByLabel('在线资源兼容版本').waitFor({ timeout: 100000 });
+      const version = await page.getByLabel('在线资源兼容版本').inputValue();
+      const catalog = await installCurrentResource();
+      assert(
+        catalog.files.some(
+          (f) => f.version === version && f.path.startsWith('shaderpacks/'),
+        ),
+      );
+      console.log(
+        'PASS: actual shader ZIP installed to shaderpacks with SHA-512 verification; renderer installation/activation is not claimed.',
+      );
+    }
   }
   await page.getByRole('button', { name: '整合包', exact: true }).click();
   await page

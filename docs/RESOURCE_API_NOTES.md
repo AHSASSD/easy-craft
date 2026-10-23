@@ -68,4 +68,6 @@
 
 附：Mod Menu 11.0.5（`6lgOkclV`）不是最省事的首测对象：本次 [固定版本 JSON](https://api.modrinth.com/v2/version/6lgOkclV) 有两项 required 项目依赖 `eXts2L7r`、`P7dR8mSH`，且未固定 version_id。可以以后用来测递归依赖，但不能在尚未完成依赖解析时只下载其主 JAR 并报告安装完成。
 
-未检查：下载二进制与实际游戏效果；`.mrpack` 最新格式规范旧地址返回 404，本笔记不以其为依据设计完整整合包安装器。
+后续实施已完成 Mod/资源包/光影的真实下载、校验和部分 Mod 启动验证，实际记录见 [IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md)。本笔记前述“未下载”描述是调研时点，不是当前实现状态。`.mrpack` 最新格式规范旧地址返回 404，本笔记不以其为依据设计完整整合包安装器。
+
+共享内置库与版本范围校验另参照 Fabric 官方的 [Nested JARs](https://docs.fabricmc.net/develop/loader/#nested-jars) 和 [fabric.mod.json 依赖规则](https://docs.fabricmc.net/develop/loader/fabric-mod-json#dependency-resolution)：不能把所有嵌套同名候选一律视为顶层重复 Mod；空预发布范围和忽略构建元数据的比较也需要单独处理。Easy Craft 当前实现有明确边界，不等同于 Fabric 的完整依赖求解器。

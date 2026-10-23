@@ -23,6 +23,7 @@ import {
   createNativeService,
   validNativeState,
   validResourceDetail,
+  validResourcePlan,
 } from '../src/app/native-service';
 import type { NativeState, WorldSettings } from '../src/core/native-contracts';
 // jsdom does not implement the native dialog APIs; browser tests cover the real modal.
@@ -108,6 +109,111 @@ afterEach(() => {
   vi.useRealTimers();
   cleanup();
 });
+test('online install requires a native frozen plan and closed-game acknowledgement, sends only its token', async () => {
+  const current = state();
+  current.instances = [
+    {
+      id: 'instance',
+      name: 'Fixture',
+      version: '1.21.1',
+      manifestSha1: 'a'.repeat(40),
+      javaMajor: 21,
+      fabricVersion: '0.16.14',
+      fabricSha1: 'b'.repeat(40),
+    },
+  ];
+  const detail = {
+    id: 'Proj1234',
+    title: 'Fixture',
+    description: 'Fixture',
+    body: 'Fixture',
+    versions: [
+      {
+        id: 'Vers1234',
+        name: '1',
+        number: '1',
+        environment: 'unknown',
+        loaders: ['fabric'],
+        files: [{ filename: 'fixture.jar', size: 10, sha1: 'a'.repeat(40) }],
+        dependencies: [],
+      },
+    ],
+  };
+  const plan = {
+    token: '11111111-1111-4111-8111-111111111111',
+    instanceId: 'instance',
+    gameVersion: '1.21.1',
+    files: [
+      {
+        project: 'Proj1234',
+        version: 'Vers1234',
+        path: 'mods/fixture.jar',
+        size: 10,
+        sha1: 'a'.repeat(40),
+        sha512: 'b'.repeat(128),
+        action: 'add',
+      },
+    ],
+    warnings: [],
+  };
+  expect(validResourcePlan(plan)).toBe(true);
+  expect(
+    validResourcePlan({
+      ...plan,
+      files: [{ ...plan.files[0], path: '../outside.jar' }],
+    }),
+  ).toBe(false);
+  const call = vi.fn(async (command: string) => {
+    if (command === 'native_resource_search')
+      return {
+        hits: [
+          {
+            id: 'Proj1234',
+            title: 'Fixture',
+            description: 'Fixture',
+            author: 'Fixture',
+          },
+        ],
+        total: 1,
+        offset: 0,
+      };
+    if (command === 'native_resource_detail') return detail;
+    if (command === 'native_resource_plan') return plan;
+    return current;
+  });
+  const service = createNativeService(true, call as typeof invoke);
+  await service.refresh();
+  render(
+    createElement(ResourceBrowser, {
+      service,
+      kind: 'mod',
+      query: 'Fixture',
+      gameVersion: '1.21.1',
+      selectedId: 'instance',
+      onFilter: vi.fn(),
+    }),
+  );
+  fireEvent.click(screen.getByText('搜索资源'));
+  await screen.findByText('查看 Fixture');
+  fireEvent.click(screen.getByText('查看 Fixture'));
+  await screen.findByLabelText('在线资源兼容版本');
+  fireEvent.click(screen.getByText('预览安装变更'));
+  await screen.findByLabelText('资源安装变更预览');
+  expect((screen.getByText('确认安装资源') as HTMLButtonElement).disabled).toBe(
+    true,
+  );
+  expect(
+    call.mock.calls.some(([command]) => command === 'native_resource_install'),
+  ).toBe(false);
+  fireEvent.click(screen.getByLabelText('确认在线安装前游戏已关闭'));
+  fireEvent.click(screen.getByText('确认安装资源'));
+  await waitFor(() =>
+    expect(call).toHaveBeenCalledWith('native_resource_install', {
+      token: plan.token,
+    }),
+  );
+  service.stop();
+});
 test('content manager shows native metadata, requires closed game, and sends the file revision', async () => {
   const row = {
     file: 'fixture.jar',
@@ -172,6 +278,38 @@ test('a fresh status waits for the in-flight poll and then reads the host again'
   await Promise.all([poll, fresh]);
   expect(service.snapshot().state?.task.status).toBe('cancelled');
   expect(call).toHaveBeenCalledTimes(2);
+  service.stop();
+});
+test('state-changing native operations refresh after an older in-flight poll', async () => {
+  const current = state();
+  let first = true;
+  let resolvePoll!: (value: NativeState) => void;
+  const call = vi.fn(async (command: string) => {
+    if (command === 'native_resource_install') {
+      current.task.status = 'running';
+      return;
+    }
+    if (command === 'native_status' && first) {
+      first = false;
+      return new Promise<NativeState>((resolve) => {
+        resolvePoll = resolve;
+      });
+    }
+    return structuredClone(current);
+  });
+  const service = createNativeService(true, call as typeof invoke);
+  const poll = service.refresh();
+  const operation = service.installResources(
+    '11111111-1111-4111-8111-111111111111',
+  );
+  await waitFor(() =>
+    expect(call).toHaveBeenCalledWith('native_resource_install', {
+      token: '11111111-1111-4111-8111-111111111111',
+    }),
+  );
+  resolvePoll(state());
+  await Promise.all([poll, operation]);
+  expect(service.snapshot().state?.task.status).toBe('running');
   service.stop();
 });
 test('resource browsing validates files, preserves results on network failure and shows declared dependencies', async () => {

@@ -13,6 +13,7 @@ import type {
   ContentEntry,
   ResourceSearch,
   ResourceDetail,
+  ResourcePlan,
 } from '../core/native-contracts';
 import { isRecord } from '../core/services';
 const string = (value: unknown): value is string => typeof value === 'string';
@@ -22,6 +23,36 @@ const resourceId = (value: unknown): value is string =>
   string(value) && /^[A-Za-z0-9]{1,64}$/.test(value);
 const bounded = (value: unknown, max: number): value is string =>
   string(value) && value.length <= max;
+export function validResourcePlan(value: unknown): value is ResourcePlan {
+  return (
+    isRecord(value) &&
+    string(value.token) &&
+    /^[a-f0-9-]{36}$/.test(value.token) &&
+    bounded(value.instanceId, 128) &&
+    bounded(value.gameVersion, 100) &&
+    Array.isArray(value.warnings) &&
+    value.warnings.length <= 130 &&
+    value.warnings.every((w: unknown) => bounded(w, 2048)) &&
+    Array.isArray(value.files) &&
+    value.files.length > 0 &&
+    value.files.length <= 64 &&
+    value.files.every(
+      (f: unknown) =>
+        isRecord(f) &&
+        resourceId(f.project) &&
+        resourceId(f.version) &&
+        bounded(f.path, 256) &&
+        /^(mods|resourcepacks|shaderpacks)\/[^/\\]+$/.test(f.path) &&
+        integer(f.size) &&
+        f.size <= 512 * 1024 * 1024 &&
+        string(f.sha512) &&
+        /^[a-f0-9]{128}$/.test(f.sha512) &&
+        string(f.sha1) &&
+        /^[a-fA-F0-9]{40}$/.test(f.sha1) &&
+        ['add', 'keep'].includes(f.action as string),
+    )
+  );
+}
 export function validResourceDetail(value: unknown): value is ResourceDetail {
   return (
     isRecord(value) &&
@@ -273,7 +304,7 @@ export function createNativeService(
   const operation = async (name: string, args?: Record<string, unknown>) => {
     await request(name, args);
     update({ ...snapshot, error: '' });
-    await refresh();
+    await refresh(true);
   };
   const avatar = async () => {
     const requestedIdentity = identity(snapshot.state);
@@ -300,6 +331,19 @@ export function createNativeService(
       }, 700)
     : undefined;
   return {
+    planResources: async (id, kind, version, filename) => {
+      const value = await request('native_resource_plan', {
+        id,
+        kind,
+        version,
+        filename,
+      });
+      if (!validResourcePlan(value) || value.instanceId !== id)
+        throw new Error('安装计划响应无效');
+      return value;
+    },
+    installResources: (token) =>
+      operation('native_resource_install', { token }),
     searchResources: async (kind, query, gameVersion, offset) => {
       const value = await request('native_resource_search', {
         kind,

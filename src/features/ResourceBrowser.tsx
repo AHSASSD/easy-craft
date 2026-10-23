@@ -1,9 +1,10 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState, useSyncExternalStore } from 'react';
 import type {
   NativeService,
   ResourceDetail,
   ResourceKind,
   ResourceSearch,
+  ResourcePlan,
 } from '../core/native-contracts';
 
 const dependencyNames: Record<string, string> = {
@@ -27,6 +28,7 @@ export function ResourceBrowser({
   gameVersion,
   onFilter,
   target,
+  selectedId,
 }: {
   service: NativeService;
   kind: ResourceKind;
@@ -34,7 +36,17 @@ export function ResourceBrowser({
   gameVersion: string;
   onFilter(query: string, gameVersion: string): void;
   target?: string;
+  selectedId?: string;
 }) {
+  const native = useSyncExternalStore(service.subscribe, service.snapshot);
+  const [targetId, setTargetId] = useState(
+    selectedId ?? native.state?.instances[0]?.id ?? '',
+  );
+  const [file, setFile] = useState('');
+  const [plan, setPlan] = useState<ResourcePlan | null>(null);
+  const [closed, setClosed] = useState(false);
+  const [message, setMessage] = useState('');
+  const installing = native.state?.task.status === 'running';
   const [result, setResult] = useState<{
     value: ResourceSearch;
     query: string;
@@ -71,6 +83,7 @@ export function ResourceBrowser({
         time: new Date().toLocaleTimeString(),
       });
       setDetail(null);
+      setPlan(null);
     } catch (error) {
       if (ticket === request.current)
         setError(error instanceof Error ? error.message : '搜索失败');
@@ -88,6 +101,10 @@ export function ResourceBrowser({
       if (ticket !== request.current) return;
       setDetail(value);
       setVersionId(value.versions[0]?.id ?? '');
+      setFile(value.versions[0]?.files[0]?.filename ?? '');
+      setPlan(null);
+      setMessage('');
+      setClosed(false);
     } catch (error) {
       if (ticket === request.current)
         setError(error instanceof Error ? error.message : '读取详情失败');
@@ -96,6 +113,48 @@ export function ResourceBrowser({
     }
   }
   const selected = detail?.versions.find((version) => version.id === versionId);
+  async function previewInstall() {
+    const ticket = ++request.current;
+    setBusy(true);
+    setError('');
+    setPlan(null);
+    setMessage('');
+    try {
+      const value = await service.planResources(
+        targetId,
+        kind,
+        versionId,
+        file,
+      );
+      if (ticket === request.current) {
+        setPlan(value);
+        setClosed(false);
+      }
+    } catch (error) {
+      if (ticket === request.current)
+        setError(error instanceof Error ? error.message : '预览失败');
+    } finally {
+      if (ticket === request.current) setBusy(false);
+    }
+  }
+  async function install() {
+    if (!plan || !closed) return;
+    const ticket = ++request.current;
+    setBusy(true);
+    setError('');
+    try {
+      await service.installResources(plan.token);
+      if (ticket === request.current) {
+        setPlan(null);
+        setMessage('资源安装任务已开始，请在底部查看真实进度与结果。');
+      }
+    } catch (error) {
+      if (ticket === request.current)
+        setError(error instanceof Error ? error.message : '启动安装失败');
+    } finally {
+      if (ticket === request.current) setBusy(false);
+    }
+  }
   return (
     <section className="resource-browser">
       <p className="hint">
@@ -137,7 +196,12 @@ export function ResourceBrowser({
           {error}
         </p>
       )}
-      {busy && <p role="status">正在查询 Modrinth…</p>}
+      {message && (
+        <p className="notice" role="status">
+          {message}
+        </p>
+      )}
+      {busy && <p role="status">正在处理资源请求…</p>}
       {!service.snapshot().available && (
         <p className="notice">在线资源查询需要桌面版。</p>
       )}
@@ -149,6 +213,8 @@ export function ResourceBrowser({
               setBusy(false);
               setDetail(null);
               setError('');
+              setPlan(null);
+              setMessage('');
             }}
           >
             返回搜索结果
@@ -172,7 +238,17 @@ export function ResourceBrowser({
                   <select
                     aria-label="在线资源兼容版本"
                     value={versionId}
-                    onChange={(event) => setVersionId(event.target.value)}
+                    disabled={busy}
+                    onChange={(event) => {
+                      const id = event.target.value;
+                      setVersionId(id);
+                      setFile(
+                        detail.versions.find((v) => v.id === id)?.files[0]
+                          ?.filename ?? '',
+                      );
+                      setPlan(null);
+                      setClosed(false);
+                    }}
                   >
                     {detail.versions.map((version) => (
                       <option key={version.id} value={version.id}>
@@ -227,9 +303,104 @@ export function ResourceBrowser({
                 此项目没有匹配当前游戏版本与资源格式的文件，请修改版本后重新搜索。
               </p>
             )}
-            <p className="notice">
-              真实搜索与版本查询已接入。安装事务、依赖解析和校验提交仍在实现中；当前不会修改游戏文件。
-            </p>
+            {['mod', 'resourcepack', 'shader'].includes(kind) && selected ? (
+              <section className="resource-install">
+                <h3>安装到实例</h3>
+                <label className="field-label">
+                  目标实例
+                  <select
+                    aria-label="资源安装目标实例"
+                    disabled={busy || installing}
+                    value={targetId}
+                    onChange={(event) => {
+                      setTargetId(event.target.value);
+                      setPlan(null);
+                      setClosed(false);
+                    }}
+                  >
+                    <option value="">请选择实例</option>
+                    {native.state?.instances.map((instance) => (
+                      <option value={instance.id} key={instance.id}>
+                        {instance.name} · {instance.version} ·{' '}
+                        {instance.fabricVersion ? 'Fabric' : '原版'}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label className="field-label">
+                  版本文件
+                  <select
+                    aria-label="资源安装文件"
+                    disabled={busy}
+                    value={file}
+                    onChange={(event) => {
+                      setFile(event.target.value);
+                      setPlan(null);
+                      setClosed(false);
+                    }}
+                  >
+                    {selected.files.map((f) => (
+                      <option key={f.filename} value={f.filename}>
+                        {f.filename}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <button
+                  disabled={busy || installing || !targetId || !file}
+                  onClick={() => void previewInstall()}
+                >
+                  预览安装变更
+                </button>
+                {plan && (
+                  <section className="notice" aria-label="资源安装变更预览">
+                    <h3>将写入 Minecraft {plan.gameVersion} 的文件</h3>
+                    <ul>
+                      {plan.files.map((f) => (
+                        <li key={f.path}>
+                          {f.action === 'keep' ? '保留已有' : '新增'}：{f.path}{' '}
+                          · {(f.size / 1024 / 1024).toFixed(2)} MB
+                          <details>
+                            <summary>来源与校验信息</summary>
+                            <small className="resource-hash">
+                              项目 {f.project} / 版本 {f.version} · SHA-512{' '}
+                              {f.sha512}
+                            </small>
+                          </details>
+                        </li>
+                      ))}
+                    </ul>
+                    {plan.warnings.map((warning, index) => (
+                      <p key={index}>{warning}</p>
+                    ))}
+                    <label className="toggle-row">
+                      <span>我已退出目标实例的游戏并检查以上变更</span>
+                      <input
+                        aria-label="确认在线安装前游戏已关闭"
+                        type="checkbox"
+                        disabled={busy || installing}
+                        checked={closed}
+                        onChange={(event) => setClosed(event.target.checked)}
+                      />
+                    </label>
+                    <button
+                      disabled={busy || installing || !closed}
+                      onClick={() => void install()}
+                    >
+                      确认安装资源
+                    </button>
+                  </section>
+                )}
+                <p className="hint">
+                  安装前再次检查目标内容与 JAR
+                  声明条件；同名不同内容或依赖冲突会拒绝提交。下载资源包/光影包不会自动在游戏中启用。
+                </p>
+              </section>
+            ) : (
+              <p className="notice">
+                此类别的安装需要整合包或目标世界的专用流程，目前可查询元数据。
+              </p>
+            )}
           </article>
         </>
       ) : result ? (

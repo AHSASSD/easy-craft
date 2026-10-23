@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tokio_util::sync::CancellationToken;
 
-#[derive(Clone, Copy, Deserialize, Serialize)]
+#[derive(Clone, Copy, Deserialize, Serialize, PartialEq)]
 #[serde(rename_all = "lowercase")]
 pub enum Kind {
     Mod,
@@ -26,7 +26,7 @@ impl Kind {
             Self::Modpack => "modpack",
         }
     }
-    fn loaders(self) -> &'static [&'static str] {
+    pub(crate) fn loaders(self) -> &'static [&'static str] {
         match self {
             Self::Mod => &["fabric"],
             Self::Resourcepack => &["minecraft"],
@@ -85,7 +85,7 @@ pub struct Detail {
     body: String,
     versions: Vec<Version>,
 }
-fn text(value: &Value, key: &str, max: usize) -> Result<String> {
+pub(crate) fn text(value: &Value, key: &str, max: usize) -> Result<String> {
     value
         .get(key)
         .and_then(Value::as_str)
@@ -93,7 +93,7 @@ fn text(value: &Value, key: &str, max: usize) -> Result<String> {
         .map(str::to_string)
         .ok_or_else(|| format!("资源字段无效：{key}"))
 }
-fn id(value: &str) -> Result<()> {
+pub(crate) fn id(value: &str) -> Result<()> {
     if value.is_empty() || value.len() > 64 || !value.bytes().all(|c| c.is_ascii_alphanumeric()) {
         return Err("资源 ID 无效".into());
     }
@@ -172,7 +172,12 @@ pub async fn search(kind: Kind, query: &str, game: &str, offset: u64) -> Result<
         net::resource_json(&net::client()?, url.as_str(), &CancellationToken::new()).await?;
     parse_search(&value, offset)
 }
-fn parse_versions(value: &Value, project: &str, kind: Kind, game: &str) -> Result<Vec<Version>> {
+pub(crate) fn parse_versions(
+    value: &Value,
+    project: &str,
+    kind: Kind,
+    game: &str,
+) -> Result<Vec<Version>> {
     let rows = value
         .as_array()
         .filter(|v| v.len() <= 1000)

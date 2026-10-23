@@ -961,6 +961,7 @@ function Shell({ services }: { services: Services }) {
                     </div>
                     <ResourceBrowser
                       key={nav.downloadCategory}
+                      selectedId={selected?.id}
                       service={services.native}
                       kind={nav.downloadCategory}
                       query={

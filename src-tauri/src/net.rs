@@ -242,6 +242,37 @@ pub async fn download(
     cancel: &CancellationToken,
 ) -> Result<PathBuf> {
     let url = trusted_url(&artifact.url)?;
+    download_url(client, root, artifact, url, cancel).await
+}
+pub fn resource_download_url(raw: &str) -> Result<Url> {
+    let url = Url::parse(raw).map_err(|_| "资源文件地址无效")?;
+    if url.scheme() != "https"
+        || url.host_str() != Some("cdn.modrinth.com")
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.port().is_some_and(|p| p != 443)
+        || !url.path().starts_with("/data/")
+    {
+        return Err("拒绝非 Modrinth 文件来源".into());
+    }
+    Ok(url)
+}
+pub async fn resource_download(
+    client: &Client,
+    root: &Path,
+    artifact: &Artifact,
+    cancel: &CancellationToken,
+) -> Result<PathBuf> {
+    let url = resource_download_url(&artifact.url)?;
+    download_url(client, root, artifact, url, cancel).await
+}
+async fn download_url(
+    client: &Client,
+    root: &Path,
+    artifact: &Artifact,
+    url: Url,
+    cancel: &CancellationToken,
+) -> Result<PathBuf> {
     if !valid_sha1(&artifact.sha1) || artifact.size.is_some_and(|size| size > 512 * 1024 * 1024) {
         return Err("下载校验信息或大小无效".into());
     }

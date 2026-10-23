@@ -26,6 +26,7 @@ struct Inner {
     login: Option<Pending>,
     auth_cancel: Option<CancellationToken>,
     auth_busy: bool,
+    resource_plan: Option<crate::resource_install::Plan>,
 }
 pub struct Host {
     _lock: fs::File,
@@ -103,6 +104,7 @@ impl Host {
                 login: None,
                 auth_cancel: None,
                 auth_busy: false,
+                resource_plan: None,
             }),
         }))
     }
@@ -239,9 +241,88 @@ impl Host {
         inner.cancel = None;
     }
     pub fn cancel(&self) {
-        if let Some(cancel) = &self.inner.lock().expect("host state poisoned").cancel {
+        let inner = self.inner.lock().expect("host state poisoned");
+        if inner.task.phase == "resources-committed" {
+            return;
+        }
+        if let Some(cancel) = &inner.cancel {
             cancel.cancel();
         }
+    }
+    pub async fn resource_plan(
+        &self,
+        id: String,
+        kind: crate::resources::Kind,
+        version: String,
+        filename: String,
+    ) -> Result<crate::resource_install::Plan> {
+        let instance = self
+            .status()
+            .instances
+            .into_iter()
+            .find(|item| item.id == id)
+            .ok_or("安装目标不存在")?;
+        let plan =
+            crate::resource_install::prepare(self, instance, kind, &version, &filename).await?;
+        let mut inner = self.inner.lock().map_err(|_| "宿主状态不可用")?;
+        if inner.cancel.is_some() {
+            return Err("已有游戏或任务运行，预览未保存".into());
+        }
+        inner.resource_plan = Some(plan.clone());
+        Ok(plan)
+    }
+    pub fn start_resource_install(self: &Arc<Self>, token: String) -> Result<()> {
+        let plan = {
+            let mut inner = self.inner.lock().map_err(|_| "宿主状态不可用")?;
+            if inner.cancel.is_some() || inner.auth_cancel.is_some() {
+                return Err("请先结束当前任务或登录".into());
+            }
+            if !inner
+                .resource_plan
+                .as_ref()
+                .is_some_and(|plan| plan.token == token)
+            {
+                return Err("安装计划无效或已被替换，请重新预览".into());
+            }
+            inner.resource_plan.take().ok_or("安装计划不可用")?
+        };
+        if plan.java_path != self.status().settings.java_path {
+            return Err("Java 配置已变化，请重新生成安装计划".into());
+        }
+        let cancel = self.begin_task("准备资源安装")?;
+        let host = self.clone();
+        tauri::async_runtime::spawn(async move {
+            host.log(
+                &format!(
+                    "资源安装：实例 {}，{} 个固定版本文件",
+                    plan.instance_id,
+                    plan.files.len()
+                ),
+                &[],
+            );
+            let result = async {
+                let paths = crate::resource_install::download(&host, &plan, &cancel).await?;
+                let mut inner = host.inner.lock().map_err(|_| "宿主状态不可用")?;
+                let instance = inner
+                    .instances
+                    .iter()
+                    .find(|item| item.id == plan.instance_id)
+                    .ok_or("安装目标已变化")?;
+                let root =
+                    model::safe_path(&host.root, &format!("instances/{}/game", instance.id))?;
+                crate::resource_install::commit(&root, instance, &plan, &paths, &cancel)?;
+                inner.task.phase = "resources-committed".into();
+                inner.task.completed = plan.files.len();
+                inner.task.total = plan.files.len();
+                Ok(())
+            }
+            .await;
+            if let Err(error) = &result {
+                host.log(&format!("资源安装未完成：{error}"), &[]);
+            }
+            host.finish(result, &cancel);
+        });
+        Ok(())
     }
     pub fn start_install(self: &Arc<Self>, version: String, name: String) -> Result<()> {
         self.start_install_inner(version, name, None)
@@ -338,6 +419,10 @@ impl Host {
                 .cloned()
                 .ok_or("本地实例不存在")?
         };
+        self.instance_files(&id, |root| {
+            let _locks = crate::worlds::lock_worlds(root)?;
+            crate::resource_install::recover(root)
+        })?;
         let cancel = self.begin_task("检查账户、Java 与已安装资源")?;
         let host = self.clone();
         tauri::async_runtime::spawn(async move {

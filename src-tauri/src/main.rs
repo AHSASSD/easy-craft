@@ -9,6 +9,7 @@ mod minecraft;
 mod model;
 mod net;
 mod packs;
+mod resource_install;
 mod resources;
 mod skins;
 #[cfg(test)]
@@ -18,6 +19,21 @@ use host::Host;
 use model::Result;
 use std::sync::Arc;
 use tauri::State;
+
+#[tauri::command]
+async fn native_resource_plan(
+    host: State<'_, Arc<Host>>,
+    id: String,
+    kind: resources::Kind,
+    version: String,
+    filename: String,
+) -> Result<resource_install::Plan> {
+    host.resource_plan(id, kind, version, filename).await
+}
+#[tauri::command]
+fn native_resource_install(host: State<'_, Arc<Host>>, token: String) -> Result<()> {
+    host.start_resource_install(token)
+}
 
 #[tauri::command]
 async fn native_resource_search(
@@ -311,6 +327,8 @@ fn main() {
             native_pack_preview,
             native_resource_search,
             native_resource_detail,
+            native_resource_plan,
+            native_resource_install,
             native_versions,
             native_settings,
             native_memory,

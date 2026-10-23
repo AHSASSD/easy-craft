@@ -27,8 +27,10 @@ pub fn preview(bytes: &[u8]) -> Result<PackPreview> {
     if bytes.is_empty() || bytes.len() > 16 * 1024 * 1024 {
         return Err("预览文件须小于 16 MB".into());
     }
-    let mut zip =
-        zip::ZipArchive::new(Cursor::new(bytes)).map_err(|_| "不是有效的 ZIP / MRPACK 文件")?;
+    preview_reader(Cursor::new(bytes))
+}
+pub(crate) fn preview_reader<R: Read + std::io::Seek>(input: R) -> Result<PackPreview> {
+    let mut zip = zip::ZipArchive::new(input).map_err(|_| "不是有效的 ZIP / MRPACK 文件")?;
     if zip.len() > 10000 {
         return Err("整合包条目超过 10000 项上限".into());
     }
