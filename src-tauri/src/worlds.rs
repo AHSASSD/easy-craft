@@ -32,10 +32,28 @@ fn read(path: &Path) -> Result<Vec<u8>> {
     Ok(bytes)
 }
 fn component(value: &str) -> Result<()> {
-    if value.is_empty() || value.contains(['/', '\\']) || value == "." || value == ".." {
+    if value.is_empty()
+        || value.chars().count() > 255
+        || value.contains(['/', '\\'])
+        || value == "."
+        || value == ".."
+    {
         return Err("无效存档目录".into());
     }
     Ok(())
+}
+pub fn selected_world(root: &Path, id: &str) -> Result<PathBuf> {
+    let path = world_dir(root, id)?;
+    if !model::safe_path(&path, "level.dat")?.is_file() {
+        return Err("所选世界不存在或缺少 level.dat".into());
+    }
+    Ok(path)
+}
+pub fn data_version(world: &Path) -> Result<u32> {
+    let (raw, fields) = decode(&read(&model::safe_path(world, "level.dat")?)?)?;
+    scalar(&raw, &fields, "DataVersion", 3)?
+        .and_then(|v| u32::try_from(v).ok())
+        .ok_or_else(|| "世界缺少有效 DataVersion，不能自动判断数据包兼容性".into())
 }
 fn world_dir(root: &Path, id: &str) -> Result<PathBuf> {
     component(id)?;
@@ -176,6 +194,7 @@ impl Nbt<'_> {
                     && [
                         b"Difficulty".as_slice(),
                         b"DifficultyLocked",
+                        b"DataVersion",
                         b"allowCommands",
                         b"hardcore",
                         b"GameType",
@@ -242,9 +261,6 @@ fn decode(bytes: &[u8]) -> Result<(Vec<u8>, Fields)> {
     if reader.pos != raw.len() {
         return Err("NBT 包含未识别的尾随内容".into());
     }
-    if !reader.fields.contains_key("Difficulty") {
-        return Err("此存档的难度布局暂不支持，原文件未修改（含 26.1 新格式）".into());
-    }
     let fields = reader.fields;
     Ok((raw, fields))
 }
@@ -289,7 +305,8 @@ fn rule_string(raw: &[u8], offset: usize) -> Result<String> {
 }
 fn world_settings(bytes: &[u8]) -> Result<WorldSettings> {
     let (raw, fields) = decode(bytes)?;
-    let difficulty = scalar(&raw, &fields, "Difficulty", 1)?.ok_or("缺少难度")?;
+    let difficulty = scalar(&raw, &fields, "Difficulty", 1)?
+        .ok_or("此存档的难度布局暂不支持，原文件未修改（含 26.1 新格式）")?;
     if !(0..=3).contains(&difficulty) {
         return Err("存档难度值无效".into());
     }
@@ -627,6 +644,7 @@ mod tests {
         }
         for (name, value) in [
             ("GameType", 0i32),
+            ("DataVersion", 3955),
             ("rainTime", 6000),
             ("thunderTime", 6000),
             ("clearWeatherTime", 0),

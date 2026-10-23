@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { Globe2, Volume2, ShieldCheck, RefreshCw } from 'lucide-react';
 import { useEditor, useNavigationGuard } from './UnsavedChanges';
+import { WorldDatapacks } from './WorldDatapacks';
 import type {
   ClientOptions,
   NativeService,
@@ -62,11 +63,13 @@ export function WorldSettingsPanel({
   id,
   running,
   section = 'all',
+  onDatapacks,
 }: {
   service: NativeService;
   id: string;
   running: boolean;
   section?: 'all' | 'world' | 'options';
+  onDatapacks?(worldId: string): void;
 }) {
   const [worlds, setWorlds] = useState<WorldEntry[]>([]);
   const [worldId, setWorldId] = useState('');
@@ -270,6 +273,16 @@ export function WorldSettingsPanel({
                 此实例尚无可读取的存档。先在 Minecraft
                 中创建世界，再回来调整；不会自动创建空存档。
               </p>
+            )}
+            {worldId && onDatapacks && (
+              <WorldDatapacks
+                key={worldId}
+                service={service}
+                id={id}
+                worldId={worldId}
+                running={running || busy}
+                onDownload={() => onDatapacks(worldId)}
+              />
             )}
             {world && (
               <fieldset

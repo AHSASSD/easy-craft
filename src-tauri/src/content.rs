@@ -16,6 +16,8 @@ pub enum Kind {
     Resourcepacks,
     Shaderpacks,
     Screenshots,
+    #[serde(skip)]
+    Datapacks,
 }
 impl Kind {
     fn dir(self) -> &'static str {
@@ -24,6 +26,7 @@ impl Kind {
             Self::Resourcepacks => "resourcepacks",
             Self::Shaderpacks => "shaderpacks",
             Self::Screenshots => "screenshots",
+            Self::Datapacks => "datapacks",
         }
     }
 }
@@ -157,7 +160,7 @@ pub fn list(root: &Path, kind: Kind) -> Result<Vec<Entry>> {
 }
 pub fn toggle(root: &Path, file: &str, expected: &str, enabled: bool) -> Result<()> {
     let _locks = crate::worlds::lock_worlds(root)?;
-    crate::resource_install::recover(root)?;
+    crate::resource_install::recover_all(root)?;
     let old = file_path(root, Kind::Mods, file)?;
     let entry = list(root, Kind::Mods)?
         .into_iter()
@@ -192,7 +195,7 @@ fn move_no_replace(old: &Path, new: &Path) -> Result<()> {
 }
 pub fn import(root: &Path, kind: Kind, file: &str, bytes: &[u8]) -> Result<()> {
     let _locks = crate::worlds::lock_worlds(root)?;
-    crate::resource_install::recover(root)?;
+    crate::resource_install::recover_all(root)?;
     if kind == Kind::Screenshots || bytes.is_empty() || bytes.len() > MAX_IMPORT {
         return Err("本地导入须为 16 MB 以内的模组或资源 ZIP".into());
     }
@@ -238,7 +241,7 @@ pub(crate) fn validate_archive<R: Read + std::io::Seek>(
         Kind::Mods => {
             fabric_info(zip)?;
         }
-        Kind::Resourcepacks => {
+        Kind::Resourcepacks | Kind::Datapacks => {
             let entry = zip
                 .by_name("pack.mcmeta")
                 .map_err(|_| "资源包缺少 pack.mcmeta")?;
@@ -247,12 +250,17 @@ pub(crate) fn validate_archive<R: Read + std::io::Seek>(
             }
             let value: serde_json::Value = serde_json::from_reader(entry.take(512 * 1024 + 1))
                 .map_err(|_| "资源包描述无效")?;
-            if value
-                .pointer("/pack/pack_format")
-                .and_then(|v| v.as_u64())
-                .is_none()
-            {
-                return Err("缺少资源包格式版本".into());
+            pack_range(&value, kind == Kind::Datapacks)?;
+            if kind == Kind::Datapacks {
+                let mut found = false;
+                for name in zip.file_names() {
+                    if name.map_err(|_| "数据包文件名无效")?.starts_with("data/") {
+                        found = true;
+                    }
+                }
+                if !found {
+                    return Err("数据包缺少根目录 data/，请使用 Java 数据包 ZIP".into());
+                }
             }
         }
         Kind::Shaderpacks => {
@@ -273,6 +281,108 @@ pub(crate) fn validate_archive<R: Read + std::io::Seek>(
             }
         }
         Kind::Screenshots => unreachable!(),
+    }
+    Ok(())
+}
+pub(crate) type PackVersion = (u32, u32);
+pub(crate) type PackRange = (PackVersion, PackVersion);
+pub(crate) fn pack_bound(value: &serde_json::Value, upper: bool) -> Result<PackVersion> {
+    let integer = |v: &serde_json::Value| {
+        v.as_u64()
+            .filter(|n| *n <= i32::MAX as u64)
+            .map(|n| n as u32)
+            .ok_or_else(|| "包格式版本必须是非负整数".to_string())
+    };
+    if let Some(values) = value.as_array() {
+        return match values.as_slice() {
+            [major] => Ok((integer(major)?, if upper { i32::MAX as u32 } else { 0 })),
+            [major, minor] => Ok((integer(major)?, integer(minor)?)),
+            _ => Err("包格式版本数组须为一到两个整数".into()),
+        };
+    }
+    Ok((integer(value)?, if upper { i32::MAX as u32 } else { 0 }))
+}
+pub(crate) fn pack_range(value: &serde_json::Value, datapack: bool) -> Result<PackRange> {
+    let pack = value
+        .get("pack")
+        .and_then(|v| v.as_object())
+        .ok_or("缺少 pack 元数据")?;
+    let range = if pack.contains_key("min_format") || pack.contains_key("max_format") {
+        (
+            pack_bound(pack.get("min_format").ok_or("缺少 min_format")?, false)?,
+            pack_bound(pack.get("max_format").ok_or("缺少 max_format")?, true)?,
+        )
+    } else {
+        legacy_pack_range(pack, datapack)?
+    };
+    if range.0 > range.1 {
+        return Err("包格式版本范围倒置".into());
+    }
+    Ok(range)
+}
+fn legacy_pack_range(
+    pack: &serde_json::Map<String, serde_json::Value>,
+    datapack: bool,
+) -> Result<PackRange> {
+    let original = pack.get("pack_format").ok_or("缺少包格式版本")?;
+    if !original.is_u64() {
+        return Err("pack_format 必须是非负整数".into());
+    }
+    let original = pack_bound(original, false)?;
+    if original.0 >= if datapack { 82 } else { 65 } {
+        return Err("新版包格式需要 min_format 和 max_format".into());
+    }
+    let range = if let Some(supported) = pack.get("supported_formats") {
+        if let Some(object) = supported.as_object() {
+            (
+                pack_bound(
+                    object.get("min_inclusive").ok_or("缺少 min_inclusive")?,
+                    false,
+                )?,
+                pack_bound(
+                    object.get("max_inclusive").ok_or("缺少 max_inclusive")?,
+                    true,
+                )?,
+            )
+        } else if let Some(values) = supported.as_array() {
+            match values.as_slice() {
+                [min, max] => (pack_bound(min, false)?, pack_bound(max, true)?),
+                _ => return Err("supported_formats 范围无效".into()),
+            }
+        } else {
+            (pack_bound(supported, false)?, pack_bound(supported, true)?)
+        }
+    } else {
+        (original, (original.0, i32::MAX as u32))
+    };
+    if range.0 > range.1 {
+        return Err("包格式版本范围倒置".into());
+    }
+    Ok(range)
+}
+pub(crate) fn validate_pack_target(
+    value: &serde_json::Value,
+    datapack: bool,
+    expected: PackVersion,
+) -> Result<()> {
+    let declared = pack_range(value, datapack)?;
+    let pack = value
+        .get("pack")
+        .and_then(|v| v.as_object())
+        .ok_or("包元数据无效")?;
+    let range = if expected.0 < if datapack { 82 } else { 65 } {
+        legacy_pack_range(pack, datapack)?
+    } else {
+        if !pack.contains_key("min_format") || !pack.contains_key("max_format") {
+            return Err("目标游戏需要新版 min_format/max_format 声明".into());
+        }
+        declared
+    };
+    if expected < range.0 || expected > range.1 || expected < declared.0 || expected > declared.1 {
+        return Err(format!(
+            "包声明的格式不包含目标 {}.{}，未安装",
+            expected.0, expected.1
+        ));
     }
     Ok(())
 }
@@ -331,6 +441,42 @@ mod tests {
         zip.write_all(br#"{"id":"testmod","name":"Test Mod","version":"1.0"}"#)
             .unwrap();
         zip.finish().unwrap().into_inner()
+    }
+    #[test]
+    fn pack_formats_check_legacy_ranges_modern_minor_versions_and_backwards_declarations() {
+        use serde_json::json;
+        let legacy = json!({"pack":{"pack_format":48,"supported_formats":[41,48]}});
+        validate_pack_target(&legacy, true, (48, 0)).unwrap();
+        validate_pack_target(&legacy, true, (41, 0)).unwrap();
+        assert!(validate_pack_target(&legacy, true, (49, 0)).is_err());
+        assert!(validate_pack_target(&legacy, true, (88, 0)).is_err());
+        let modern = json!({"pack":{"min_format":[88,1],"max_format":88}});
+        validate_pack_target(&modern, true, (88, 100)).unwrap();
+        assert!(validate_pack_target(&modern, true, (88, 0)).is_err());
+        assert!(validate_pack_target(&modern, true, (89, 0)).is_err());
+        assert!(validate_pack_target(
+            &json!({"pack":{"min_format":48,"max_format":48}}),
+            true,
+            (48, 0)
+        )
+        .is_err());
+        for pack in [
+            json!({"pack_format":-1}),
+            json!({"pack_format":[48]}),
+            json!({"min_format":[88,1,2],"max_format":89}),
+            json!({"min_format":90,"max_format":88}),
+            json!({"pack_format":88}),
+        ] {
+            assert!(pack_range(&json!({"pack":pack}), true).is_err());
+        }
+        let mut zip = zip::ZipWriter::new(Cursor::new(vec![]));
+        zip.start_file("pack.mcmeta", zip::write::SimpleFileOptions::default())
+            .unwrap();
+        zip.write_all(br#"{"pack":{"pack_format":48,"description":"fixture"}}"#)
+            .unwrap();
+        let bytes = zip.finish().unwrap().into_inner();
+        let mut zip = zip::ZipArchive::new(Cursor::new(bytes)).unwrap();
+        assert!(validate_archive(Kind::Datapacks, &mut zip).is_err());
     }
     #[test]
     fn imports_identifies_toggles_without_overwriting_and_preserves_unknown_files() {

@@ -72,6 +72,75 @@ pub struct Prepared {
     pub native_archives: Vec<PathBuf>,
     pub java_major: u32,
 }
+pub struct DatapackVersion {
+    pub world: u32,
+    pub format: crate::content::PackVersion,
+}
+pub fn datapack_version(host: &Host, instance: &Instance) -> Result<DatapackVersion> {
+    let metadata = safe_path(
+        &host.root,
+        &format!(
+            "versions/{}/{}.json",
+            instance.version, instance.manifest_sha1
+        ),
+    )?;
+    if !net::matches(&metadata, &instance.manifest_sha1, None)?
+        || fs::metadata(&metadata)
+            .map_err(|_| "无法读取游戏版本")?
+            .len()
+            > 8 * 1024 * 1024
+    {
+        return Err("官方版本元数据缺失或损坏，请先修复实例".into());
+    }
+    let value: Value = serde_json::from_slice(&fs::read(metadata).map_err(|_| "无法读取游戏版本")?)
+        .map_err(|_| "游戏版本元数据无效")?;
+    let client = safe_path(
+        &host.root,
+        &format!("versions/{}/client.jar", instance.version),
+    )?;
+    let hash = value
+        .pointer("/downloads/client/sha1")
+        .and_then(Value::as_str)
+        .ok_or("游戏文件校验信息缺失")?;
+    if !net::matches(
+        &client,
+        hash,
+        value
+            .pointer("/downloads/client/size")
+            .and_then(Value::as_u64),
+    )? {
+        return Err("原版游戏文件缺失或损坏，请先修复实例".into());
+    }
+    let mut archive = zip::ZipArchive::new(fs::File::open(client).map_err(|_| "无法读取游戏文件")?)
+        .map_err(|_| "游戏 JAR 无效")?;
+    let entry = archive
+        .by_name("version.json")
+        .map_err(|_| "此游戏版本未提供内置数据包格式，暂不自动安装")?;
+    if entry.size() > 64 * 1024 {
+        return Err("游戏版本信息过大".into());
+    }
+    let info: Value =
+        serde_json::from_reader(entry.take(64 * 1024 + 1)).map_err(|_| "游戏内置版本信息无效")?;
+    if info.get("id").and_then(Value::as_str) != Some(instance.version.as_str()) {
+        return Err("游戏内置版本与实例不符".into());
+    }
+    let world = info
+        .get("world_version")
+        .and_then(Value::as_u64)
+        .and_then(|n| u32::try_from(n).ok())
+        .ok_or("缺少世界数据版本")?;
+    let mut format = crate::content::pack_bound(
+        info.pointer("/pack_version/data").ok_or("缺少数据包格式")?,
+        false,
+    )?;
+    if let Some(minor) = info.pointer("/pack_version/data_minor") {
+        format.1 = minor
+            .as_u64()
+            .and_then(|n| u32::try_from(n).ok())
+            .ok_or("数据包次版本无效")?;
+    }
+    Ok(DatapackVersion { world, format })
+}
 pub async fn prepare(host: &Host, entry: &Version, cancel: &CancellationToken) -> Result<Prepared> {
     if !valid_id(&entry.id) || !valid_sha1(&entry.sha1) {
         return Err("无效版本标识或校验信息".into());

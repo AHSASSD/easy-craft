@@ -79,6 +79,8 @@ export type ResourcePlan = {
   token: string;
   instanceId: string;
   gameVersion: string;
+  worldId?: string | null;
+  dataFormat?: [number, number] | null;
   files: {
     project: string;
     version: string;
@@ -147,11 +149,14 @@ export type MemoryInfo = {
   reserveMb: number;
 };
 export interface NativeService extends Observable<NativeSnapshot> {
+  datapacks(id: string, worldId: string): Promise<ContentEntry[]>;
+  openDatapacks(id: string, worldId: string): Promise<void>;
   planResources(
     id: string,
     kind: ResourceKind,
     version: string,
     filename: string,
+    worldId?: string,
   ): Promise<ResourcePlan>;
   installResources(token: string): Promise<void>;
   searchResources(

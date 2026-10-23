@@ -30,6 +30,7 @@ test('navigation persists independently while old preferences remain valid', () 
       scroll: { download: 70 },
       contentQueries: { 'instance:mods': 'fabric' },
       resourceKinds: { instance: 'shaderpacks' },
+      datapackWorlds: { instance: '世界 A' },
     },
   });
   expect(createPreferences(storage).snapshot().navigation).toMatchObject({
@@ -38,6 +39,7 @@ test('navigation persists independently while old preferences remain valid', () 
     instanceTabs: { instance: 'worlds' },
     contentQueries: { 'instance:mods': 'fabric' },
     resourceKinds: { instance: 'shaderpacks' },
+    datapackWorlds: { instance: '世界 A' },
   });
   expect(() =>
     preferences.update({
@@ -48,6 +50,15 @@ test('navigation persists independently while old preferences remain valid', () 
     validPreferences({
       ...preferences.snapshot(),
       navigation: { ...defaultNavigation, contentQueries: { bad: 1 } },
+    }),
+  ).toBe(false);
+  expect(
+    validPreferences({
+      ...preferences.snapshot(),
+      navigation: {
+        ...defaultNavigation,
+        datapackWorlds: { instance: '../other' },
+      },
     }),
   ).toBe(false);
   expect(

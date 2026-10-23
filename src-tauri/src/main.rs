@@ -27,12 +27,50 @@ async fn native_resource_plan(
     kind: resources::Kind,
     version: String,
     filename: String,
+    world_id: Option<String>,
 ) -> Result<resource_install::Plan> {
-    host.resource_plan(id, kind, version, filename).await
+    host.resource_plan(id, kind, version, filename, world_id)
+        .await
 }
 #[tauri::command]
 fn native_resource_install(host: State<'_, Arc<Host>>, token: String) -> Result<()> {
     host.start_resource_install(token)
+}
+#[tauri::command]
+async fn native_world_datapacks(
+    host: State<'_, Arc<Host>>,
+    id: String,
+    world_id: String,
+) -> Result<Vec<content::Entry>> {
+    let host = host.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        host.instance_files(&id, |root| {
+            content::list(
+                &worlds::selected_world(root, &world_id)?,
+                content::Kind::Datapacks,
+            )
+        })
+    })
+    .await
+    .map_err(|_| "数据包列表读取失败".to_string())?
+}
+#[tauri::command]
+async fn native_world_datapacks_open(
+    host: State<'_, Arc<Host>>,
+    id: String,
+    world_id: String,
+) -> Result<()> {
+    let host = host.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        host.instance_files(&id, |root| {
+            content::open(
+                &worlds::selected_world(root, &world_id)?,
+                Some(content::Kind::Datapacks),
+            )
+        })
+    })
+    .await
+    .map_err(|_| "数据包目录打开失败".to_string())?
 }
 
 #[tauri::command]
@@ -329,6 +367,8 @@ fn main() {
             native_resource_detail,
             native_resource_plan,
             native_resource_install,
+            native_world_datapacks,
+            native_world_datapacks_open,
             native_versions,
             native_settings,
             native_memory,

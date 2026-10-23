@@ -255,6 +255,7 @@ impl Host {
         kind: crate::resources::Kind,
         version: String,
         filename: String,
+        world_id: Option<String>,
     ) -> Result<crate::resource_install::Plan> {
         let instance = self
             .status()
@@ -263,7 +264,8 @@ impl Host {
             .find(|item| item.id == id)
             .ok_or("安装目标不存在")?;
         let plan =
-            crate::resource_install::prepare(self, instance, kind, &version, &filename).await?;
+            crate::resource_install::prepare(self, instance, kind, &version, &filename, world_id)
+                .await?;
         let mut inner = self.inner.lock().map_err(|_| "宿主状态不可用")?;
         if inner.cancel.is_some() {
             return Err("已有游戏或任务运行，预览未保存".into());
@@ -421,7 +423,7 @@ impl Host {
         };
         self.instance_files(&id, |root| {
             let _locks = crate::worlds::lock_worlds(root)?;
-            crate::resource_install::recover(root)
+            crate::resource_install::recover_all(root)
         })?;
         let cancel = self.begin_task("检查账户、Java 与已安装资源")?;
         let host = self.clone();

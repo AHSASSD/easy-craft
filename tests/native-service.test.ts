@@ -280,6 +280,123 @@ test('a fresh status waits for the in-flight poll and then reads the host again'
   expect(call).toHaveBeenCalledTimes(2);
   service.stop();
 });
+test('datapack browsing requires a concrete world and rejects a plan for another world', async () => {
+  const current = state();
+  current.instances = [
+    {
+      id: 'instance',
+      name: 'Vanilla',
+      version: '1.21.1',
+      manifestSha1: 'a'.repeat(40),
+      javaMajor: 21,
+      fabricVersion: '',
+      fabricSha1: '',
+    },
+  ];
+  const detail = {
+    id: 'Proj1234',
+    title: 'Data Fixture',
+    description: 'Fixture',
+    body: 'Fixture',
+    versions: [
+      {
+        id: 'Vers1234',
+        name: '1',
+        number: '1',
+        environment: 'unknown',
+        loaders: ['datapack'],
+        files: [{ filename: 'fixture.zip', size: 10, sha1: 'a'.repeat(40) }],
+        dependencies: [],
+      },
+    ],
+  };
+  const plan = {
+    token: '11111111-1111-4111-8111-111111111111',
+    instanceId: 'instance',
+    gameVersion: '1.21.1',
+    worldId: 'World_A',
+    dataFormat: [48, 0],
+    files: [
+      {
+        project: 'Proj1234',
+        version: 'Vers1234',
+        path: 'datapacks/fixture.zip',
+        size: 10,
+        sha1: 'a'.repeat(40),
+        sha512: 'b'.repeat(128),
+        action: 'add',
+      },
+    ],
+    warnings: [],
+  };
+  const call = vi.fn(async (command: string) => {
+    if (command === 'native_worlds')
+      return [{ id: 'World_A', name: 'World A' }];
+    if (command === 'native_resource_search')
+      return {
+        hits: [
+          {
+            id: 'Proj1234',
+            title: 'Data Fixture',
+            description: 'Fixture',
+            author: 'Fixture',
+          },
+        ],
+        total: 1,
+        offset: 0,
+      };
+    if (command === 'native_resource_detail') return detail;
+    if (command === 'native_resource_plan') return plan;
+    return current;
+  });
+  const service = createNativeService(true, call as typeof invoke);
+  await service.refresh();
+  const onWorld = vi.fn();
+  render(
+    createElement(ResourceBrowser, {
+      service,
+      kind: 'datapack',
+      query: 'Fixture',
+      gameVersion: '1.21.1',
+      selectedId: 'instance',
+      onFilter: vi.fn(),
+      onWorldSelection: onWorld,
+    }),
+  );
+  fireEvent.click(screen.getByText('搜索资源'));
+  await screen.findByText('查看 Data Fixture');
+  fireEvent.click(screen.getByText('查看 Data Fixture'));
+  await screen.findByLabelText('数据包目标世界');
+  expect((screen.getByText('预览安装变更') as HTMLButtonElement).disabled).toBe(
+    true,
+  );
+  fireEvent.change(screen.getByLabelText('数据包目标世界'), {
+    target: { value: 'World_A' },
+  });
+  expect(onWorld).toHaveBeenCalledWith('instance', 'World_A');
+  fireEvent.click(screen.getByText('预览安装变更'));
+  await screen.findByLabelText('资源安装变更预览');
+  expect(call).toHaveBeenCalledWith('native_resource_plan', {
+    id: 'instance',
+    kind: 'datapack',
+    version: 'Vers1234',
+    filename: 'fixture.zip',
+    worldId: 'World_A',
+  });
+  await expect(
+    service.planResources(
+      'instance',
+      'datapack',
+      'Vers1234',
+      'fixture.zip',
+      'World_B',
+    ),
+  ).rejects.toThrow('安装计划响应无效');
+  expect(
+    call.mock.calls.some(([command]) => command === 'native_resource_install'),
+  ).toBe(false);
+  service.stop();
+});
 test('state-changing native operations refresh after an older in-flight poll', async () => {
   const current = state();
   let first = true;

@@ -47,6 +47,25 @@
   color: white;
   border-radius: 7px;
 }
+.world-datapacks {
+  margin: 16px 0;
+  padding: 12px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+.world-datapack-files {
+  max-height: 180px;
+  overflow-y: auto;
+  overflow-wrap: anywhere;
+}
+.world-datapack-files ul {
+  padding-left: 18px;
+}
+.world-datapack-files small {
+  display: block;
+  color: var(--muted);
+}
 .resource-browser .resource-hit h2 {
   font-size: 17px;
 }

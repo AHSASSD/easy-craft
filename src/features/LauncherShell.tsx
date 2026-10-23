@@ -794,6 +794,16 @@ function Shell({ services }: { services: Services }) {
                     id={selected.id}
                     running={!!running}
                     section={tab === 'options' ? 'options' : 'world'}
+                    onDatapacks={(worldId) =>
+                      change({
+                        section: 'download',
+                        downloadCategory: 'datapack',
+                        datapackWorlds: {
+                          ...nav.datapackWorlds,
+                          [selected.id]: worldId,
+                        },
+                      })
+                    }
                   />
                 ) : (
                   <section className="card library-empty">
@@ -962,6 +972,17 @@ function Shell({ services }: { services: Services }) {
                     <ResourceBrowser
                       key={nav.downloadCategory}
                       selectedId={selected?.id}
+                      worldSelection={nav.datapackWorlds}
+                      onWorldSelection={(id, world) =>
+                        change({
+                          datapackWorlds: Object.fromEntries(
+                            Object.entries({
+                              ...nav.datapackWorlds,
+                              [id]: world,
+                            }).slice(-300),
+                          ),
+                        })
+                      }
                       service={services.native}
                       kind={nav.downloadCategory}
                       query={
@@ -975,11 +996,6 @@ function Shell({ services }: { services: Services }) {
                         ] ??
                         selected?.version ??
                         '1.21.1'
-                      }
-                      target={
-                        selected
-                          ? `${selected.name} · ${selected.version} · ${selected.fabricVersion ? 'Fabric' : '原版'}`
-                          : undefined
                       }
                       onFilter={(query, game) =>
                         change({

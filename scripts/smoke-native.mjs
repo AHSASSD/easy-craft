@@ -122,11 +122,17 @@ try {
         id: state.instances.find(
           (i) => i.fabricVersion && i.version === '1.21.1',
         )?.id,
+        vanillaId: state.instances.find(
+          (i) => !i.fabricVersion && i.version === '1.21.1',
+        )?.id,
       };
     });
-    async function installCurrentResource() {
-      assert(resourceTarget.id, 'A workspace Fabric test instance is required');
-      await page.getByLabel('资源安装目标实例').selectOption(resourceTarget.id);
+    async function installCurrentResource(options = {}) {
+      const targetId = options.targetId ?? resourceTarget.id;
+      assert(targetId, 'A workspace test instance is required');
+      await page.getByLabel('资源安装目标实例').selectOption(targetId);
+      if (options.worldId)
+        await page.getByLabel('数据包目标世界').selectOption(options.worldId);
       await page
         .getByRole('button', { name: '预览安装变更', exact: true })
         .click();
@@ -187,7 +193,7 @@ try {
       const game = path.resolve(
         resourceTarget.root,
         'instances',
-        resourceTarget.id,
+        targetId,
         'game',
       );
       assert(
@@ -195,12 +201,20 @@ try {
           path.join(project, '.native', 'integration') + path.sep,
         ),
       );
+      const base = options.worldId
+        ? path.join(game, 'saves', options.worldId)
+        : game;
       const catalog = JSON.parse(
-        await readFile(path.join(game, '.easycraft-resources.json'), 'utf8'),
+        await readFile(path.join(base, '.easycraft-resources.json'), 'utf8'),
       );
       for (const file of catalog.files) {
-        assert(/^(mods|resourcepacks|shaderpacks)\/[^/\\]+$/.test(file.path));
-        const bytes = await readFile(path.join(game, file.path));
+        assert(
+          /^(mods|resourcepacks|shaderpacks|datapacks)\/[^/\\]+$/.test(
+            file.path,
+          ),
+        );
+        if (options.worldId) assert(file.path.startsWith('datapacks/'));
+        const bytes = await readFile(path.join(base, file.path));
         assert.equal(
           createHash('sha512').update(bytes).digest('hex'),
           file.sha512,
@@ -320,6 +334,120 @@ try {
       );
       console.log(
         'PASS: actual shader ZIP installed to shaderpacks with SHA-512 verification; renderer installation/activation is not claimed.',
+      );
+    }
+    if (process.argv.includes('--install-datapack')) {
+      assert(resourceTarget.vanillaId);
+      const game = path.resolve(
+        resourceTarget.root,
+        'instances',
+        resourceTarget.vanillaId,
+        'game',
+      );
+      assert(
+        game.startsWith(
+          path.join(project, '.native', 'integration') + path.sep,
+        ),
+      );
+      const worldName = `EC_DP_${randomUUID()}`;
+      const otherWorld = `EC_DP_OTHER_${randomUUID()}`;
+      for (const name of [worldName, otherWorld]) {
+        await mkdir(path.join(game, 'saves', name), { recursive: true });
+        await copyFile(
+          path.join(project, '.native/fixtures/world/level.dat'),
+          path.join(game, 'saves', name, 'level.dat'),
+        );
+      }
+      const before = await readFile(
+        path.join(game, 'saves', worldName, 'level.dat'),
+      );
+      const otherBefore = await readFile(
+        path.join(game, 'saves', otherWorld, 'level.dat'),
+      );
+      const globalCatalog = await readFile(
+        path.join(game, '.easycraft-resources.json'),
+      ).catch(() => null);
+      await page
+        .getByRole('navigation')
+        .getByRole('button', { name: '游戏库', exact: true })
+        .click();
+      await page
+        .locator('.library-instance')
+        .filter({ hasText: '原版集成验证' })
+        .first()
+        .click();
+      await page.getByRole('tab', { name: '存档', exact: true }).click();
+      await page.getByLabel('选择存档').selectOption(worldName);
+      await page
+        .getByText('此世界还没有本地数据包。', { exact: true })
+        .waitFor();
+      await page
+        .getByRole('button', { name: '获取世界数据包', exact: true })
+        .click();
+      await page.getByLabel('搜索在线资源').fill('Veinminer');
+      await page.getByLabel('在线资源游戏版本').fill('1.21.1');
+      await page.getByRole('button', { name: '搜索资源', exact: true }).click();
+      const result = page
+        .getByRole('button', { name: /^查看 Veinminer$/i })
+        .first();
+      await result.waitFor({ timeout: 100000 });
+      await result.click();
+      await page.getByLabel('在线资源兼容版本').waitFor({ timeout: 100000 });
+      await page.getByLabel('在线资源兼容版本').selectOption('8cEJouzY');
+      assert.equal(
+        await page.getByLabel('资源安装目标实例').inputValue(),
+        resourceTarget.vanillaId,
+      );
+      assert.equal(
+        await page.getByLabel('数据包目标世界').inputValue(),
+        worldName,
+      );
+      const catalog = await installCurrentResource({
+        targetId: resourceTarget.vanillaId,
+        worldId: worldName,
+      });
+      assert(
+        catalog.files.some(
+          (f) =>
+            f.project === 'OhduvhIc' &&
+            f.version === '8cEJouzY' &&
+            f.path === 'datapacks/Veinminer-1.2.4.zip',
+        ),
+      );
+      assert.deepEqual(
+        await readFile(path.join(game, 'saves', worldName, 'level.dat')),
+        before,
+      );
+      assert.deepEqual(
+        await readFile(path.join(game, 'saves', otherWorld, 'level.dat')),
+        otherBefore,
+      );
+      assert.deepEqual(
+        await readFile(path.join(game, '.easycraft-resources.json')).catch(
+          () => null,
+        ),
+        globalCatalog,
+      );
+      await page
+        .getByRole('navigation')
+        .getByRole('button', { name: '游戏库', exact: true })
+        .click();
+      await page.getByRole('tab', { name: '存档', exact: true }).click();
+      await page.getByLabel('选择存档').selectOption(worldName);
+      await page
+        .locator('.world-datapack-files')
+        .getByText('Veinminer-1.2.4.zip', { exact: false })
+        .waitFor();
+      await page.getByLabel('选择存档').selectOption(otherWorld);
+      await page
+        .getByText('此世界还没有本地数据包。', { exact: true })
+        .waitFor();
+      await page
+        .getByRole('navigation')
+        .getByRole('button', { name: '下载', exact: true })
+        .click();
+      console.log(
+        'PASS: actual datapack installed only into the selected vanilla world; SHA-512, untouched level.dat, other-world isolation, remembered navigation and local listing verified. Activation/gameplay is not claimed.',
       );
     }
   }

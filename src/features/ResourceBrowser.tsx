@@ -5,6 +5,7 @@ import type {
   ResourceKind,
   ResourceSearch,
   ResourcePlan,
+  WorldEntry,
 } from '../core/native-contracts';
 
 const dependencyNames: Record<string, string> = {
@@ -27,22 +28,28 @@ export function ResourceBrowser({
   query,
   gameVersion,
   onFilter,
-  target,
   selectedId,
+  worldSelection,
+  onWorldSelection,
 }: {
   service: NativeService;
   kind: ResourceKind;
   query: string;
   gameVersion: string;
   onFilter(query: string, gameVersion: string): void;
-  target?: string;
   selectedId?: string;
+  worldSelection?: Record<string, string>;
+  onWorldSelection?(id: string, world: string): void;
 }) {
   const native = useSyncExternalStore(service.subscribe, service.snapshot);
   const [targetId, setTargetId] = useState(
     selectedId ?? native.state?.instances[0]?.id ?? '',
   );
   const [file, setFile] = useState('');
+  const [worlds, setWorlds] = useState<WorldEntry[]>([]);
+  const [worldId, setWorldId] = useState(
+    worldSelection?.[selectedId ?? native.state?.instances[0]?.id ?? ''] ?? '',
+  );
   const [plan, setPlan] = useState<ResourcePlan | null>(null);
   const [closed, setClosed] = useState(false);
   const [message, setMessage] = useState('');
@@ -58,6 +65,27 @@ export function ResourceBrowser({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const request = useRef(0);
+  useEffect(() => {
+    if (kind !== 'datapack' || !targetId || installing || !native.available)
+      return;
+    let disposed = false;
+    void service
+      .worlds(targetId)
+      .then((entries) => {
+        if (disposed) return;
+        setWorlds(entries);
+        setWorldId((current) =>
+          entries.some((world) => world.id === current) ? current : '',
+        );
+      })
+      .catch((error) => {
+        if (!disposed)
+          setError(error instanceof Error ? error.message : '世界列表读取失败');
+      });
+    return () => {
+      disposed = true;
+    };
+  }, [service, targetId, kind, installing, native.available]);
   useEffect(
     () => () => {
       request.current++;
@@ -125,6 +153,7 @@ export function ResourceBrowser({
         kind,
         versionId,
         file,
+        kind === 'datapack' ? worldId : undefined,
       );
       if (ticket === request.current) {
         setPlan(value);
@@ -158,8 +187,10 @@ export function ResourceBrowser({
   return (
     <section className="resource-browser">
       <p className="hint">
-        来源：Modrinth · 当前目标：{target || '尚未选择实例，可先浏览'}。
-        {kind === 'mod' ? '本轮模组筛选使用 Fabric。' : ''}
+        来源：Modrinth · 当前目标：
+        {native.state?.instances.find((item) => item.id === targetId)?.name ||
+          '尚未选择实例，可先浏览'}
+        。{kind === 'mod' ? '本轮模组筛选使用 Fabric。' : ''}
       </p>
       <form
         className="content-toolbar"
@@ -303,7 +334,8 @@ export function ResourceBrowser({
                 此项目没有匹配当前游戏版本与资源格式的文件，请修改版本后重新搜索。
               </p>
             )}
-            {['mod', 'resourcepack', 'shader'].includes(kind) && selected ? (
+            {['mod', 'resourcepack', 'shader', 'datapack'].includes(kind) &&
+            selected ? (
               <section className="resource-install">
                 <h3>安装到实例</h3>
                 <label className="field-label">
@@ -313,7 +345,10 @@ export function ResourceBrowser({
                     disabled={busy || installing}
                     value={targetId}
                     onChange={(event) => {
+                      if (event.target.value === targetId) return;
                       setTargetId(event.target.value);
+                      setWorldId(worldSelection?.[event.target.value] ?? '');
+                      setWorlds([]);
                       setPlan(null);
                       setClosed(false);
                     }}
@@ -327,6 +362,34 @@ export function ResourceBrowser({
                     ))}
                   </select>
                 </label>
+                {kind === 'datapack' && (
+                  <label className="field-label">
+                    目标世界
+                    <select
+                      aria-label="数据包目标世界"
+                      value={worldId}
+                      disabled={busy || installing || !targetId}
+                      onChange={(event) => {
+                        setWorldId(event.target.value);
+                        onWorldSelection?.(targetId, event.target.value);
+                        setPlan(null);
+                        setClosed(false);
+                      }}
+                    >
+                      <option value="">请选择具体世界</option>
+                      {worlds.map((world) => (
+                        <option key={world.id} value={world.id}>
+                          {world.name}
+                        </option>
+                      ))}
+                    </select>
+                    {!worlds.length && (
+                      <small>
+                        此实例没有可安装数据包的世界，先在游戏中创建世界。
+                      </small>
+                    )}
+                  </label>
+                )}
                 <label className="field-label">
                   版本文件
                   <select
@@ -347,7 +410,14 @@ export function ResourceBrowser({
                   </select>
                 </label>
                 <button
-                  disabled={busy || installing || !targetId || !file}
+                  disabled={
+                    busy ||
+                    installing ||
+                    !targetId ||
+                    !file ||
+                    (kind === 'datapack' &&
+                      !worlds.some((world) => world.id === worldId))
+                  }
                   onClick={() => void previewInstall()}
                 >
                   预览安装变更
@@ -355,6 +425,12 @@ export function ResourceBrowser({
                 {plan && (
                   <section className="notice" aria-label="资源安装变更预览">
                     <h3>将写入 Minecraft {plan.gameVersion} 的文件</h3>
+                    {plan.worldId && (
+                      <p>
+                        仅安装到世界：{plan.worldId} · 数据包格式{' '}
+                        {plan.dataFormat?.join('.')}
+                      </p>
+                    )}
                     <ul>
                       {plan.files.map((f) => (
                         <li key={f.path}>

@@ -30,6 +30,7 @@ export type Navigation = {
   scroll: Record<string, number>;
   contentQueries?: Record<string, string>;
   resourceKinds?: Record<string, 'resourcepacks' | 'shaderpacks'>;
+  datapackWorlds?: Record<string, string>;
 };
 export const defaultNavigation: Navigation = {
   section: 'library',
@@ -57,6 +58,18 @@ export function validNavigation(value: unknown): value is Navigation {
     ) &&
     typeof nav.query === 'string' &&
     nav.query.length <= 256 &&
+    (nav.datapackWorlds === undefined ||
+      (record(nav.datapackWorlds) &&
+        Object.entries(nav.datapackWorlds).every(
+          ([id, world]) =>
+            id.length <= 128 &&
+            typeof world === 'string' &&
+            world.length <= 255 &&
+            !world.includes('/') &&
+            !world.includes('\\') &&
+            world !== '.' &&
+            world !== '..',
+        ))) &&
     (nav.contentQueries === undefined ||
       (record(nav.contentQueries) &&
         Object.entries(nav.contentQueries).every(

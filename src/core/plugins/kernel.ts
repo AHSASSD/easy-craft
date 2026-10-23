@@ -249,6 +249,8 @@ export class PluginManager {
         if (this.services.has(id)) throw new Error(`重复服务注册：${id}`);
         const methods = {
           native: [
+            'datapacks',
+            'openDatapacks',
             'planResources',
             'installResources',
             'searchResources',

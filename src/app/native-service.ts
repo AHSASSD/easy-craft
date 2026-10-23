@@ -23,6 +23,26 @@ const resourceId = (value: unknown): value is string =>
   string(value) && /^[A-Za-z0-9]{1,64}$/.test(value);
 const bounded = (value: unknown, max: number): value is string =>
   string(value) && value.length <= max;
+function contentEntries(value: unknown): ContentEntry[] {
+  if (
+    !Array.isArray(value) ||
+    value.length > 1000 ||
+    !value.every(
+      (item: unknown) =>
+        isRecord(item) &&
+        bounded(item.file, 240) &&
+        bounded(item.name, 512) &&
+        bounded(item.version, 256) &&
+        typeof item.enabled === 'boolean' &&
+        typeof item.editable === 'boolean' &&
+        integer(item.bytes) &&
+        string(item.revision) &&
+        /^\d+:\d+$/.test(item.revision),
+    )
+  )
+    throw new Error('本地内容响应无效');
+  return value as ContentEntry[];
+}
 export function validResourcePlan(value: unknown): value is ResourcePlan {
   return (
     isRecord(value) &&
@@ -30,6 +50,19 @@ export function validResourcePlan(value: unknown): value is ResourcePlan {
     /^[a-f0-9-]{36}$/.test(value.token) &&
     bounded(value.instanceId, 128) &&
     bounded(value.gameVersion, 100) &&
+    (value.worldId === undefined ||
+      value.worldId === null ||
+      (bounded(value.worldId, 255) &&
+        value.worldId.length > 0 &&
+        !/[\\/]/.test(value.worldId) &&
+        !['.', '..'].includes(value.worldId))) &&
+    (value.dataFormat === undefined ||
+      value.dataFormat === null ||
+      (Array.isArray(value.dataFormat) &&
+        value.dataFormat.length === 2 &&
+        value.dataFormat.every(
+          (n: unknown) => integer(n) && n <= 2147483647,
+        ))) &&
     Array.isArray(value.warnings) &&
     value.warnings.length <= 130 &&
     value.warnings.every((w: unknown) => bounded(w, 2048)) &&
@@ -42,7 +75,7 @@ export function validResourcePlan(value: unknown): value is ResourcePlan {
         resourceId(f.project) &&
         resourceId(f.version) &&
         bounded(f.path, 256) &&
-        /^(mods|resourcepacks|shaderpacks)\/[^/\\]+$/.test(f.path) &&
+        /^(mods|resourcepacks|shaderpacks|datapacks)\/[^/\\]+$/.test(f.path) &&
         integer(f.size) &&
         f.size <= 512 * 1024 * 1024 &&
         string(f.sha512) &&
@@ -331,14 +364,27 @@ export function createNativeService(
       }, 700)
     : undefined;
   return {
-    planResources: async (id, kind, version, filename) => {
+    datapacks: async (id, worldId) =>
+      contentEntries(await request('native_world_datapacks', { id, worldId })),
+    openDatapacks: (id, worldId) =>
+      operation('native_world_datapacks_open', { id, worldId }),
+    planResources: async (id, kind, version, filename, worldId) => {
       const value = await request('native_resource_plan', {
         id,
         kind,
         version,
         filename,
+        worldId: worldId ?? null,
       });
-      if (!validResourcePlan(value) || value.instanceId !== id)
+      if (
+        !validResourcePlan(value) ||
+        value.instanceId !== id ||
+        (value.worldId ?? null) !== (worldId ?? null) ||
+        (kind === 'datapack' &&
+          (!value.worldId ||
+            !value.dataFormat ||
+            !value.files.every((file) => file.path.startsWith('datapacks/'))))
+      )
         throw new Error('安装计划响应无效');
       return value;
     },
@@ -382,26 +428,7 @@ export function createNativeService(
       return value;
     },
     content: async (id, kind) => {
-      const value = await request('native_content', { id, kind });
-      if (
-        !Array.isArray(value) ||
-        value.length > 1000 ||
-        !value.every(
-          (item) =>
-            isRecord(item) &&
-            string(item.file) &&
-            item.file.length <= 240 &&
-            string(item.name) &&
-            string(item.version) &&
-            typeof item.enabled === 'boolean' &&
-            typeof item.editable === 'boolean' &&
-            integer(item.bytes) &&
-            string(item.revision) &&
-            /^\d+:\d+$/.test(item.revision),
-        )
-      )
-        throw new Error('本地内容响应无效');
-      return value as ContentEntry[];
+      return contentEntries(await request('native_content', { id, kind }));
     },
     toggleContent: (id, file, revision, enabled) =>
       operation('native_content_toggle', { id, file, revision, enabled }),

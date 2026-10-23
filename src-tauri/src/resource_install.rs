@@ -51,6 +51,8 @@ pub struct Plan {
     pub token: String,
     pub instance_id: String,
     pub game_version: String,
+    pub world_id: Option<String>,
+    pub data_format: Option<content::PackVersion>,
     pub files: Vec<Entry>,
     pub warnings: Vec<String>,
     #[serde(skip)]
@@ -77,6 +79,7 @@ fn scope(kind: Kind) -> Result<(content::Kind, &'static str)> {
         Kind::Mod => Ok((content::Kind::Mods, "mods")),
         Kind::Resourcepack => Ok((content::Kind::Resourcepacks, "resourcepacks")),
         Kind::Shader => Ok((content::Kind::Shaderpacks, "shaderpacks")),
+        Kind::Datapack => Ok((content::Kind::Datapacks, "datapacks")),
         _ => Err("此类资源需要独立的整合包或世界安装流程".into()),
     }
 }
@@ -105,7 +108,7 @@ fn checked_record(root: &Path, record: &Record) -> Result<PathBuf> {
     resources::id(&record.project)?;
     resources::id(&record.version)?;
     let (dir, file) = record.path.split_once('/').ok_or("安装记录路径无效")?;
-    if !["mods", "resourcepacks", "shaderpacks"].contains(&dir)
+    if !["mods", "resourcepacks", "shaderpacks", "datapacks"].contains(&dir)
         || file.is_empty()
         || file.len() > 240
         || file.contains(['/', '\\'])
@@ -136,6 +139,12 @@ fn inventory(root: &Path, kind: Kind) -> Result<BTreeMap<String, String>> {
     let (_, dir) = scope(kind)?;
     let path = model::safe_path(root, dir)?;
     let mut result = BTreeMap::new();
+    if kind == Kind::Datapack {
+        result.insert(
+            "level.dat".into(),
+            sum(&model::safe_path(root, "level.dat")?)?,
+        );
+    }
     let mut total = 0u64;
     if path.exists() {
         for (index, item) in fs::read_dir(path)
@@ -372,8 +381,12 @@ pub async fn prepare(
     kind: Kind,
     version: &str,
     filename: &str,
+    world_id: Option<String>,
 ) -> Result<Plan> {
     scope(kind)?;
+    if (kind == Kind::Datapack) != world_id.is_some() {
+        return Err("数据包必须明确选择目标世界，其他资源不能指定世界".into());
+    }
     if kind == Kind::Mod && instance.fabric_version.is_empty() {
         return Err("模组安装需要 Fabric 实例".into());
     }
@@ -385,9 +398,28 @@ pub async fn prepare(
     };
     let (snapshot, records) = host.instance_files(&instance.id, |root| {
         let _locks = crate::worlds::lock_worlds(root)?;
-        recover(root)?;
-        Ok((inventory(root, kind)?, catalog(root)?))
+        recover_all(root)?;
+        let target = target_root(root, world_id.as_deref())?;
+        Ok((inventory(&target, kind)?, catalog(&target)?))
     })?;
+    let world_version = if kind == Kind::Datapack {
+        Some(crate::minecraft::datapack_version(host, &instance)?)
+    } else {
+        None
+    };
+    let world_data = if let Some(world) = &world_id {
+        Some(host.instance_files(&instance.id, |root| {
+            crate::worlds::data_version(&crate::worlds::selected_world(root, world)?)
+        })?)
+    } else {
+        None
+    };
+    if world_data
+        .zip(world_version.as_ref())
+        .is_some_and(|(world, game)| world > game.world)
+    {
+        return Err("所选世界来自较新游戏版本，请选择匹配的实例；世界未修改".into());
+    }
     let installed = records
         .files
         .into_iter()
@@ -455,10 +487,23 @@ pub async fn prepare(
             .warnings
             .push("保存光影 ZIP 不等于启用；还需游戏中安装并配置对应 Iris/OptiFine。".into());
     }
+    if kind == Kind::Datapack {
+        resolver.warnings.push("仅把数据包保存到所选世界；不修改 level.dat 的启用列表，是否启用及运行效果须在游戏内确认。".into());
+        if world_data
+            .zip(world_version.as_ref())
+            .is_some_and(|(world, game)| world < game.world)
+        {
+            resolver
+                .warnings
+                .push("世界数据版本早于目标游戏；首次进入可能升级世界，请先备份。".into());
+        }
+    }
     Ok(Plan {
         token: uuid::Uuid::new_v4().to_string(),
         instance_id: instance.id.clone(),
         game_version: instance.version.clone(),
+        world_id,
+        data_format: world_version.map(|v| v.format),
         files: resolver.files,
         warnings: resolver.warnings,
         snapshot,
@@ -505,6 +550,14 @@ pub async fn download(
         let mut zip = zip::ZipArchive::new(fs::File::open(&path).map_err(|_| "缓存读取失败")?)
             .map_err(|_| "资源不是有效 ZIP")?;
         content::validate_archive(scope(plan.kind)?.0, &mut zip)?;
+        if let Some(expected) = plan.data_format {
+            let entry = zip
+                .by_name("pack.mcmeta")
+                .map_err(|_| "数据包缺少 pack.mcmeta")?;
+            let metadata: Value = serde_json::from_reader(entry.take(512 * 1024 + 1))
+                .map_err(|_| "数据包元数据无效")?;
+            content::validate_pack_target(&metadata, true, expected)?;
+        }
         paths.push(path);
     }
     Ok(paths)
@@ -914,6 +967,19 @@ pub fn recover(root: &Path) -> Result<()> {
     }
     Ok(())
 }
+pub fn recover_all(root: &Path) -> Result<()> {
+    recover(root)?;
+    for world in crate::worlds::list(root)? {
+        recover(&crate::worlds::selected_world(root, &world.id)?)?;
+    }
+    Ok(())
+}
+pub fn target_root(root: &Path, world_id: Option<&str>) -> Result<PathBuf> {
+    match world_id {
+        Some(id) => crate::worlds::selected_world(root, id),
+        None => Ok(root.to_path_buf()),
+    }
+}
 pub fn commit(
     root: &Path,
     instance: &Instance,
@@ -922,7 +988,14 @@ pub fn commit(
     cancel: &CancellationToken,
 ) -> Result<()> {
     let _locks = crate::worlds::lock_worlds(root)?;
-    recover(root)?;
+    if (plan.kind == Kind::Datapack) != plan.world_id.is_some()
+        || (plan.kind == Kind::Datapack && plan.data_format.is_none())
+    {
+        return Err("数据包安装计划必须包含所选世界及包格式".into());
+    }
+    recover_all(root)?;
+    let target = target_root(root, plan.world_id.as_deref())?;
+    let root = target.as_path();
     if plan.instance_id != instance.id
         || plan.game_version != instance.version
         || plan.fabric_version != instance.fabric_version
@@ -1027,6 +1100,181 @@ mod tests {
         fs::create_dir_all(&path).unwrap();
         path
     }
+    fn world(root: &Path, name: &str, data_version: i32) -> PathBuf {
+        let path = root.join("saves").join(name);
+        fs::create_dir_all(&path).unwrap();
+        let mut raw = vec![10, 0, 0, 10, 0, 4];
+        raw.extend_from_slice(b"Data");
+        raw.extend_from_slice(&[3, 0, 11]);
+        raw.extend_from_slice(b"DataVersion");
+        raw.extend_from_slice(&data_version.to_be_bytes());
+        raw.extend_from_slice(&[0, 0]);
+        let mut gzip = flate2::write::GzEncoder::new(vec![], flate2::Compression::default());
+        gzip.write_all(&raw).unwrap();
+        fs::write(path.join("level.dat"), gzip.finish().unwrap()).unwrap();
+        path
+    }
+    #[test]
+    fn datapack_commit_is_world_scoped_preserves_nbt_rejects_stale_and_obeys_session_lock() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let root = root();
+        let instance = instance();
+        let target = world(&root, "世界 A", 3955);
+        let other = world(&root, "世界 B", 3955);
+        let original = fs::read(target.join("level.dat")).unwrap();
+        let original_other = fs::read(other.join("level.dat")).unwrap();
+        assert_eq!(crate::worlds::data_version(&target).unwrap(), 3955);
+        let source = root.join("fixture.zip");
+        fs::write(&source, b"transaction fixture, not a gameplay datapack").unwrap();
+        let mut prepared = plan(
+            &target,
+            &instance,
+            entry("datapacks/fixture.zip", &source),
+            Kind::Datapack,
+        );
+        prepared.world_id = Some("世界 A".into());
+        prepared.data_format = Some((48, 0));
+        let lock = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .share_mode(0)
+            .open(target.join("session.lock"))
+            .unwrap();
+        assert!(commit(
+            &root,
+            &instance,
+            &prepared,
+            std::slice::from_ref(&source),
+            &CancellationToken::new()
+        )
+        .is_err());
+        drop(lock);
+        let mut bad = prepared.clone();
+        bad.world_id = Some("../outside".into());
+        assert!(commit(
+            &root,
+            &instance,
+            &bad,
+            std::slice::from_ref(&source),
+            &CancellationToken::new()
+        )
+        .is_err());
+        world(&root, "世界 A", 4000);
+        assert!(commit(
+            &root,
+            &instance,
+            &prepared,
+            std::slice::from_ref(&source),
+            &CancellationToken::new()
+        )
+        .unwrap_err()
+        .contains("变化"));
+        fs::write(target.join("level.dat"), &original).unwrap();
+        commit(
+            &root,
+            &instance,
+            &prepared,
+            std::slice::from_ref(&source),
+            &CancellationToken::new(),
+        )
+        .unwrap();
+        assert!(target.join("datapacks/fixture.zip").is_file());
+        assert!(!other.join("datapacks").exists());
+        assert!(!root.join("datapacks").exists());
+        assert_eq!(fs::read(target.join("level.dat")).unwrap(), original);
+        assert_eq!(fs::read(other.join("level.dat")).unwrap(), original_other);
+        let record = entry("datapacks/partial.zip", &source).record;
+        let (_, dir) = journal(&target, record.clone());
+        fs::copy(&source, dir.join("0.data")).unwrap();
+        fs::hard_link(dir.join("0.data"), target.join(&record.path)).unwrap();
+        recover_all(&root).unwrap();
+        assert!(!target.join(&record.path).exists());
+        assert!(target.join("datapacks/fixture.zip").exists());
+    }
+    #[tokio::test]
+    async fn datapack_prepare_requires_a_world_and_rejects_newer_worlds_before_network() {
+        use sha1::Digest as _;
+        let root = root();
+        let mut instance = instance();
+        world(
+            &root.join(format!("instances/{}/game", instance.id)),
+            "Newer",
+            5000,
+        );
+        let mut zip = zip::ZipWriter::new(Cursor::new(vec![]));
+        zip.start_file("version.json", zip::write::SimpleFileOptions::default())
+            .unwrap();
+        zip.write_all(br#"{"id":"1.21.1","world_version":3955,"pack_version":{"data":48}}"#)
+            .unwrap();
+        let client = zip.finish().unwrap().into_inner();
+        let client_hash: String = sha1::Sha1::digest(&client)
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        let metadata = serde_json::to_vec(
+            &json!({"downloads":{"client":{"sha1":client_hash,"size":client.len()}}}),
+        )
+        .unwrap();
+        instance.manifest_sha1 = sha1::Sha1::digest(&metadata)
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        model::write_file(&root, "versions/1.21.1/client.jar", &client).unwrap();
+        model::write_file(
+            &root,
+            &format!("versions/1.21.1/{}.json", instance.manifest_sha1),
+            &metadata,
+        )
+        .unwrap();
+        model::save_json(&root, "instances.json", &vec![instance.clone()]).unwrap();
+        let host = Host::new(root.clone()).unwrap();
+        assert_eq!(
+            crate::minecraft::datapack_version(&host, &instance)
+                .unwrap()
+                .format,
+            (48, 0)
+        );
+        assert!(prepare(
+            &host,
+            instance.clone(),
+            Kind::Datapack,
+            "Vers1234",
+            "pack.zip",
+            None
+        )
+        .await
+        .err()
+        .unwrap()
+        .contains("目标世界"));
+        assert!(prepare(
+            &host,
+            instance.clone(),
+            Kind::Datapack,
+            "Vers1234",
+            "pack.zip",
+            Some("Newer".into())
+        )
+        .await
+        .err()
+        .unwrap()
+        .contains("较新"));
+        assert!(prepare(
+            &host,
+            instance.clone(),
+            Kind::Resourcepack,
+            "Vers1234",
+            "pack.zip",
+            Some("Newer".into())
+        )
+        .await
+        .err()
+        .unwrap()
+        .contains("其他资源"));
+        fs::write(root.join("versions/1.21.1/client.jar"), b"tampered").unwrap();
+        assert!(crate::minecraft::datapack_version(&host, &instance).is_err());
+    }
     fn instance() -> Instance {
         Instance {
             id: uuid::Uuid::new_v4().to_string(),
@@ -1057,6 +1305,8 @@ mod tests {
             token: uuid::Uuid::new_v4().to_string(),
             instance_id: instance.id.clone(),
             game_version: instance.version.clone(),
+            world_id: None,
+            data_format: None,
             files: vec![entry],
             warnings: vec![],
             snapshot: inventory(root, kind).unwrap(),
