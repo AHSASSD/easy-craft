@@ -29,7 +29,7 @@ export function Titlebar({
       >
         <Box size={21} />
         <strong>Easy Craft</strong>
-        <span>V0.3</span>
+        <span>V0.3.1</span>
       </div>
       <div
         className="title-drag"

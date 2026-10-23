@@ -227,6 +227,12 @@ async fn exchange(
                 id: id.into(),
                 name: name.into(),
                 xuid: xui["xid"].as_str().unwrap_or_default().into(),
+                skin_url: profile["skins"]
+                    .as_array()
+                    .and_then(|skins| skins.iter().find(|skin| skin["state"] == "ACTIVE"))
+                    .and_then(|skin| skin["url"].as_str())
+                    .unwrap_or_default()
+                    .into(),
             },
         },
         access_token: token.into(),

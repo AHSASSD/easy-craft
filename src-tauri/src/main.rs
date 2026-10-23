@@ -8,8 +8,10 @@ mod minecraft;
 mod model;
 mod net;
 mod packs;
+mod skins;
 #[cfg(test)]
 mod tests;
+mod worlds;
 use host::Host;
 use model::Result;
 use std::sync::Arc;
@@ -18,6 +20,68 @@ use tauri::State;
 #[tauri::command]
 fn native_status(host: State<'_, Arc<Host>>) -> host::Status {
     host.status()
+}
+#[tauri::command]
+async fn native_worlds(host: State<'_, Arc<Host>>, id: String) -> Result<Vec<worlds::WorldEntry>> {
+    let host = host.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || host.instance_files(&id, worlds::list))
+        .await
+        .map_err(|_| "存档列表读取失败".to_string())?
+}
+#[tauri::command]
+async fn native_world(
+    host: State<'_, Arc<Host>>,
+    id: String,
+    world_id: String,
+) -> Result<worlds::WorldSettings> {
+    let host = host.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        host.instance_files(&id, |root| worlds::load_world(root, &world_id))
+    })
+    .await
+    .map_err(|_| "世界配置读取失败".to_string())?
+}
+#[tauri::command]
+async fn native_world_save(
+    host: State<'_, Arc<Host>>,
+    id: String,
+    world_id: String,
+    settings: worlds::WorldSettings,
+) -> Result<String> {
+    let host = host.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        host.instance_files(&id, |root| worlds::save_world(root, &world_id, settings))
+    })
+    .await
+    .map_err(|_| "世界配置保存失败".to_string())?
+}
+#[tauri::command]
+async fn native_options(host: State<'_, Arc<Host>>, id: String) -> Result<worlds::ClientOptions> {
+    let host = host.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || host.instance_files(&id, worlds::load_options))
+        .await
+        .map_err(|_| "游戏选项读取失败".to_string())?
+}
+#[tauri::command]
+async fn native_options_save(
+    host: State<'_, Arc<Host>>,
+    id: String,
+    options: worlds::ClientOptions,
+) -> Result<String> {
+    let host = host.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        host.instance_files(&id, |root| worlds::save_options(root, options))
+    })
+    .await
+    .map_err(|_| "游戏选项保存失败".to_string())?
+}
+#[tauri::command]
+async fn native_avatar(host: State<'_, Arc<Host>>) -> Result<Option<String>> {
+    skins::avatar(&host).await
+}
+#[tauri::command]
+fn native_avatar_save(host: State<'_, Arc<Host>>, bytes: Vec<u8>) -> Result<()> {
+    skins::save(&host, &bytes)
 }
 #[tauri::command]
 async fn native_pack_preview(bytes: Vec<u8>) -> Result<packs::PackPreview> {
@@ -129,6 +193,13 @@ fn main() {
         .manage(state)
         .invoke_handler(tauri::generate_handler![
             native_status,
+            native_worlds,
+            native_world,
+            native_world_save,
+            native_options,
+            native_options_save,
+            native_avatar,
+            native_avatar_save,
             native_pack_preview,
             native_versions,
             native_settings,

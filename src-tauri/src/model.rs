@@ -67,6 +67,8 @@ pub struct Profile {
     pub id: String,
     pub name: String,
     pub xuid: String,
+    #[serde(default, rename = "skinUrl", alias = "skin_url")]
+    pub skin_url: String,
 }
 pub fn valid_offline_name(name: &str) -> bool {
     (3..=16).contains(&name.len()) && name.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'_')
@@ -100,6 +102,7 @@ pub fn offline_profile(name: &str) -> Result<Profile> {
         id: uuid::Uuid::from_bytes(hash).simple().to_string(),
         name: name.into(),
         xuid: String::new(),
+        skin_url: String::new(),
     })
 }
 #[derive(Clone, Serialize, Deserialize)]

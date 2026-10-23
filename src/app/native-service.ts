@@ -7,11 +7,62 @@ import type {
   NativeService,
   NativeSnapshot,
   NativeState,
+  WorldEntry,
+  WorldSettings,
+  ClientOptions,
 } from '../core/native-contracts';
 import { isRecord } from '../core/services';
 const string = (value: unknown): value is string => typeof value === 'string';
 const integer = (value: unknown): value is number =>
   typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
+const unit = (value: unknown): value is number =>
+  typeof value === 'number' &&
+  Number.isFinite(value) &&
+  value >= 0 &&
+  value <= 1;
+export function validWorld(value: unknown): value is WorldSettings {
+  return (
+    isRecord(value) &&
+    string(value.revision) &&
+    /^[a-f0-9]{40}$/.test(value.revision) &&
+    integer(value.difficulty) &&
+    value.difficulty <= 3 &&
+    typeof value.difficultyLocked === 'boolean' &&
+    typeof value.hardcore === 'boolean' &&
+    (value.allowCommands === null ||
+      typeof value.allowCommands === 'boolean') &&
+    (value.gameMode === null ||
+      (integer(value.gameMode) && value.gameMode <= 3)) &&
+    (value.dayTime === null ||
+      (string(value.dayTime) && /^-?\d{1,19}$/.test(value.dayTime))) &&
+    (value.weather === null ||
+      ['clear', 'rain', 'thunder'].includes(value.weather as string)) &&
+    Array.isArray(value.gameRules) &&
+    value.gameRules.length <= 1024 &&
+    value.gameRules.every(
+      (rule: unknown) =>
+        isRecord(rule) &&
+        string(rule.key) &&
+        rule.key.length <= 128 &&
+        string(rule.value) &&
+        rule.value.length <= 128 &&
+        ['boolean', 'integer', 'text'].includes(rule.kind as string),
+    )
+  );
+}
+function validOptions(value: unknown): value is ClientOptions {
+  return (
+    isRecord(value) &&
+    string(value.revision) &&
+    (value.revision === 'missing' || /^[a-f0-9]{40}$/.test(value.revision)) &&
+    unit(value.masterVolume) &&
+    unit(value.musicVolume) &&
+    integer(value.renderDistance) &&
+    value.renderDistance >= 2 &&
+    value.renderDistance <= 64 &&
+    typeof value.fullscreen === 'boolean'
+  );
+}
 function validMemory(value: unknown): value is MemoryInfo {
   return (
     isRecord(value) &&
@@ -93,10 +144,22 @@ export function createNativeService(
   available = isTauri(),
   call: typeof invoke = invoke,
 ): NativeService & { stop(): void } {
-  let snapshot: NativeSnapshot = { available, state: null, error: '' };
+  let snapshot: NativeSnapshot = {
+    available,
+    state: null,
+    error: '',
+    avatar: null,
+  };
   const listeners = new Set<() => void>();
   let stopped = false;
   let refreshing = false;
+  const identity = (state: NativeState | null) =>
+    JSON.stringify([
+      state?.settings.launchMode,
+      state?.settings.offlineName,
+      state?.account?.id,
+      state?.account?.skinUrl,
+    ]);
   const update = (next: NativeSnapshot) => {
     if (stopped) return;
     snapshot = next;
@@ -130,7 +193,15 @@ export function createNativeService(
         value = await request('native_status');
         if (!validNativeState(value)) throw new Error('原生状态格式无效');
       }
-      update({ available, state: value as NativeState, error: snapshot.error });
+      update({
+        available,
+        state: value as NativeState,
+        error: snapshot.error,
+        avatar:
+          identity(value as NativeState) === identity(snapshot.state)
+            ? snapshot.avatar
+            : null,
+      });
     } catch (error) {
       update({
         ...snapshot,
@@ -144,6 +215,25 @@ export function createNativeService(
     await request(name, args);
     update({ ...snapshot, error: '' });
     await refresh();
+  };
+  const avatar = async () => {
+    const requestedIdentity = identity(snapshot.state);
+    const value = await request('native_avatar');
+    if (
+      value !== null &&
+      (!string(value) ||
+        value.length > 3 * 1024 * 1024 ||
+        !/^data:image\/png;base64,[A-Za-z0-9+/=]+$/.test(value))
+    )
+      throw new Error('皮肤头像响应无效');
+    if (requestedIdentity === identity(snapshot.state))
+      update({ ...snapshot, avatar: value as string | null });
+    return value as string | null;
+  };
+  const saveFile = async (command: string, args: Record<string, unknown>) => {
+    const value = await request(command, args);
+    if (!string(value)) throw new Error('文件保存响应无效');
+    return value;
   };
   const timer = available
     ? setInterval(() => {
@@ -159,6 +249,39 @@ export function createNativeService(
       };
     },
     refresh,
+    avatar,
+    saveAvatar: async (bytes) => {
+      if (bytes.length > 2 * 1024 * 1024) throw new Error('皮肤文件超过 2 MB');
+      await request('native_avatar_save', { bytes });
+      await avatar();
+    },
+    worlds: async (id) => {
+      const value = await request('native_worlds', { id });
+      if (
+        !Array.isArray(value) ||
+        value.length > 1000 ||
+        !value.every(
+          (item: unknown) =>
+            isRecord(item) && string(item.id) && string(item.name),
+        )
+      )
+        throw new Error('存档列表响应无效');
+      return value as WorldEntry[];
+    },
+    world: async (id, worldId) => {
+      const value = await request('native_world', { id, worldId });
+      if (!validWorld(value)) throw new Error('世界配置响应无效');
+      return value;
+    },
+    saveWorld: (id, worldId, settings) =>
+      saveFile('native_world_save', { id, worldId, settings }),
+    options: async (id) => {
+      const value = await request('native_options', { id });
+      if (!validOptions(value)) throw new Error('游戏选项响应无效');
+      return value;
+    },
+    saveOptions: (id, options) =>
+      saveFile('native_options_save', { id, options }),
     stop: () => {
       stopped = true;
       if (timer) clearInterval(timer);

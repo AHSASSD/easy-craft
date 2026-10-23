@@ -441,6 +441,7 @@ async fn official_install_integration() {
         id: "0".repeat(32),
         name: "IntegrationFixture".into(),
         xuid: String::new(),
+        skin_url: String::new(),
     };
     let args = minecraft::command_args(
         &host,

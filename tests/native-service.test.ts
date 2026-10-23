@@ -10,12 +10,13 @@ import {
 } from '@testing-library/react';
 import { AccountPanel } from '../src/features/AccountPanel';
 import { MemoryPanel } from '../src/features/MemoryPanel';
+import { WorldSettingsPanel } from '../src/features/WorldSettingsPanel';
 import type { invoke } from '@tauri-apps/api/core';
 import {
   createNativeService,
   validNativeState,
 } from '../src/app/native-service';
-import type { NativeState } from '../src/core/native-contracts';
+import type { NativeState, WorldSettings } from '../src/core/native-contracts';
 const state = (): NativeState => ({
   dataRoot: 'E:/EasyCraft/data',
   settings: {
@@ -44,6 +45,87 @@ const state = (): NativeState => ({
 afterEach(() => {
   vi.useRealTimers();
   cleanup();
+});
+test('world controls read discovered rules and save only after the closed-game acknowledgement', async () => {
+  let world: WorldSettings = {
+    revision: 'a'.repeat(40),
+    difficulty: 2,
+    difficultyLocked: false,
+    hardcore: false,
+    allowCommands: true,
+    gameMode: 0,
+    dayTime: '9007199254740993',
+    weather: 'clear',
+    gameRules: [
+      { key: 'keepInventory', value: 'false', kind: 'boolean' },
+      { key: 'randomTickSpeed', value: '3', kind: 'integer' },
+    ],
+  };
+  const call = vi.fn(
+    async (command: string, args?: Record<string, unknown>) => {
+      if (command === 'native_worlds') return [{ id: 'World', name: 'World' }];
+      if (command === 'native_world') return structuredClone(world);
+      if (command === 'native_options')
+        return {
+          revision: 'missing',
+          masterVolume: 1,
+          musicVolume: 1,
+          renderDistance: 12,
+          fullscreen: false,
+        };
+      if (command === 'native_world_save') {
+        world = args!.settings as WorldSettings;
+        return 'backup/level.dat';
+      }
+      return state();
+    },
+  );
+  const service = createNativeService(true, call as typeof invoke);
+  render(
+    createElement(WorldSettingsPanel, {
+      service,
+      id: 'instance',
+      running: false,
+    }),
+  );
+  await screen.findByLabelText('死亡不掉落');
+  expect((screen.getByLabelText('世界时间') as HTMLInputElement).value).toBe(
+    '9007199254740993',
+  );
+  const save = screen.getByRole('button', {
+    name: '保存世界设置与规则',
+  }) as HTMLButtonElement;
+  expect(save.disabled).toBe(true);
+  fireEvent.click(screen.getByLabelText('确认游戏已关闭'));
+  fireEvent.click(screen.getByLabelText('死亡不掉落'));
+  fireEvent.change(screen.getByLabelText('随机刻速度'), {
+    target: { value: '6' },
+  });
+  fireEvent.click(save);
+  await screen.findByText('已保存，原文件已备份：backup/level.dat');
+  expect(world.gameRules.map((rule) => rule.value)).toEqual(['true', '6']);
+  service.stop();
+});
+test('a delayed avatar response cannot replace the newly selected identity', async () => {
+  const current = state();
+  let resolveAvatar!: (value: string) => void;
+  const call = vi.fn(async (command: string) =>
+    command === 'native_avatar'
+      ? new Promise<string>((resolve) => {
+          resolveAvatar = resolve;
+        })
+      : structuredClone(current),
+  );
+  const service = createNativeService(true, call as typeof invoke);
+  await service.refresh();
+  const pending = service.avatar();
+  current.settings.launchMode = 'offline';
+  current.settings.offlineName = 'NewPlayer';
+  await service.refresh();
+  resolveAvatar('data:image/png;base64,AAAA');
+  await pending;
+  expect(service.snapshot().avatar).toBeNull();
+  service.stop();
 });
 test('system memory trimming is optional and requires its explicit confirmation', async () => {
   const current = state();

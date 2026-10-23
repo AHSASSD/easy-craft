@@ -29,7 +29,7 @@ export type NativeTask = {
 export type NativeState = {
   dataRoot: string;
   settings: NativeSettings;
-  account: { id: string; name: string; xuid: string } | null;
+  account: { id: string; name: string; xuid: string; skinUrl?: string } | null;
   instances: NativeInstance[];
   task: NativeTask;
   loginPending: boolean;
@@ -39,6 +39,31 @@ export type NativeSnapshot = {
   available: boolean;
   state: NativeState | null;
   error: string;
+  avatar: string | null;
+};
+export type WorldEntry = { id: string; name: string };
+export type GameRule = {
+  key: string;
+  kind: 'boolean' | 'integer' | 'text';
+  value: string;
+};
+export type WorldSettings = {
+  revision: string;
+  difficulty: number;
+  difficultyLocked: boolean;
+  allowCommands: boolean | null;
+  hardcore: boolean;
+  gameMode: number | null;
+  dayTime: string | null;
+  weather: 'clear' | 'rain' | 'thunder' | null;
+  gameRules: GameRule[];
+};
+export type ClientOptions = {
+  revision: string;
+  masterVolume: number;
+  musicVolume: number;
+  renderDistance: number;
+  fullscreen: boolean;
 };
 export type DeviceCode = {
   userCode: string;
@@ -64,6 +89,17 @@ export type MemoryInfo = {
 };
 export interface NativeService extends Observable<NativeSnapshot> {
   refresh(): Promise<void>;
+  worlds(id: string): Promise<WorldEntry[]>;
+  world(id: string, worldId: string): Promise<WorldSettings>;
+  saveWorld(
+    id: string,
+    worldId: string,
+    settings: WorldSettings,
+  ): Promise<string>;
+  options(id: string): Promise<ClientOptions>;
+  saveOptions(id: string, options: ClientOptions): Promise<string>;
+  avatar(): Promise<string | null>;
+  saveAvatar(bytes: number[]): Promise<void>;
   versions(): Promise<string[]>;
   previewPack(bytes: number[]): Promise<PackPreview>;
   fabricVersions(version: string): Promise<string[]>;

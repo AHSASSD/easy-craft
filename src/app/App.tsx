@@ -1,4 +1,6 @@
 import { AccountPanel } from '../features/AccountPanel';
+import { LauncherShell } from '../features/LauncherShell';
+import { SkinAvatar } from '../components/SkinAvatar';
 import { MemoryPanel } from '../features/MemoryPanel';
 import {
   useEffect,
@@ -25,7 +27,6 @@ import {
   Settings,
   SlidersHorizontal,
   Star,
-  UserRound,
   X,
 } from 'lucide-react';
 import { loaders, type GameInstance, type LoaderKind } from '../core/contracts';
@@ -54,6 +55,13 @@ const statusLabel = {
 };
 
 export function App({ services }: { services: Services }) {
+  return new URLSearchParams(window.location.search).has('demo') ? (
+    <DemoApp services={services} />
+  ) : (
+    <LauncherShell services={services} />
+  );
+}
+function DemoApp({ services }: { services: Services }) {
   const native = useSyncExternalStore(
     services.native.subscribe,
     services.native.snapshot,
@@ -287,9 +295,7 @@ export function App({ services }: { services: Services }) {
               aria-label="管理游戏账户"
               onClick={() => setDialog({ kind: 'account' })}
             >
-              <span className="avatar">
-                <UserRound size={19} />
-              </span>
+              <SkinAvatar service={services.native} />
               <span>
                 <strong>{identity || '选择游戏账户'}</strong>
                 <small>

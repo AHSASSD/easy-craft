@@ -132,6 +132,36 @@ export function AccountPanel({
                 : '登录 Microsoft'}
           </button>
         </form>
+        {state?.settings.launchMode === 'offline' && (
+          <label className="file-setting">
+            为 {state.settings.offlineName} 选择皮肤头像
+            <input
+              aria-label="选择皮肤头像"
+              type="file"
+              accept="image/png"
+              onChange={(event) => {
+                const file = event.target.files?.[0];
+                event.target.value = '';
+                if (!file) return;
+                void run(async () => {
+                  if (file.size > 2 * 1024 * 1024)
+                    throw new Error('皮肤须小于 2 MB');
+                  const img = await createImageBitmap(file);
+                  const valid =
+                    img.width === 64 && [32, 64].includes(img.height);
+                  img.close();
+                  if (!valid) throw new Error('皮肤尺寸须为 64×64 或 64×32');
+                  await service.saveAvatar(
+                    Array.from(new Uint8Array(await file.arrayBuffer())),
+                  );
+                });
+              }}
+            />
+            <small>
+              仅改变启动器头像，不会替换离线游戏中的皮肤。正版账户头像自动读取其官方皮肤。
+            </small>
+          </label>
+        )}
         {state?.account && (
           <button onClick={() => void run(service.signOut)}>
             退出正版账户

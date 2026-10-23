@@ -7,7 +7,7 @@ use crate::{
 use serde::Serialize;
 use std::{
     fs,
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{Arc, Mutex},
 };
 use tokio::{
@@ -120,6 +120,24 @@ impl Host {
             login_pending: inner.auth_cancel.is_some(),
             login_code: inner.login.as_ref().map(Pending::public),
         }
+    }
+    pub fn instance_files<T>(
+        &self,
+        id: &str,
+        operation: impl FnOnce(&Path) -> Result<T>,
+    ) -> Result<T> {
+        let inner = self.inner.lock().map_err(|_| "宿主状态不可用")?;
+        if inner.cancel.is_some() {
+            return Err("请先结束游戏或当前任务，再编辑配置".into());
+        }
+        if !inner.instances.iter().any(|item| item.id == id) {
+            return Err("本地实例不存在".into());
+        }
+        let root = model::safe_path(&self.root, &format!("instances/{id}/game"))?;
+        if !root.is_dir() {
+            return Err("实例游戏目录不存在".into());
+        }
+        operation(&root)
     }
     pub fn progress(&self, phase: &str, message: &str, completed: usize, total: usize) {
         let mut inner = self.inner.lock().expect("host state poisoned");

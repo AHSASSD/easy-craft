@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { createServer } from 'node:net';
-import { mkdir } from 'node:fs/promises';
+import { mkdir, copyFile, readFile } from 'node:fs/promises';
+import { randomUUID } from 'node:crypto';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { chromium } from '@playwright/test';
@@ -61,7 +62,7 @@ try {
   if (!page) page = await context.waitForEvent('page');
   const errors = [];
   page.on('pageerror', (error) => errors.push(error.message));
-  await page.getByRole('heading', { name: '世界很大，轻松出发。' }).waitFor();
+  await page.locator('.library-shell').waitFor();
   assert(
     await page.getByRole('button', { name: '最小化', exact: true }).isVisible(),
   );
@@ -92,18 +93,20 @@ try {
   assert((await java.inputValue()).includes('java.exe'));
   await page.getByRole('button', { name: '检测 Java', exact: true }).click();
   await page.getByText('Java 21 · 64 位 · 检测成功', { exact: true }).waitFor();
-  await page.getByRole('button', { name: '刷新官方版本' }).click();
-  await page.getByText('已读取官方正式版本清单。', { exact: true }).waitFor();
-  assert((await page.locator('#official-versions option').count()) > 50);
-  await page
-    .getByRole('combobox', { name: '真实实例加载器' })
-    .selectOption('fabric');
-  await page.getByRole('button', { name: '刷新 Fabric 版本' }).click();
-  await page.getByText('已读取 Fabric 稳定版本。', { exact: true }).waitFor();
-  assert((await page.locator('#fabric-versions option').count()) > 0);
-  await page
-    .getByRole('combobox', { name: '真实实例加载器' })
-    .selectOption('vanilla');
+  if (!process.argv.includes('--cached')) {
+    await page.getByRole('button', { name: '刷新官方版本' }).click();
+    await page.getByText('已读取官方正式版本清单。', { exact: true }).waitFor();
+    assert((await page.locator('#official-versions option').count()) > 50);
+    await page
+      .getByRole('combobox', { name: '真实实例加载器' })
+      .selectOption('fabric');
+    await page.getByRole('button', { name: '刷新 Fabric 版本' }).click();
+    await page.getByText('已读取 Fabric 稳定版本。', { exact: true }).waitFor();
+    assert((await page.locator('#fabric-versions option').count()) > 0);
+    await page
+      .getByRole('combobox', { name: '真实实例加载器' })
+      .selectOption('vanilla');
+  }
   await page
     .getByLabel('选择整合包', { exact: true })
     .setInputFiles(path.join(project, '.native/fixtures/preview.mrpack'));
@@ -146,6 +149,112 @@ try {
     (
       await page.getByRole('button', { name: '管理游戏账户' }).textContent()
     ).includes('EC_OfflineTest'),
+  );
+  await page.getByRole('button', { name: '管理游戏账户', exact: true }).click();
+  const skin = await page.evaluate(() => {
+    const canvas = document.createElement('canvas');
+    canvas.width = canvas.height = 64;
+    const ctx = canvas.getContext('2d');
+    ctx.fillStyle = '#c89168';
+    ctx.fillRect(8, 8, 8, 8);
+    ctx.fillStyle = '#553b29';
+    ctx.fillRect(8, 8, 8, 2);
+    ctx.fillRect(10, 14, 4, 1);
+    ctx.fillStyle = '#416682';
+    ctx.fillRect(10, 12, 1, 1);
+    ctx.fillRect(13, 12, 1, 1);
+    return canvas.toDataURL('image/png').split(',')[1];
+  });
+  await page.getByLabel('选择皮肤头像').setInputFiles({
+    name: 'skin.png',
+    mimeType: 'image/png',
+    buffer: Buffer.from(skin, 'base64'),
+  });
+  await page.getByRole('img', { name: '玩家皮肤头像', exact: true }).waitFor();
+  await page.getByRole('button', { name: '关闭弹窗' }).click();
+  const testState = await page.evaluate(() =>
+    window.__TAURI_INTERNALS__.invoke('native_status'),
+  );
+  const instanceId = testState.instances[0].id;
+  const worldId = `EasyCraft_UI_${randomUUID()}`;
+  const gameDir = path.join(
+    testState.dataRoot,
+    'instances',
+    instanceId,
+    'game',
+  );
+  assert(
+    path
+      .resolve(gameDir)
+      .startsWith(path.join(project, '.native', 'integration') + path.sep),
+  );
+  const worldDir = path.join(gameDir, 'saves', worldId);
+  await mkdir(worldDir, { recursive: true });
+  await copyFile(
+    path.join(project, '.native/fixtures/world/level.dat'),
+    path.join(worldDir, 'level.dat'),
+  );
+  await page
+    .getByRole('navigation')
+    .getByRole('button', { name: '版本', exact: true })
+    .click();
+  await page.locator('.library-instance').first().click();
+  await page.getByRole('tab', { name: '存档与设置', exact: true }).click();
+  await page.getByLabel('选择存档', { exact: true }).selectOption(worldId);
+  await page.getByLabel('世界难度', { exact: true }).waitFor();
+  assert.equal(
+    await page.getByLabel('世界时间', { exact: true }).inputValue(),
+    '9007199254740993',
+  );
+  assert(
+    await page
+      .getByRole('button', { name: '保存世界设置', exact: true })
+      .isDisabled(),
+  );
+  await page.getByLabel('确认游戏已关闭').check();
+  await page.getByLabel('世界难度', { exact: true }).selectOption('3');
+  await page.getByLabel('死亡不掉落', { exact: true }).check();
+  await page.getByLabel('世界时间', { exact: true }).fill('13000');
+  await page.getByLabel('世界天气', { exact: true }).selectOption('rain');
+  await page
+    .getByRole('button', { name: '保存世界设置与规则', exact: true })
+    .click();
+  await page.getByRole('status').filter({ hasText: '原文件已备份' }).waitFor();
+  const savedWorld = await page.evaluate(
+    ({ id, worldId }) =>
+      window.__TAURI_INTERNALS__.invoke('native_world', { id, worldId }),
+    { id: instanceId, worldId },
+  );
+  assert.equal(savedWorld.difficulty, 3);
+  assert.equal(savedWorld.dayTime, '13000');
+  assert.equal(savedWorld.weather, 'rain');
+  assert.equal(
+    savedWorld.gameRules.find((rule) => rule.key === 'keepInventory').value,
+    'true',
+  );
+  const backup = (
+    await page
+      .getByRole('status')
+      .filter({ hasText: '原文件已备份' })
+      .innerText()
+  ).split('原文件已备份：')[1];
+  assert.deepEqual(
+    await readFile(backup),
+    await readFile(path.join(project, '.native/fixtures/world/level.dat')),
+  );
+  await page.getByLabel('渲染距离', { exact: true }).fill('10');
+  await page.getByRole('button', { name: '保存音画设置', exact: true }).click();
+  await page.waitForFunction(
+    async (id) =>
+      (await window.__TAURI_INTERNALS__.invoke('native_options', { id }))
+        .renderDistance === 10,
+    instanceId,
+  );
+  await page.screenshot({
+    path: path.join(project, 'output/playwright/world-settings.png'),
+  });
+  console.log(
+    'PASS: native skin avatar, world rules/difficulty/time/weather, exact backup and options round trip.',
   );
   await page
     .getByRole('navigation')
@@ -203,13 +312,28 @@ try {
       .isEnabled(),
   );
   if (process.argv.includes('--launch-offline')) {
-    const launchButton = process.argv.includes('--fabric')
+    await page
+      .getByRole('navigation')
+      .getByRole('button', { name: '版本', exact: true })
+      .click();
+    const chosen = process.argv.includes('--fabric')
       ? page
-          .locator('.native-instances > div')
+          .locator('.library-instance')
           .filter({ hasText: 'Fabric 0.16.14' })
-          .getByRole('button', { name: '启动游戏', exact: true })
           .first()
-      : page.getByRole('button', { name: '启动游戏', exact: true }).first();
+      : page.locator('.library-instance').first();
+    await chosen.click();
+    await page.getByRole('tab', { name: '实例详情', exact: true }).click();
+    await page.locator('.page-content').evaluate((element) => {
+      element.scrollTop = 0;
+    });
+    await page.screenshot({
+      path: path.join(project, 'output/playwright/library-native.png'),
+    });
+    const launchButton = page.getByRole('button', {
+      name: '启动游戏',
+      exact: true,
+    });
     await launchButton.click();
     let rendered = false;
     for (let attempt = 0; attempt < 120; attempt++) {
@@ -235,6 +359,25 @@ try {
             ),
           );
         rendered = true;
+        const lockedEdit = await page.evaluate(
+          async ({ id, worldId, settings }) => {
+            try {
+              await window.__TAURI_INTERNALS__.invoke('native_world_save', {
+                id,
+                worldId,
+                settings,
+              });
+              return '';
+            } catch (error) {
+              return String(error);
+            }
+          },
+          { id: instanceId, worldId, settings: savedWorld },
+        );
+        assert(
+          lockedEdit.includes('请先结束'),
+          'Native guard must reject world writes while the game runs',
+        );
         console.log(
           `PASS: actual offline Minecraft process ${state.task.pid} initialized audio; no Microsoft account or Client ID used.`,
         );
@@ -249,9 +392,11 @@ try {
     await page
       .getByRole('button', { name: '结束游戏进程', exact: true })
       .click();
-    await page
-      .getByRole('heading', { name: '原版任务已取消', exact: true })
-      .waitFor();
+    await page.waitForFunction(
+      async () =>
+        (await window.__TAURI_INTERNALS__.invoke('native_status')).task
+          .status === 'cancelled',
+    );
   }
   assert.deepEqual(errors, []);
   await mkdir(path.join(project, 'output/playwright'), { recursive: true });
@@ -279,8 +424,23 @@ try {
     ),
   ]);
   console.log(
-    'PASS: real Tauri/WebView2, Java, official versions, Microsoft login guard, offline configuration and native close.',
+    `PASS: real Tauri/WebView2, Java, ${process.argv.includes('--cached') ? 'cached resources' : 'official version queries'}, Microsoft login guard, offline configuration and native close.`,
   );
+} catch (error) {
+  if (page) {
+    console.error(
+      await page
+        .locator('body')
+        .innerText({ timeout: 2000 })
+        .catch(() => 'world panel unavailable'),
+    );
+    await page
+      .screenshot({
+        path: path.join(project, 'output/playwright/native-failure.png'),
+      })
+      .catch(() => {});
+  }
+  throw error;
 } finally {
   if (originalSettings && page) {
     await page

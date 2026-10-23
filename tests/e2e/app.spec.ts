@@ -1,8 +1,41 @@
 import { expect, test } from '@playwright/test';
-test('real features are explicitly unavailable in browser and never simulated', async ({
+test('real library is the default and remains usable at minimum size', async ({
   page,
 }) => {
   await page.goto('/');
+  await expect(page.locator('.library-instance')).toHaveCount(0);
+  await expect(
+    page.getByRole('button', { name: '启动游戏', exact: true }),
+  ).toBeDisabled();
+  await expect(page.getByRole('img', { name: '默认玩家头像' })).toBeVisible();
+  await page
+    .getByRole('navigation')
+    .getByRole('button', { name: '设置', exact: true })
+    .click();
+  await page.getByRole('button', { name: /草方块亮色/ }).click();
+  await page
+    .getByRole('navigation')
+    .getByRole('button', { name: '版本', exact: true })
+    .click();
+  await page.screenshot({ path: 'output/playwright/library-light.png' });
+  await page.getByRole('tab', { name: '存档与设置' }).click();
+  await page.setViewportSize({ width: 800, height: 540 });
+  expect(
+    await page.evaluate(
+      () => document.documentElement.scrollWidth <= innerWidth,
+    ),
+  ).toBe(true);
+  await page.getByRole('button', { name: '管理游戏账户' }).click();
+  await expect(
+    page.getByRole('button', { name: '离线登录', exact: true }),
+  ).toBeDisabled();
+  await page.keyboard.press('Escape');
+  await expect(page.getByRole('dialog')).toHaveCount(0);
+});
+test('real features are explicitly unavailable in browser and never simulated', async ({
+  page,
+}) => {
+  await page.goto('/?demo=1');
   await page
     .getByRole('navigation')
     .getByRole('button', { name: '下载中心', exact: true })
@@ -33,7 +66,7 @@ test('real features are explicitly unavailable in browser and never simulated', 
 test('add, copy, favorite, double click opt-in and developer diagnostics work', async ({
   page,
 }) => {
-  await page.goto('/');
+  await page.goto('/?demo=1');
   await page.getByRole('button', { name: '添加演示实例' }).click();
   await page.getByRole('textbox', { name: '实例名称' }).fill('我的演示世界');
   await page.getByRole('button', { name: '保存演示资料' }).click();
@@ -67,7 +100,7 @@ test('add, copy, favorite, double click opt-in and developer diagnostics work', 
   ).toBeVisible();
 });
 test('light theme and local background preview work', async ({ page }) => {
-  await page.goto('/');
+  await page.goto('/?demo=1');
   await page
     .getByRole('navigation')
     .getByRole('button', { name: '设置', exact: true })
@@ -97,7 +130,7 @@ test('simulation survives navigation, cancels, retries, and completes', async ({
 }) => {
   const errors: string[] = [];
   page.on('pageerror', (error) => errors.push(error.message));
-  await page.goto('/');
+  await page.goto('/?demo=1');
   await page.getByRole('button', { name: '模拟启动 DEMO' }).click();
   await page
     .getByRole('navigation')
@@ -124,7 +157,7 @@ test('simulation survives navigation, cancels, retries, and completes', async ({
 test('failure demo and file drop preview do not navigate away', async ({
   page,
 }) => {
-  await page.goto('/');
+  await page.goto('/?demo=1');
   await page.getByRole('button', { name: /山间工坊 1.20.1/ }).click();
   await page.getByRole('button', { name: '模拟启动 DEMO' }).click();
   await expect(
@@ -145,14 +178,14 @@ test('failure demo and file drop preview do not navigate away', async ({
   await expect(dialog.getByText('MRPACK · 4 字节')).toBeVisible();
   await page.keyboard.press('Escape');
   await expect(dialog).toHaveCount(0);
-  await expect(page).toHaveURL('http://127.0.0.1:1420/');
+  await expect(page).toHaveURL('http://127.0.0.1:1420/?demo=1');
 });
 test('instance operations, resize and theme survive refresh', async ({
   page,
 }) => {
   const errors: string[] = [];
   page.on('pageerror', (error) => errors.push(error.message));
-  await page.goto('/');
+  await page.goto('/?demo=1');
   await expect(page.getByText('演示模式', { exact: true })).toBeVisible();
   await page.getByRole('textbox', { name: '搜索实例' }).fill('不存在');
   await expect(page.getByText('没有匹配的实例')).toBeVisible();
@@ -184,7 +217,7 @@ test('instance operations, resize and theme survive refresh', async ({
 });
 test('minimum desktop size and keyboard dialog work', async ({ page }) => {
   await page.setViewportSize({ width: 800, height: 540 });
-  await page.goto('/');
+  await page.goto('/?demo=1');
   await expect(page.getByRole('button', { name: /模拟启动/ })).toBeVisible();
   await page.getByRole('button', { name: '管理游戏账户' }).click();
   await expect(page.getByRole('dialog')).toBeVisible();

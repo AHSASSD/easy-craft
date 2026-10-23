@@ -1,5 +1,11 @@
 # 架构
 
+## V0.3.1 世界与皮肤
+
+App 默认装配 LauncherShell，真实实例来自 NativeService；演示页面仅在 `?demo=1` 使用。WorldSettingsPanel 调用受限命令，Host::instance_files 在持有任务锁时验证实例归属，worlds.rs 再校验路径、NBT/选项格式、修订号与 session.lock，备份校验成功才原子写回。NBT 只替换已有标量/规则字符串，其他字节原样保留。音画设置与世界配置分别保存。
+
+SkinAvatar 从 NativeService 的皮肤缓存裁切头部、叠加帽子层。auth.rs 保留官方档案的 ACTIVE 皮肤 URL，skins.rs 限定官方来源并缓存，离线 PNG 按离线 UUID 保存。前端头像请求绑定账户身份，旧请求不能覆盖新账户。PNG 只用于头像，不修改离线游戏的皮肤。
+
 ## V0.3 第一阶段
 
 AccountPanel 在现有头像弹窗中消费 NativeService，账户配置从下载表单移入该入口。MemoryPanel 在设置页显示原生内存状态、保存分配策略与整理开关。内存读取/整理使用 Windows API，启动宿主在创建 Java 进程前应用策略。
