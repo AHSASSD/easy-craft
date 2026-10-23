@@ -12,6 +12,7 @@ const project = path.resolve(
   '..',
 );
 const profile = process.argv[2] ?? 'debug';
+await mkdir(path.join(project, 'output/playwright'), { recursive: true });
 assert(['debug', 'release'].includes(profile));
 const executable = path.join(
   project,
@@ -113,6 +114,39 @@ try {
       .getByRole('combobox', { name: '真实实例加载器' })
       .selectOption('vanilla');
   }
+  if (process.argv.includes('--resources')) {
+    await page.getByRole('button', { name: '模组', exact: true }).click();
+    await page.getByLabel('搜索在线资源').fill('FerriteCore');
+    await page.getByLabel('在线资源游戏版本').fill('1.21.1');
+    await page.getByRole('button', { name: '搜索资源', exact: true }).click();
+    await page
+      .getByRole('button', { name: '查看 FerriteCore', exact: true })
+      .waitFor({ timeout: 100000 });
+    await page
+      .getByRole('button', { name: '查看 FerriteCore', exact: true })
+      .click();
+    await page.getByLabel('在线资源兼容版本').waitFor({ timeout: 100000 });
+    await page.getByLabel('在线资源兼容版本').selectOption('sOzRw3CG');
+    await page.getByText(/ferritecore-7.0.3-fabric.jar/).waitFor();
+    assert(
+      (await page.locator('.resource-hash').first().textContent()).includes(
+        'a8a6a34fcda177da2828cedef44e0e538cf78aad',
+      ),
+    );
+    await page.locator('.resource-detail').screenshot({
+      path: path.join(project, 'output/playwright/resource-detail.png'),
+    });
+    await page
+      .getByRole('button', { name: '返回搜索结果', exact: true })
+      .click();
+    assert.equal(
+      await page.getByLabel('搜索在线资源').inputValue(),
+      'FerriteCore',
+    );
+    console.log(
+      'PASS: real Modrinth search/detail/version/file-hash metadata in desktop UI; no resource installation claimed.',
+    );
+  }
   await page.getByRole('button', { name: '整合包', exact: true }).click();
   await page
     .getByLabel('选择整合包', { exact: true })
@@ -185,6 +219,182 @@ try {
   await page.getByRole('button', { name: '关闭弹窗' }).click();
   const testState = await page.evaluate(() =>
     window.__TAURI_INTERNALS__.invoke('native_status'),
+  );
+  const fabricInstance = testState.instances.find(
+    (item) => item.fabricVersion === '0.16.14',
+  );
+  assert(fabricInstance, 'Installed isolated Fabric fixture is required');
+  await page.evaluate(async (id) => {
+    const rows = await window.__TAURI_INTERNALS__.invoke('native_content', {
+      id,
+      kind: 'mods',
+    });
+    for (const item of rows)
+      if (
+        /^ec-ui-[0-9a-f-]+\.jar$/.test(item.file) &&
+        item.enabled &&
+        item.editable
+      )
+        await window.__TAURI_INTERNALS__.invoke('native_content_toggle', {
+          id,
+          file: item.file,
+          revision: item.revision,
+          enabled: false,
+        });
+  }, fabricInstance.id);
+  await page
+    .getByRole('navigation')
+    .getByRole('button', { name: '游戏库', exact: true })
+    .click();
+  await page
+    .locator('.library-instance')
+    .filter({ hasText: 'Fabric 0.16.14' })
+    .first()
+    .click();
+  await page.getByRole('tab', { name: '模组', exact: true }).click();
+  await page.getByLabel('确认内容修改前游戏已关闭').check();
+  const localModName = `ec-ui-${randomUUID()}.jar`;
+  const localModBytes = await readFile(
+    path.join(project, '.native/fixtures/local-test.jar'),
+  );
+  await page.getByLabel('导入本地模组').setInputFiles({
+    name: localModName,
+    mimeType: 'application/java-archive',
+    buffer: localModBytes,
+  });
+  const modRow = page
+    .locator('.content-file-row')
+    .filter({ hasText: localModName });
+  await modRow.getByRole('checkbox').click();
+  await page.waitForFunction(
+    async ({ id, file }) =>
+      (
+        await window.__TAURI_INTERNALS__.invoke('native_content', {
+          id,
+          kind: 'mods',
+        })
+      ).some((item) => item.file === file && !item.enabled),
+    { id: fabricInstance.id, file: localModName + '.disabled' },
+  );
+  const fabricGameDir = path.join(
+    testState.dataRoot,
+    'instances',
+    fabricInstance.id,
+    'game',
+  );
+  assert(
+    path
+      .resolve(fabricGameDir)
+      .startsWith(path.join(project, '.native', 'integration') + path.sep),
+  );
+  assert.deepEqual(
+    await readFile(
+      path.join(fabricGameDir, 'mods', localModName + '.disabled'),
+    ),
+    localModBytes,
+  );
+  await page.getByRole('tab', { name: '资源与光影', exact: true }).click();
+  await page
+    .locator('.content-subtabs')
+    .getByRole('button', { name: '资源包', exact: true })
+    .click();
+  const localResourceName = `ec-resource-${randomUUID()}.zip`;
+  await page.getByLabel('确认内容修改前游戏已关闭').check();
+  await page.getByLabel('导入本地资源包').setInputFiles({
+    name: localResourceName,
+    mimeType: 'application/zip',
+    buffer: await readFile(
+      path.join(project, '.native/fixtures/local-resource.zip'),
+    ),
+  });
+  await page
+    .locator('.content-file-row')
+    .filter({ hasText: localResourceName })
+    .waitFor();
+  await page
+    .locator('.content-subtabs')
+    .getByRole('button', { name: '光影包', exact: true })
+    .click();
+  const localShaderName = `ec-shader-${randomUUID()}.zip`;
+  await page.getByLabel('确认内容修改前游戏已关闭').check();
+  await page.getByLabel('导入本地光影包').setInputFiles({
+    name: localShaderName,
+    mimeType: 'application/zip',
+    buffer: await readFile(
+      path.join(project, '.native/fixtures/local-shader.zip'),
+    ),
+  });
+  await page
+    .locator('.content-file-row')
+    .filter({ hasText: localShaderName })
+    .waitFor();
+  await page.getByLabel('搜索本地光影包').fill(localShaderName);
+  await page.getByRole('tab', { name: '模组', exact: true }).click();
+  await page.getByLabel('搜索本地模组').fill(localModName);
+  await page.getByRole('tab', { name: '资源与光影', exact: true }).click();
+  assert.equal(
+    await page.getByLabel('搜索本地光影包').inputValue(),
+    localShaderName,
+  );
+  await page.getByRole('tab', { name: '模组', exact: true }).click();
+  assert.equal(
+    await page.getByLabel('搜索本地模组').inputValue(),
+    localModName,
+  );
+  await page.getByLabel('搜索本地模组').fill('');
+  await page.getByRole('tab', { name: '资源与光影', exact: true }).click();
+  await page.getByLabel('搜索本地光影包').fill('');
+  const screenshotName = `ec-ui-${randomUUID()}.png`;
+  await mkdir(path.join(fabricGameDir, 'screenshots'), { recursive: true });
+  const { writeFile } = await import('node:fs/promises');
+  await writeFile(
+    path.join(fabricGameDir, 'screenshots', screenshotName),
+    Buffer.from(skin, 'base64'),
+  );
+  await page.getByRole('tab', { name: '截图', exact: true }).click();
+  const thumbnail = page.getByRole('img', {
+    name: `${screenshotName} 缩略图`,
+    exact: true,
+  });
+  await page
+    .locator('.content-file-row')
+    .filter({ hasText: screenshotName })
+    .scrollIntoViewIfNeeded();
+  await thumbnail.waitFor();
+  assert(
+    await thumbnail.evaluate(
+      (image) =>
+        image.complete && image.naturalWidth > 0 && image.naturalWidth <= 240,
+    ),
+  );
+  await page
+    .locator('.content-file-row')
+    .filter({ hasText: screenshotName })
+    .getByRole('button', { name: '查看截图', exact: true })
+    .click();
+  await page.getByRole('img', { name: screenshotName, exact: true }).waitFor();
+  await page.getByRole('button', { name: '关闭弹窗', exact: true }).click();
+  await page.getByRole('tab', { name: '实例详情', exact: true }).click();
+  await page
+    .locator('.library-instance')
+    .filter({ hasText: 'Fabric 0.16.14' })
+    .first()
+    .click({ button: 'right' });
+  await page.getByRole('menu', { name: '实例操作', exact: true }).waitFor();
+  await page.getByRole('menuitem', { name: '重命名', exact: true }).click();
+  await page.getByLabel('真实实例名称').fill('EC 重命名验收');
+  await page.getByRole('button', { name: '保存实例名称', exact: true }).click();
+  await page
+    .getByRole('heading', { name: 'EC 重命名验收', exact: true })
+    .waitFor();
+  await page.getByRole('button', { name: '重命名实例', exact: true }).click();
+  await page.getByLabel('真实实例名称').fill(fabricInstance.name);
+  await page.getByRole('button', { name: '保存实例名称', exact: true }).click();
+  await page
+    .getByRole('heading', { name: fabricInstance.name, exact: true })
+    .waitFor();
+  console.log(
+    'PASS: native local mod import/disable, resources/shaders, screenshot preview and persisted instance rename.',
   );
   const instanceId = testState.instances[0].id;
   const worldId = `EasyCraft_UI_${randomUUID()}`;

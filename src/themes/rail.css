@@ -1,3 +1,98 @@
+.content-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin: 16px 0;
+}
+.resource-browser .card {
+  margin: 16px 0;
+}
+.resource-browser .resource-hit h2 {
+  font-size: 17px;
+}
+.resource-browser .resource-hash {
+  display: block;
+  overflow-wrap: anywhere;
+  color: var(--muted);
+}
+.resource-browser .resource-description {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  max-height: 340px;
+  overflow-y: auto;
+  padding: 12px 0;
+}
+.resource-browser select {
+  max-width: 100%;
+}
+.instance-menu-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+}
+.instance-context-menu {
+  position: fixed;
+  width: 230px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  border-radius: 10px;
+  box-shadow: 0 12px 35px #0003;
+  padding: 8px;
+  display: flex;
+  flex-direction: column;
+}
+.instance-context-menu small {
+  padding: 8px;
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.instance-context-menu button {
+  background: transparent;
+  border: 0;
+  justify-content: flex-start;
+}
+.content-toolbar input {
+  flex: 1;
+  min-width: 160px;
+}
+.content-file-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 15px 0;
+  border-bottom: 1px solid var(--border);
+}
+.content-file-row > div {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.content-file-row small {
+  display: block;
+  font-size: 11px;
+  color: var(--muted);
+  margin-top: 5px;
+}
+.content-file-row .toggle-row {
+  flex-shrink: 0;
+}
+.content-subtabs {
+  display: flex;
+  gap: 10px;
+  padding: 16px 20px 0;
+}
+.content-subtabs button[aria-pressed='true'] {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.screenshot-preview {
+  max-width: 100%;
+  max-height: 65vh;
+  object-fit: contain;
+}
 .native-library.rail-layout {
   --rail-width: 76px;
 }
@@ -217,6 +312,22 @@
   .rail-layout .theme-grid {
     grid-template-columns: 1fr;
   }
+}
+.rail-layout .screenshot-thumbnail {
+  flex: 0 0 120px;
+  width: 120px;
+  height: 76px;
+  display: grid;
+  place-items: center;
+  background: var(--panel);
+  border-radius: 6px;
+  overflow: hidden;
+  font-size: 12px;
+}
+.rail-layout .screenshot-thumbnail img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
 }
 @media (prefers-reduced-motion: reduce) {
   .rail-layout *,

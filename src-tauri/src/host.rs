@@ -139,6 +139,25 @@ impl Host {
         }
         operation(&root)
     }
+    pub fn rename_instance(&self, id: &str, name: &str) -> Result<()> {
+        let name = name.trim();
+        if name.is_empty() || name.chars().count() > 60 || name.chars().any(char::is_control) {
+            return Err("实例名称须为 1–60 个可见字符".into());
+        }
+        let mut inner = self.inner.lock().map_err(|_| "宿主状态不可用")?;
+        if inner.cancel.is_some() {
+            return Err("请先结束游戏或当前任务".into());
+        }
+        let mut instances = inner.instances.clone();
+        let item = instances
+            .iter_mut()
+            .find(|item| item.id == id)
+            .ok_or("实例不存在")?;
+        item.name = name.into();
+        model::save_json(&self.root, "instances.json", &instances)?;
+        inner.instances = instances;
+        Ok(())
+    }
     pub fn progress(&self, phase: &str, message: &str, completed: usize, total: usize) {
         let mut inner = self.inner.lock().expect("host state poisoned");
         inner.task.phase = phase.into();

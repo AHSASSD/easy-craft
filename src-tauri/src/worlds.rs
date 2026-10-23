@@ -55,6 +55,12 @@ fn session_lock(dir: &Path) -> Result<fs::File> {
         .map_err(|_| "无法锁定世界，请先退出使用此存档的游戏")?;
     Ok(file)
 }
+pub fn lock_worlds(root: &Path) -> Result<Vec<fs::File>> {
+    list(root)?
+        .into_iter()
+        .map(|world| session_lock(&world_dir(root, &world.id)?))
+        .collect()
+}
 #[derive(Serialize)]
 pub struct WorldEntry {
     pub id: String,
@@ -566,10 +572,7 @@ pub fn save_options(root: &Path, options: ClientOptions) -> Result<String> {
         return Err("游戏选项已变化，请重新读取后保存".into());
     }
     // Existing world locks also catch games launched outside Easy Craft while a world is open.
-    let mut locks = vec![];
-    for world in list(root)? {
-        locks.push(session_lock(&world_dir(root, &world.id)?)?);
-    }
+    let _locks = lock_worlds(root)?;
     let text =
         std::str::from_utf8(original.as_deref().unwrap_or_default()).map_err(|_| "配置编码无效")?;
     let newline = if text.contains("\r\n") { "\r\n" } else { "\n" };

@@ -12,6 +12,8 @@ import { AccountPanel } from '../src/features/AccountPanel';
 import { MemoryPanel } from '../src/features/MemoryPanel';
 import { WorldSettingsPanel } from '../src/features/WorldSettingsPanel';
 import { JavaPanel } from '../src/features/JavaPanel';
+import { ContentPanel } from '../src/features/ContentPanel';
+import { ResourceBrowser } from '../src/features/ResourceBrowser';
 import {
   UnsavedChanges,
   useNavigationGuard,
@@ -20,6 +22,7 @@ import type { invoke } from '@tauri-apps/api/core';
 import {
   createNativeService,
   validNativeState,
+  validResourceDetail,
 } from '../src/app/native-service';
 import type { NativeState, WorldSettings } from '../src/core/native-contracts';
 // jsdom does not implement the native dialog APIs; browser tests cover the real modal.
@@ -105,6 +108,48 @@ afterEach(() => {
   vi.useRealTimers();
   cleanup();
 });
+test('content manager shows native metadata, requires closed game, and sends the file revision', async () => {
+  const row = {
+    file: 'fixture.jar',
+    name: 'Fixture Mod',
+    version: '1.0',
+    enabled: true,
+    editable: true,
+    bytes: 128,
+    revision: '128:42',
+  };
+  const call = vi.fn(async (command: string) =>
+    command === 'native_content' ? [row] : state(),
+  );
+  const service = createNativeService(true, call as typeof invoke);
+  render(
+    createElement(ContentPanel, {
+      service,
+      id: 'instance',
+      kind: 'mods',
+      running: false,
+      onDownload: vi.fn(),
+      query: '',
+      onQuery: vi.fn(),
+    }),
+  );
+  await screen.findByText('Fixture Mod');
+  const toggle = screen.getByLabelText(
+    '启用模组 Fixture Mod',
+  ) as HTMLInputElement;
+  expect(toggle.disabled).toBe(true);
+  fireEvent.click(screen.getByLabelText('确认内容修改前游戏已关闭'));
+  fireEvent.click(toggle);
+  await waitFor(() =>
+    expect(call).toHaveBeenCalledWith('native_content_toggle', {
+      id: 'instance',
+      file: 'fixture.jar',
+      revision: '128:42',
+      enabled: false,
+    }),
+  );
+  service.stop();
+});
 test('a fresh status waits for the in-flight poll and then reads the host again', async () => {
   const current = state();
   let resolveFirst!: (value: NativeState) => void;
@@ -127,6 +172,92 @@ test('a fresh status waits for the in-flight poll and then reads the host again'
   await Promise.all([poll, fresh]);
   expect(service.snapshot().state?.task.status).toBe('cancelled');
   expect(call).toHaveBeenCalledTimes(2);
+  service.stop();
+});
+test('resource browsing validates files, preserves results on network failure and shows declared dependencies', async () => {
+  const detail = {
+    id: 'Test1234',
+    title: 'Resource Fixture',
+    description: 'Metadata only',
+    body: '<script>unsafe()</script>',
+    versions: [
+      {
+        id: 'Vers1234',
+        name: 'Test Version',
+        number: '1',
+        environment: 'unknown',
+        loaders: ['fabric'],
+        files: [{ filename: 'fixture.jar', size: 100, sha1: 'a'.repeat(40) }],
+        dependencies: [
+          { projectId: 'Deps1234', versionId: null, kind: 'required' },
+        ],
+      },
+    ],
+  };
+  expect(validResourceDetail(detail)).toBe(true);
+  expect(
+    validResourceDetail({
+      ...detail,
+      versions: [
+        {
+          ...detail.versions[0],
+          files: [{ filename: 'bad', size: NaN, sha1: 'bad' }],
+        },
+      ],
+    }),
+  ).toBe(false);
+  let fail = false;
+  const call = vi.fn(async (command: string) => {
+    if (command === 'native_resource_search') {
+      if (fail) throw '断网测试';
+      return {
+        hits: [
+          {
+            id: 'Test1234',
+            title: detail.title,
+            description: detail.description,
+            author: 'Author',
+          },
+        ],
+        total: 1,
+        offset: 0,
+      };
+    }
+    if (command === 'native_resource_detail') return detail;
+    return state();
+  });
+  const service = createNativeService(true, call as typeof invoke);
+  render(
+    createElement(ResourceBrowser, {
+      service,
+      kind: 'mod',
+      query: 'fixture',
+      gameVersion: '1.21.1',
+      onFilter: vi.fn(),
+    }),
+  );
+  fireEvent.click(screen.getByText('搜索资源'));
+  await screen.findByRole('heading', { name: 'Resource Fixture' });
+  fail = true;
+  fireEvent.click(screen.getByText('搜索资源'));
+  await screen.findByText('断网测试');
+  expect(
+    screen.getByRole('heading', { name: 'Resource Fixture' }),
+  ).toBeTruthy();
+  fireEvent.click(screen.getByText('查看 Resource Fixture'));
+  await screen.findByText(/必需：Deps1234/);
+  expect(
+    screen.queryByText(
+      '此版本 API 未列出额外项目依赖；加载器与运行条件仍需检查。',
+      { exact: true },
+    ),
+  ).toBeNull();
+  expect(screen.getByText('<script>unsafe()</script>')).toBeTruthy();
+  expect(document.querySelector('.resource-description script')).toBeNull();
+  fireEvent.click(screen.getByText('返回搜索结果'));
+  expect(
+    screen.getByRole('heading', { name: 'Resource Fixture' }),
+  ).toBeTruthy();
   service.stop();
 });
 test('world controls read discovered rules and save only after the closed-game acknowledgement', async () => {

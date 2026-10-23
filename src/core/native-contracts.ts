@@ -42,6 +42,50 @@ export type NativeSnapshot = {
   avatar: string | null;
 };
 export type WorldEntry = { id: string; name: string };
+export type ResourceKind =
+  'mod' | 'resourcepack' | 'shader' | 'datapack' | 'modpack';
+export type ResourceHit = {
+  id: string;
+  title: string;
+  description: string;
+  author: string;
+};
+export type ResourceSearch = {
+  hits: ResourceHit[];
+  total: number;
+  offset: number;
+};
+export type ResourceVersion = {
+  id: string;
+  name: string;
+  number: string;
+  environment: string;
+  loaders: string[];
+  files: { filename: string; size: number; sha1: string }[];
+  dependencies: {
+    projectId: string | null;
+    versionId: string | null;
+    kind: string;
+  }[];
+};
+export type ResourceDetail = {
+  id: string;
+  title: string;
+  description: string;
+  body: string;
+  versions: ResourceVersion[];
+};
+export type ContentKind =
+  'mods' | 'resourcepacks' | 'shaderpacks' | 'screenshots';
+export type ContentEntry = {
+  file: string;
+  name: string;
+  version: string;
+  enabled: boolean;
+  editable: boolean;
+  bytes: number;
+  revision: string;
+};
 export type GameRule = {
   key: string;
   kind: 'boolean' | 'integer' | 'text';
@@ -88,6 +132,33 @@ export type MemoryInfo = {
   reserveMb: number;
 };
 export interface NativeService extends Observable<NativeSnapshot> {
+  searchResources(
+    kind: ResourceKind,
+    query: string,
+    gameVersion: string,
+    offset: number,
+  ): Promise<ResourceSearch>;
+  resourceDetail(
+    project: string,
+    kind: ResourceKind,
+    gameVersion: string,
+  ): Promise<ResourceDetail>;
+  content(id: string, kind: ContentKind): Promise<ContentEntry[]>;
+  toggleContent(
+    id: string,
+    file: string,
+    revision: string,
+    enabled: boolean,
+  ): Promise<void>;
+  importContent(
+    id: string,
+    kind: ContentKind,
+    file: string,
+    bytes: number[],
+  ): Promise<void>;
+  contentImage(id: string, file: string): Promise<string>;
+  openContent(id: string, kind?: ContentKind): Promise<void>;
+  renameInstance(id: string, name: string): Promise<void>;
   refresh(fresh?: boolean): Promise<void>;
   worlds(id: string): Promise<WorldEntry[]>;
   world(id: string, worldId: string): Promise<WorldSettings>;

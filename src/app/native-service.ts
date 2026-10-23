@@ -10,11 +10,63 @@ import type {
   WorldEntry,
   WorldSettings,
   ClientOptions,
+  ContentEntry,
+  ResourceSearch,
+  ResourceDetail,
 } from '../core/native-contracts';
 import { isRecord } from '../core/services';
 const string = (value: unknown): value is string => typeof value === 'string';
 const integer = (value: unknown): value is number =>
   typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
+const resourceId = (value: unknown): value is string =>
+  string(value) && /^[A-Za-z0-9]{1,64}$/.test(value);
+const bounded = (value: unknown, max: number): value is string =>
+  string(value) && value.length <= max;
+export function validResourceDetail(value: unknown): value is ResourceDetail {
+  return (
+    isRecord(value) &&
+    resourceId(value.id) &&
+    bounded(value.title, 512) &&
+    bounded(value.description, 4096) &&
+    bounded(value.body, 256 * 1024) &&
+    Array.isArray(value.versions) &&
+    value.versions.length <= 1000 &&
+    value.versions.every(
+      (version: unknown) =>
+        isRecord(version) &&
+        resourceId(version.id) &&
+        bounded(version.name, 512) &&
+        bounded(version.number, 256) &&
+        bounded(version.environment, 64) &&
+        Array.isArray(version.loaders) &&
+        version.loaders.length <= 512 &&
+        version.loaders.every((v: unknown) => bounded(v, 128)) &&
+        Array.isArray(version.files) &&
+        version.files.length > 0 &&
+        version.files.length <= 64 &&
+        version.files.every(
+          (file: unknown) =>
+            isRecord(file) &&
+            bounded(file.filename, 512) &&
+            integer(file.size) &&
+            file.size <= 2 * 1024 * 1024 * 1024 &&
+            string(file.sha1) &&
+            /^[a-fA-F0-9]{40}$/.test(file.sha1),
+        ) &&
+        Array.isArray(version.dependencies) &&
+        version.dependencies.length <= 256 &&
+        version.dependencies.every(
+          (dep: unknown) =>
+            isRecord(dep) &&
+            (dep.projectId === null || resourceId(dep.projectId)) &&
+            (dep.versionId === null || resourceId(dep.versionId)) &&
+            ['required', 'optional', 'embedded', 'incompatible'].includes(
+              dep.kind as string,
+            ),
+        ),
+    )
+  );
+}
 const unit = (value: unknown): value is number =>
   typeof value === 'number' &&
   Number.isFinite(value) &&
@@ -248,6 +300,85 @@ export function createNativeService(
       }, 700)
     : undefined;
   return {
+    searchResources: async (kind, query, gameVersion, offset) => {
+      const value = await request('native_resource_search', {
+        kind,
+        query,
+        gameVersion,
+        offset,
+      });
+      if (
+        !isRecord(value) ||
+        !integer(value.total) ||
+        value.total > 10_000_000 ||
+        !integer(value.offset) ||
+        value.offset > 10000 ||
+        !Array.isArray(value.hits) ||
+        value.hits.length > 20 ||
+        !value.hits.every(
+          (hit: unknown) =>
+            isRecord(hit) &&
+            resourceId(hit.id) &&
+            bounded(hit.title, 512) &&
+            bounded(hit.description, 4096) &&
+            bounded(hit.author, 128),
+        )
+      )
+        throw new Error('资源搜索响应无效');
+      return value as ResourceSearch;
+    },
+    resourceDetail: async (project, kind, gameVersion) => {
+      const value = await request('native_resource_detail', {
+        project,
+        kind,
+        gameVersion,
+      });
+      if (!validResourceDetail(value) || value.id !== project)
+        throw new Error('资源详情响应无效');
+      return value;
+    },
+    content: async (id, kind) => {
+      const value = await request('native_content', { id, kind });
+      if (
+        !Array.isArray(value) ||
+        value.length > 1000 ||
+        !value.every(
+          (item) =>
+            isRecord(item) &&
+            string(item.file) &&
+            item.file.length <= 240 &&
+            string(item.name) &&
+            string(item.version) &&
+            typeof item.enabled === 'boolean' &&
+            typeof item.editable === 'boolean' &&
+            integer(item.bytes) &&
+            string(item.revision) &&
+            /^\d+:\d+$/.test(item.revision),
+        )
+      )
+        throw new Error('本地内容响应无效');
+      return value as ContentEntry[];
+    },
+    toggleContent: (id, file, revision, enabled) =>
+      operation('native_content_toggle', { id, file, revision, enabled }),
+    importContent: async (id, kind, file, bytes) => {
+      if (bytes.length > 16 * 1024 * 1024)
+        throw new Error('本地导入暂限 16 MB');
+      await operation('native_content_import', { id, kind, file, bytes });
+    },
+    contentImage: async (id, file) => {
+      const value = await request('native_content_image', { id, file });
+      if (
+        !string(value) ||
+        value.length > 23 * 1024 * 1024 ||
+        !/^data:image\/png;base64,[A-Za-z0-9+/=]+$/.test(value)
+      )
+        throw new Error('截图响应无效');
+      return value;
+    },
+    openContent: (id, kind) => operation('native_content_open', { id, kind }),
+    renameInstance: (id, name) =>
+      operation('native_instance_rename', { id, name }),
     snapshot: () => snapshot,
     subscribe: (listener) => {
       listeners.add(listener);

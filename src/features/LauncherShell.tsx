@@ -40,6 +40,8 @@ import { JavaPanel } from './JavaPanel';
 import { NativeWorkspace } from './NativeWorkspace';
 import { PackInspector } from './PackInspector';
 import { WorldSettingsPanel } from './WorldSettingsPanel';
+import { ContentPanel } from './ContentPanel';
+import { ResourceBrowser } from './ResourceBrowser';
 import { UnsavedChanges, useNavigationGuard } from './UnsavedChanges';
 import landscape from '../assets/landscape.svg';
 import '../themes/library.css';
@@ -105,13 +107,42 @@ function Shell({ services }: { services: Services }) {
   const [background, setBackground] = useState('');
   const [tasks, setTasks] = useState(false);
   const [closing, setClosing] = useState(false);
+  const resourceKind =
+    (selected && nav.resourceKinds?.[selected.id]) ?? 'resourcepacks';
+  const contentKind =
+    tab === 'mods'
+      ? 'mods'
+      : tab === 'screenshots'
+        ? 'screenshots'
+        : resourceKind;
+  const contentQueryKey = `${selected?.id ?? ''}:${contentKind}`;
+  const [rename, setRename] = useState<{ id: string; name: string } | null>(
+    null,
+  );
+  const [menu, setMenu] = useState<{
+    id: string;
+    name: string;
+    x: number;
+    y: number;
+  } | null>(null);
+  const menuRef = useRef<HTMLDivElement>(null);
+  const menuTrigger = useRef<HTMLElement | null>(null);
+  useEffect(() => {
+    if (menu) {
+      const trigger = menuTrigger.current;
+      menuRef.current
+        ?.querySelector<HTMLButtonElement>('button:not(:disabled)')
+        ?.focus();
+      return () => trigger?.focus();
+    }
+  }, [menu]);
   const allowClose = useRef(false);
   const content = useRef<HTMLDivElement>(null);
   const pointer = useRef<number | null>(null);
   const guard = useNavigationGuard();
   const location =
     view === 'library'
-      ? `library:${selected?.id ?? 'empty'}:${tab}`
+      ? `library:${selected?.id ?? 'empty'}:${tab}${tab === 'resources' ? `:${resourceKind}` : ''}`
       : `${view}:${view === 'settings' ? nav.settingsCategory : nav.downloadCategory}`;
   const scroll = useRef<Record<string, number>>({ ...nav.scroll });
   useLayoutEffect(() => {
@@ -273,6 +304,16 @@ function Shell({ services }: { services: Services }) {
                     className={`library-instance ${selected?.id === item.id ? 'selected' : ''}`}
                     aria-pressed={selected?.id === item.id}
                     onClick={() => change({}, item.id)}
+                    onContextMenu={(event) => {
+                      event.preventDefault();
+                      menuTrigger.current = event.currentTarget;
+                      setMenu({
+                        id: item.id,
+                        name: item.name,
+                        x: event.clientX,
+                        y: event.clientY,
+                      });
+                    }}
                     onDoubleClick={() => {
                       if (
                         preferences.doubleClickLaunch &&
@@ -552,7 +593,10 @@ function Shell({ services }: { services: Services }) {
                   {(
                     [
                       { id: 'overview', name: '实例详情' },
+                      { id: 'mods', name: '模组' },
+                      { id: 'resources', name: '资源与光影' },
                       { id: 'worlds', name: '存档' },
+                      { id: 'screenshots', name: '截图' },
                       { id: 'options', name: '实例设置' },
                     ] as const
                   ).map(({ id, name }) => (
@@ -587,6 +631,47 @@ function Shell({ services }: { services: Services }) {
                       <section className="card">
                         <h2>快速操作</h2>
                         <div className="button-row">
+                          <button
+                            disabled={!selected || running}
+                            onClick={() =>
+                              selected &&
+                              setRename({
+                                id: selected.id,
+                                name: selected.name,
+                              })
+                            }
+                          >
+                            重命名实例
+                          </button>
+                          <button
+                            disabled={!selected}
+                            onClick={(event) => {
+                              if (selected) {
+                                menuTrigger.current = event.currentTarget;
+                                const bounds =
+                                  event.currentTarget.getBoundingClientRect();
+                                setMenu({
+                                  id: selected.id,
+                                  name: selected.name,
+                                  x: bounds.left,
+                                  y: bounds.bottom,
+                                });
+                              }
+                            }}
+                          >
+                            实例操作
+                          </button>
+                          <button
+                            disabled={!selected || running}
+                            onClick={() =>
+                              selected &&
+                              void run(() =>
+                                services.native.openContent(selected.id),
+                              )
+                            }
+                          >
+                            打开游戏目录
+                          </button>
                           <button
                             disabled={!selected}
                             onClick={() => selectTab('worlds')}
@@ -637,6 +722,71 @@ function Shell({ services }: { services: Services }) {
                       </dl>
                     </section>
                   </div>
+                ) : selected &&
+                  (tab === 'mods' ||
+                    tab === 'resources' ||
+                    tab === 'screenshots') ? (
+                  <>
+                    {tab === 'resources' && (
+                      <div className="content-subtabs">
+                        <button
+                          aria-pressed={resourceKind === 'resourcepacks'}
+                          onClick={() =>
+                            change({
+                              resourceKinds: {
+                                ...nav.resourceKinds,
+                                [selected.id]: 'resourcepacks',
+                              },
+                            })
+                          }
+                        >
+                          资源包
+                        </button>
+                        <button
+                          aria-pressed={resourceKind === 'shaderpacks'}
+                          onClick={() =>
+                            change({
+                              resourceKinds: {
+                                ...nav.resourceKinds,
+                                [selected.id]: 'shaderpacks',
+                              },
+                            })
+                          }
+                        >
+                          光影包
+                        </button>
+                      </div>
+                    )}
+                    <ContentPanel
+                      key={`${selected.id}:${tab}:${resourceKind}`}
+                      service={services.native}
+                      id={selected.id}
+                      kind={contentKind}
+                      query={nav.contentQueries?.[contentQueryKey] ?? ''}
+                      onQuery={(query) =>
+                        change({
+                          contentQueries: Object.fromEntries(
+                            Object.entries({
+                              ...nav.contentQueries,
+                              [contentQueryKey]: query,
+                            }).slice(-300),
+                          ),
+                        })
+                      }
+                      running={!!running}
+                      onDownload={() =>
+                        change({
+                          section: 'download',
+                          downloadCategory:
+                            tab === 'mods'
+                              ? 'mod'
+                              : resourceKind === 'shaderpacks'
+                                ? 'shader'
+                                : 'resourcepack',
+                        })
+                      }
+                    />
+                  </>
                 ) : selected ? (
                   <WorldSettingsPanel
                     key={`${selected.id}:${tab}`}
@@ -809,23 +959,41 @@ function Shell({ services }: { services: Services }) {
                       <h1>{category}</h1>
                       <p>安装前选择目标实例，并检查版本兼容和变更。</p>
                     </div>
-                    {nav.downloadCategory === 'modpack' ? (
+                    <ResourceBrowser
+                      key={nav.downloadCategory}
+                      service={services.native}
+                      kind={nav.downloadCategory}
+                      query={
+                        nav.contentQueries?.[
+                          `download:${nav.downloadCategory}:query`
+                        ] ?? ''
+                      }
+                      gameVersion={
+                        nav.contentQueries?.[
+                          `download:${nav.downloadCategory}:game`
+                        ] ??
+                        selected?.version ??
+                        '1.21.1'
+                      }
+                      target={
+                        selected
+                          ? `${selected.name} · ${selected.version} · ${selected.fabricVersion ? 'Fabric' : '原版'}`
+                          : undefined
+                      }
+                      onFilter={(query, game) =>
+                        change({
+                          contentQueries: Object.fromEntries(
+                            Object.entries({
+                              ...nav.contentQueries,
+                              [`download:${nav.downloadCategory}:query`]: query,
+                              [`download:${nav.downloadCategory}:game`]: game,
+                            }).slice(-300),
+                          ),
+                        })
+                      }
+                    />
+                    {nav.downloadCategory === 'modpack' && (
                       <PackInspector service={services.native} />
-                    ) : (
-                      <section className="card">
-                        <h2>在线{category}安装正在接入</h2>
-                        <p>
-                          尚未提供此类别的真实检索与安装，不会显示模拟搜索结果。原版/Fabric
-                          安装和整合包检查可继续使用。
-                        </p>
-                        <button
-                          onClick={() =>
-                            change({ downloadCategory: 'vanilla' })
-                          }
-                        >
-                          原版游戏
-                        </button>
-                      </section>
                     )}
                   </>
                 )}
@@ -876,6 +1044,126 @@ function Shell({ services }: { services: Services }) {
               {task?.pid ? '结束游戏进程' : '取消任务'}
             </button>
           )}
+        </Modal>
+      )}
+      {menu && (
+        <div
+          className="instance-menu-backdrop"
+          role="presentation"
+          onMouseDown={() => setMenu(null)}
+        >
+          <div
+            ref={menuRef}
+            className="instance-context-menu"
+            role="menu"
+            aria-label="实例操作"
+            tabIndex={-1}
+            style={{
+              left: Math.max(0, Math.min(menu.x, window.innerWidth - 236)),
+              top: Math.max(0, Math.min(menu.y, window.innerHeight - 220)),
+            }}
+            onMouseDown={(event) => event.stopPropagation()}
+            onKeyDown={(event) => {
+              if (event.key === 'Escape') {
+                setMenu(null);
+              } else if (
+                ['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)
+              ) {
+                event.preventDefault();
+                const items = Array.from(
+                  event.currentTarget.querySelectorAll<HTMLButtonElement>(
+                    'button:not(:disabled)',
+                  ),
+                );
+                const index = items.indexOf(
+                  document.activeElement as HTMLButtonElement,
+                );
+                items[
+                  event.key === 'Home'
+                    ? 0
+                    : event.key === 'End'
+                      ? items.length - 1
+                      : (index +
+                          (event.key === 'ArrowDown' ? 1 : -1) +
+                          items.length) %
+                        items.length
+                ]?.focus();
+              }
+            }}
+          >
+            <small>{menu.name}</small>
+            <button
+              role="menuitem"
+              onClick={() => {
+                change(
+                  {
+                    section: 'library',
+                    instanceTabs: {
+                      ...nav.instanceTabs,
+                      [menu.id]: 'overview',
+                    },
+                  },
+                  menu.id,
+                );
+                setMenu(null);
+              }}
+            >
+              查看详情
+            </button>
+            <button
+              role="menuitem"
+              disabled={!!running || !native.available}
+              onClick={() => {
+                setRename({ id: menu.id, name: menu.name });
+                setMenu(null);
+              }}
+            >
+              重命名
+            </button>
+            <button
+              role="menuitem"
+              disabled={!!running || !native.available}
+              onClick={() => {
+                void run(() => services.native.openContent(menu.id));
+                setMenu(null);
+              }}
+            >
+              打开目录
+            </button>
+            <button role="menuitem" onClick={() => setMenu(null)}>
+              关闭菜单
+            </button>
+          </div>
+        </div>
+      )}
+      {rename && (
+        <Modal title="重命名实例" onClose={() => setRename(null)}>
+          <form
+            onSubmit={(event) => {
+              event.preventDefault();
+              void run(async () => {
+                await services.native.renameInstance(rename.id, rename.name);
+                setRename(null);
+              });
+            }}
+          >
+            <label className="native-label">
+              实例名称
+              <input
+                aria-label="真实实例名称"
+                maxLength={60}
+                required
+                value={rename.name}
+                onChange={(event) =>
+                  setRename({ ...rename, name: event.target.value })
+                }
+              />
+            </label>
+            <p>只修改显示名称，实例目录和存档不会移动。</p>
+            <button className="primary" type="submit">
+              保存实例名称
+            </button>
+          </form>
         </Modal>
       )}
       {closing && (

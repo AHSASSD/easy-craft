@@ -28,18 +28,34 @@ test('navigation persists independently while old preferences remain valid', () 
       downloadCategory: 'mod',
       instanceTabs: { instance: 'worlds' },
       scroll: { download: 70 },
+      contentQueries: { 'instance:mods': 'fabric' },
+      resourceKinds: { instance: 'shaderpacks' },
     },
   });
   expect(createPreferences(storage).snapshot().navigation).toMatchObject({
     section: 'download',
     downloadCategory: 'mod',
     instanceTabs: { instance: 'worlds' },
+    contentQueries: { 'instance:mods': 'fabric' },
+    resourceKinds: { instance: 'shaderpacks' },
   });
   expect(() =>
     preferences.update({
       navigation: { ...defaultNavigation, scroll: { bad: NaN } },
     }),
   ).toThrow();
+  expect(
+    validPreferences({
+      ...preferences.snapshot(),
+      navigation: { ...defaultNavigation, contentQueries: { bad: 1 } },
+    }),
+  ).toBe(false);
+  expect(
+    validPreferences({
+      ...preferences.snapshot(),
+      navigation: { ...defaultNavigation, resourceKinds: { bad: 'mods' } },
+    }),
+  ).toBe(false);
 });
 test('preferences and instance edits persist across reload; duplicate versions have unique ids', async () => {
   const storage = memory();

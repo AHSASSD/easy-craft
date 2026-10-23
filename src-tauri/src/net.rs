@@ -14,7 +14,7 @@ use tokio_util::sync::CancellationToken;
 pub const MANIFEST: &str = "https://piston-meta.mojang.com/mc/game/version_manifest_v2.json";
 pub fn client() -> Result<Client> {
     Client::builder()
-        .user_agent("EasyCraft/0.3.0")
+        .user_agent(concat!("EasyCraft/", env!("CARGO_PKG_VERSION")))
         .connect_timeout(Duration::from_secs(15))
         .timeout(Duration::from_secs(90))
         .redirect(reqwest::redirect::Policy::none())
@@ -49,10 +49,56 @@ pub async fn get_json(
     cancel: &CancellationToken,
 ) -> Result<serde_json::Value> {
     let url = trusted_url(url)?;
-    let response = tokio::select! { _ = cancel.cancelled() => return Err("操作已取消".into()), response = client.get(url).send() => response.map_err(|_| "无法连接官方元数据服务，请重试")? };
+    json_url(client, url, cancel).await
+}
+pub async fn resource_json(
+    client: &Client,
+    raw: &str,
+    cancel: &CancellationToken,
+) -> Result<serde_json::Value> {
+    let url = Url::parse(raw).map_err(|_| "无效资源地址")?;
+    if url.scheme() != "https"
+        || url.host_str() != Some("api.modrinth.com")
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.port().is_some_and(|p| p != 443)
+        || !url.path().starts_with("/v2/")
+    {
+        return Err("拒绝非 Modrinth 元数据来源".into());
+    }
+    tokio::time::timeout(Duration::from_secs(45), json_url(client, url, cancel))
+        .await
+        .map_err(|_| "资源查询超时，请重试".to_string())?
+}
+async fn json_url(
+    client: &Client,
+    url: Url,
+    cancel: &CancellationToken,
+) -> Result<serde_json::Value> {
+    let mut attempt = 0;
+    let response = loop {
+        let result = tokio::select! { _ = cancel.cancelled() => return Err("操作已取消".into()), response = client.get(url.clone()).send() => response };
+        match result {
+            Ok(response) => break response,
+            Err(error) if attempt < 2 && !error.is_builder() => {
+                attempt += 1;
+                tokio::select! { _ = cancel.cancelled() => return Err("操作已取消".into()), _ = tokio::time::sleep(Duration::from_millis(250 * attempt)) => {} }
+            }
+            Err(error) => {
+                let mut cause: &dyn std::error::Error = &error;
+                while let Some(source) = cause.source() {
+                    cause = source;
+                }
+                return Err(format!("无法连接元数据服务：{cause}"));
+            }
+        }
+    };
+    if response.status().as_u16() == 429 {
+        return Err("查询过于频繁，请稍后重试；原查询与结果已保留".into());
+    }
     if !response.status().is_success() {
         return Err(format!(
-            "官方元数据服务返回 HTTP {}",
+            "元数据服务返回 HTTP {}",
             response.status().as_u16()
         ));
     }
@@ -69,7 +115,47 @@ pub async fn get_json(
         }
         bytes.extend_from_slice(&chunk);
     }
-    serde_json::from_slice(&bytes).map_err(|_| "官方元数据格式无效".into())
+    serde_json::from_slice(&bytes).map_err(|_| "元数据格式无效".into())
+}
+
+#[cfg(test)]
+mod metadata_tests {
+    use super::*;
+    #[tokio::test]
+    async fn metadata_get_recovers_a_closed_connection_and_honors_cancel() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = Url::parse(&format!(
+            "http://{}/metadata",
+            listener.local_addr().unwrap()
+        ))
+        .unwrap();
+        let server = std::thread::spawn(move || {
+            for attempt in 0..2 {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut request = [0; 4096];
+                stream.read(&mut request).unwrap();
+                if attempt == 1 {
+                    stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 11\r\nConnection: close\r\n\r\n{\"ok\":true}").unwrap();
+                }
+            }
+        });
+        let client = Client::builder()
+            .no_proxy()
+            .timeout(Duration::from_secs(2))
+            .build()
+            .unwrap();
+        let cancel = CancellationToken::new();
+        assert_eq!(
+            json_url(&client, url.clone(), &cancel).await.unwrap()["ok"],
+            true
+        );
+        server.join().unwrap();
+        cancel.cancel();
+        assert!(json_url(&client, url, &cancel)
+            .await
+            .unwrap_err()
+            .contains("取消"));
+    }
 }
 pub async fn checksum(client: &Client, url: &str, cancel: &CancellationToken) -> Result<String> {
     let url = trusted_url(url)?;

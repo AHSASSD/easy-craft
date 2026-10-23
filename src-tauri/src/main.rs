@@ -1,6 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod auth;
+mod content;
 mod fabric;
 mod host;
 mod memory;
@@ -8,6 +9,7 @@ mod minecraft;
 mod model;
 mod net;
 mod packs;
+mod resources;
 mod skins;
 #[cfg(test)]
 mod tests;
@@ -17,6 +19,106 @@ use model::Result;
 use std::sync::Arc;
 use tauri::State;
 
+#[tauri::command]
+async fn native_resource_search(
+    kind: resources::Kind,
+    query: String,
+    game_version: String,
+    offset: u64,
+) -> Result<resources::Search> {
+    resources::search(kind, &query, &game_version, offset).await
+}
+#[tauri::command]
+async fn native_resource_detail(
+    project: String,
+    kind: resources::Kind,
+    game_version: String,
+) -> Result<resources::Detail> {
+    resources::detail(&project, kind, &game_version).await
+}
+
+#[tauri::command]
+async fn native_content(
+    host: State<'_, Arc<Host>>,
+    id: String,
+    kind: content::Kind,
+) -> Result<Vec<content::Entry>> {
+    let host = host.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        host.instance_files(&id, |root| content::list(root, kind))
+    })
+    .await
+    .map_err(|_| "内容读取任务失败".to_string())?
+}
+#[tauri::command]
+async fn native_content_toggle(
+    host: State<'_, Arc<Host>>,
+    id: String,
+    file: String,
+    revision: String,
+    enabled: bool,
+) -> Result<()> {
+    let host = host.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        host.instance_files(&id, |root| content::toggle(root, &file, &revision, enabled))
+    })
+    .await
+    .map_err(|_| "模组修改任务失败".to_string())?
+}
+#[tauri::command]
+async fn native_content_import(
+    host: State<'_, Arc<Host>>,
+    id: String,
+    kind: content::Kind,
+    file: String,
+    bytes: Vec<u8>,
+) -> Result<()> {
+    if kind == content::Kind::Mods
+        && !host
+            .status()
+            .instances
+            .iter()
+            .any(|item| item.id == id && !item.fabric_version.is_empty())
+    {
+        return Err("本轮本地模组导入需要 Fabric 实例".into());
+    }
+    let host = host.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        host.instance_files(&id, |root| content::import(root, kind, &file, &bytes))
+    })
+    .await
+    .map_err(|_| "资源导入任务失败".to_string())?
+}
+#[tauri::command]
+async fn native_content_image(
+    host: State<'_, Arc<Host>>,
+    id: String,
+    file: String,
+) -> Result<String> {
+    let host = host.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        host.instance_files(&id, |root| content::image(root, &file))
+    })
+    .await
+    .map_err(|_| "截图读取任务失败".to_string())?
+}
+#[tauri::command]
+async fn native_content_open(
+    host: State<'_, Arc<Host>>,
+    id: String,
+    kind: Option<content::Kind>,
+) -> Result<()> {
+    let host = host.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        host.instance_files(&id, |root| content::open(root, kind))
+    })
+    .await
+    .map_err(|_| "目录打开任务失败".to_string())?
+}
+#[tauri::command]
+fn native_instance_rename(host: State<'_, Arc<Host>>, id: String, name: String) -> Result<()> {
+    host.rename_instance(&id, &name)
+}
 #[tauri::command]
 fn native_status(host: State<'_, Arc<Host>>) -> host::Status {
     host.status()
@@ -193,6 +295,12 @@ fn main() {
         .manage(state)
         .invoke_handler(tauri::generate_handler![
             native_status,
+            native_instance_rename,
+            native_content,
+            native_content_toggle,
+            native_content_import,
+            native_content_image,
+            native_content_open,
             native_worlds,
             native_world,
             native_world_save,
@@ -201,6 +309,8 @@ fn main() {
             native_avatar,
             native_avatar_save,
             native_pack_preview,
+            native_resource_search,
+            native_resource_detail,
             native_versions,
             native_settings,
             native_memory,

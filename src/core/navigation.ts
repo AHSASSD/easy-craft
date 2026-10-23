@@ -28,6 +28,8 @@ export type Navigation = {
   instanceTabs: Record<string, (typeof instanceTabs)[number]>;
   query: string;
   scroll: Record<string, number>;
+  contentQueries?: Record<string, string>;
+  resourceKinds?: Record<string, 'resourcepacks' | 'shaderpacks'>;
 };
 export const defaultNavigation: Navigation = {
   section: 'library',
@@ -55,6 +57,21 @@ export function validNavigation(value: unknown): value is Navigation {
     ) &&
     typeof nav.query === 'string' &&
     nav.query.length <= 256 &&
+    (nav.contentQueries === undefined ||
+      (record(nav.contentQueries) &&
+        Object.entries(nav.contentQueries).every(
+          ([key, query]) =>
+            key.length <= 256 &&
+            typeof query === 'string' &&
+            query.length <= 256,
+        ))) &&
+    (nav.resourceKinds === undefined ||
+      (record(nav.resourceKinds) &&
+        Object.entries(nav.resourceKinds).every(
+          ([key, kind]) =>
+            key.length <= 128 &&
+            (kind === 'resourcepacks' || kind === 'shaderpacks'),
+        ))) &&
     record(nav.instanceTabs) &&
     Object.entries(nav.instanceTabs).every(
       ([key, tab]) =>
