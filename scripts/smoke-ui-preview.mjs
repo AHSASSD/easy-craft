@@ -5,7 +5,12 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { chromium } from '@playwright/test';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const output = path.join(root, 'output/playwright/ui-plan');
+const rail = process.argv.includes('--rail');
+const output = path.join(
+  root,
+  'output/playwright',
+  rail ? 'ui-rail' : 'ui-plan',
+);
 const browser = await chromium.launch({ channel: 'msedge', headless: true });
 try {
   const page = await browser.newPage({
@@ -15,7 +20,12 @@ try {
   const errors = [];
   page.on('pageerror', (error) => errors.push(error.message));
   await page.goto(
-    pathToFileURL(path.join(root, 'docs/ui-preview/index.html')).href,
+    pathToFileURL(
+      path.join(
+        root,
+        rail ? 'docs/ui-rail-preview/index.html' : 'docs/ui-preview/index.html',
+      ),
+    ).href,
   );
   await mkdir(output, { recursive: true });
   const screenshot = (name) =>
@@ -31,6 +41,15 @@ try {
       .count(),
     3,
   );
+  if (rail) {
+    const nav = await page.getByRole('navigation').boundingBox();
+    const list = await page.getByRole('complementary').boundingBox();
+    assert(nav.width <= 80 && nav.x + nav.width <= list.x + 1);
+    const entries = page.getByRole('navigation').getByRole('button');
+    const first = await entries.nth(0).boundingBox();
+    const last = await entries.nth(2).boundingBox();
+    assert(first.x === last.x && last.y > first.y);
+  }
   await screenshot('library');
   await button('设置').click();
   assert.equal(await page.locator('#left [data-category]').count(), 4);
@@ -64,7 +83,7 @@ try {
   await divider.focus();
   await page.keyboard.press('ArrowRight');
   assert.equal(await divider.getAttribute('aria-valuenow'), '290');
-  await page.setViewportSize({ width: 800, height: 600 });
+  await page.setViewportSize({ width: 800, height: rail ? 540 : 600 });
   assert(
     await page.evaluate(
       () => document.documentElement.scrollWidth <= innerWidth,
