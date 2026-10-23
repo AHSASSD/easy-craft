@@ -1,4 +1,5 @@
 import type { NativeService } from './native-contracts';
+import type { Navigation } from './navigation';
 export type LoaderKind = 'vanilla' | 'fabric' | 'forge' | 'neoforge' | 'quilt';
 export type GameInstance = {
   id: string;
@@ -18,6 +19,7 @@ export type Preferences = {
   doubleClickLaunch: boolean;
   developerEnabled: boolean;
   sort: 'name' | 'recent';
+  navigation?: Navigation;
 };
 export type ThemeDefinition = {
   id: Preferences['theme'];

@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { Globe2, Volume2, ShieldCheck, RefreshCw } from 'lucide-react';
+import { useEditor, useNavigationGuard } from './UnsavedChanges';
 import type {
   ClientOptions,
   NativeService,
@@ -60,10 +61,12 @@ export function WorldSettingsPanel({
   service,
   id,
   running,
+  section = 'all',
 }: {
   service: NativeService;
   id: string;
   running: boolean;
+  section?: 'all' | 'world' | 'options';
 }) {
   const [worlds, setWorlds] = useState<WorldEntry[]>([]);
   const [worldId, setWorldId] = useState('');
@@ -74,6 +77,17 @@ export function WorldSettingsPanel({
   const [message, setMessage] = useState('');
   const [closed, setClosed] = useState(false);
   const [query, setQuery] = useState('');
+  const [worldBase, setWorldBase] = useState('');
+  const [optionsBase, setOptionsBase] = useState('');
+  const guard = useNavigationGuard();
+  function receiveWorld(value: WorldSettings) {
+    setWorld(value);
+    setWorldBase(JSON.stringify(value));
+  }
+  function receiveOptions(value: ClientOptions) {
+    setOptions(value);
+    setOptionsBase(JSON.stringify(value));
+  }
   async function reload() {
     setBusy(true);
     setError('');
@@ -86,12 +100,13 @@ export function WorldSettingsPanel({
         service.options(id),
       ]);
       setWorlds(entries);
-      setOptions(opts);
+      receiveOptions(opts);
       const chosen = entries.some((item) => item.id === worldId)
         ? worldId
         : (entries[0]?.id ?? '');
       setWorldId(chosen);
-      if (chosen) setWorld(await service.world(id, chosen));
+      if (chosen && section !== 'options')
+        receiveWorld(await service.world(id, chosen));
     } catch (error) {
       setError(error instanceof Error ? error.message : '读取配置失败');
     } finally {
@@ -108,7 +123,7 @@ export function WorldSettingsPanel({
           setWorlds(results[0].value);
           setWorldId(results[0].value[0]?.id ?? '');
         }
-        if (results[1].status === 'fulfilled') setOptions(results[1].value);
+        if (results[1].status === 'fulfilled') receiveOptions(results[1].value);
         const failure = results.find((result) => result.status === 'rejected');
         if (failure?.status === 'rejected') setError(String(failure.reason));
       },
@@ -118,12 +133,12 @@ export function WorldSettingsPanel({
     };
   }, [id, service, running]);
   useEffect(() => {
-    if (!worldId || running) return;
+    if (!worldId || running || section === 'options') return;
     let disposed = false;
     void service
       .world(id, worldId)
       .then((value) => {
-        if (!disposed) setWorld(value);
+        if (!disposed) receiveWorld(value);
       })
       .catch((error: unknown) => {
         if (!disposed) {
@@ -134,37 +149,55 @@ export function WorldSettingsPanel({
     return () => {
       disposed = true;
     };
-  }, [id, worldId, service, running]);
-  async function save(kind: 'world' | 'options') {
+  }, [id, worldId, service, running, section]);
+  async function save(kind: 'world' | 'options', propagate = false) {
     setBusy(true);
     setError('');
     setMessage('');
     try {
+      if (!closed || running)
+        throw new Error('请先退出游戏并勾选“确认游戏已关闭”');
       let backup = '';
       if (kind === 'world' && world) {
         backup = await service.saveWorld(id, worldId, world);
-        setWorld(await service.world(id, worldId));
+        receiveWorld(await service.world(id, worldId));
       }
       if (kind === 'options' && options) {
         backup = await service.saveOptions(id, options);
-        setOptions(await service.options(id));
+        receiveOptions(await service.options(id));
       }
       setMessage(backup ? `已保存，原文件已备份：${backup}` : '已保存配置。');
     } catch (error) {
       setError(error instanceof Error ? error.message : '保存失败');
+      if (propagate) throw error;
     } finally {
       setBusy(false);
     }
   }
+  const dirtyWorld =
+    section !== 'options' && !!world && worldBase !== JSON.stringify(world);
+  const dirtyOptions =
+    section !== 'world' && !!options && optionsBase !== JSON.stringify(options);
+  useEditor({
+    dirty: dirtyWorld || dirtyOptions,
+    save: async () => {
+      if (dirtyWorld) await save('world', true);
+      if (dirtyOptions) await save('options', true);
+    },
+    discard: () => {
+      if (worldBase) setWorld(JSON.parse(worldBase) as WorldSettings);
+      if (optionsBase) setOptions(JSON.parse(optionsBase) as ClientOptions);
+    },
+  });
   const locked = busy || running;
   return (
     <div className="world-settings">
       <div className="section-heading">
         <div>
-          <h2>存档与启动前设置</h2>
+          <h2>{section === 'options' ? '实例音画设置' : '存档与启动前设置'}</h2>
           <p>修改当前实例的真实配置，进入游戏前生效。</p>
         </div>
-        <button disabled={locked} onClick={() => void reload()}>
+        <button disabled={locked} onClick={() => guard(() => void reload())}>
           <RefreshCw size={15} />
           重新读取配置
         </button>
@@ -204,251 +237,265 @@ export function WorldSettingsPanel({
         />
       </label>
       <div className="world-columns">
-        <section className="card">
-          <h3>
-            <Globe2 size={18} />
-            世界配置
-          </h3>
-          <label>
-            选择存档
-            <select
-              aria-label="选择存档"
-              disabled={locked || !worlds.length}
-              value={worldId}
-              onChange={(event) => {
-                setWorld(null);
-                setError('');
-                setWorldId(event.target.value);
-              }}
-            >
-              {worlds.map((item) => (
-                <option key={item.id} value={item.id}>
-                  {item.name}
-                </option>
-              ))}
-            </select>
-          </label>
-          {!worlds.length && (
-            <p className="hint">
-              此实例尚无可读取的存档。先在 Minecraft
-              中创建世界，再回来调整；不会自动创建空存档。
-            </p>
-          )}
-          {world && (
-            <fieldset
-              className="native-fieldset"
-              disabled={locked || world.hardcore}
-            >
-              {world.hardcore && (
-                <p className="notice">极限模式存档仅供查看，避免破坏其规则。</p>
-              )}
-              <label>
-                难度
-                <select
-                  aria-label="世界难度"
-                  value={world.difficulty}
-                  disabled={world.difficultyLocked}
-                  onChange={(event) =>
-                    setWorld({
-                      ...world,
-                      difficulty: Number(event.target.value),
-                    })
-                  }
-                >
-                  {['和平', '简单', '普通', '困难'].map((value, index) => (
-                    <option key={value} value={index}>
-                      {value}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              <label className="toggle-row">
-                <span>锁定难度</span>
-                <input
-                  aria-label="锁定难度"
-                  type="checkbox"
-                  checked={world.difficultyLocked}
-                  onChange={(event) =>
-                    setWorld({
-                      ...world,
-                      difficultyLocked: event.target.checked,
-                    })
-                  }
-                />
-              </label>
-              {world.gameMode !== null && (
+        {section !== 'options' && (
+          <section className="card">
+            <h3>
+              <Globe2 size={18} />
+              世界配置
+            </h3>
+            <label>
+              选择存档
+              <select
+                aria-label="选择存档"
+                disabled={locked || !worlds.length}
+                value={worldId}
+                onChange={(event) => {
+                  const next = event.target.value;
+                  guard(() => {
+                    setWorld(null);
+                    setError('');
+                    setWorldId(next);
+                  });
+                }}
+              >
+                {worlds.map((item) => (
+                  <option key={item.id} value={item.id}>
+                    {item.name}
+                  </option>
+                ))}
+              </select>
+            </label>
+            {!worlds.length && (
+              <p className="hint">
+                此实例尚无可读取的存档。先在 Minecraft
+                中创建世界，再回来调整；不会自动创建空存档。
+              </p>
+            )}
+            {world && (
+              <fieldset
+                className="native-fieldset"
+                disabled={locked || world.hardcore}
+              >
+                {world.hardcore && (
+                  <p className="notice">
+                    极限模式存档仅供查看，避免破坏其规则。
+                  </p>
+                )}
                 <label>
-                  默认游戏模式
+                  难度
                   <select
-                    aria-label="默认游戏模式"
-                    value={world.gameMode}
+                    aria-label="世界难度"
+                    value={world.difficulty}
+                    disabled={world.difficultyLocked}
                     onChange={(event) =>
                       setWorld({
                         ...world,
-                        gameMode: Number(event.target.value),
+                        difficulty: Number(event.target.value),
                       })
                     }
                   >
-                    {['生存', '创造', '冒险', '旁观者'].map((value, index) => (
+                    {['和平', '简单', '普通', '困难'].map((value, index) => (
                       <option key={value} value={index}>
                         {value}
                       </option>
                     ))}
                   </select>
-                  <small>只修改世界默认模式，不覆盖已有玩家的独立模式。</small>
                 </label>
-              )}
-              {world.allowCommands !== null && (
                 <label className="toggle-row">
-                  <span>允许作弊命令</span>
+                  <span>锁定难度</span>
                   <input
-                    aria-label="允许作弊命令"
+                    aria-label="锁定难度"
                     type="checkbox"
-                    checked={world.allowCommands}
+                    checked={world.difficultyLocked}
                     onChange={(event) =>
                       setWorld({
                         ...world,
-                        allowCommands: event.target.checked,
+                        difficultyLocked: event.target.checked,
                       })
                     }
                   />
                 </label>
-              )}
-              {world.dayTime !== null && (
-                <label>
-                  世界时间（刻数）
-                  <input
-                    aria-label="世界时间"
-                    value={world.dayTime}
-                    inputMode="numeric"
-                    pattern="[0-9]{1,19}"
-                    onChange={(event) =>
-                      setWorld({ ...world, dayTime: event.target.value })
-                    }
-                  />
-                  <small>24000 刻为一天；不修改世界总运行年龄。</small>
-                </label>
-              )}
-              {world.weather !== null && (
-                <label>
-                  天气
-                  <select
-                    aria-label="世界天气"
-                    value={world.weather}
-                    onChange={(event) =>
-                      setWorld({
-                        ...world,
-                        weather: event.target.value as WorldSettings['weather'],
-                      })
-                    }
-                  >
-                    <option value="clear">晴朗</option>
-                    <option value="rain">下雨</option>
-                    <option value="thunder">雷雨</option>
-                  </select>
-                  <small>
-                    切换天气时设置约 10 分钟计时，后续由天气循环规则控制。
-                  </small>
-                </label>
-              )}
-              <button
-                className="primary"
-                disabled={!closed}
-                onClick={() => void save('world')}
-              >
-                保存世界设置
-              </button>
-            </fieldset>
-          )}
-        </section>
-        <section className="card">
-          <h3>
-            <Volume2 size={18} />
-            游戏音画选项
-          </h3>
-          <p className="hint">
-            来自此实例的 options.txt，对整个实例生效，和所选世界独立保存。
-          </p>
-          {options && (
-            <form
-              onSubmit={(event) => {
-                event.preventDefault();
-                void save('options');
-              }}
-            >
-              <fieldset className="native-fieldset" disabled={locked}>
-                <label>
-                  主音量：{Math.round(options.masterVolume * 100)}%
-                  <input
-                    aria-label="主音量"
-                    type="range"
-                    min={0}
-                    max={100}
-                    value={Math.round(options.masterVolume * 100)}
-                    onChange={(event) =>
-                      setOptions({
-                        ...options,
-                        masterVolume: Number(event.target.value) / 100,
-                      })
-                    }
-                  />
-                </label>
-                <label>
-                  音乐音量：{Math.round(options.musicVolume * 100)}%
-                  <input
-                    aria-label="音乐音量"
-                    type="range"
-                    min={0}
-                    max={100}
-                    value={Math.round(options.musicVolume * 100)}
-                    onChange={(event) =>
-                      setOptions({
-                        ...options,
-                        musicVolume: Number(event.target.value) / 100,
-                      })
-                    }
-                  />
-                </label>
-                <label>
-                  渲染距离（区块）
-                  <input
-                    aria-label="渲染距离"
-                    type="number"
-                    required
-                    min={2}
-                    max={64}
-                    value={options.renderDistance}
-                    onChange={(event) =>
-                      setOptions({
-                        ...options,
-                        renderDistance: Number(event.target.value),
-                      })
-                    }
-                  />
-                </label>
-                <label className="toggle-row">
-                  <span>全屏游戏</span>
-                  <input
-                    aria-label="全屏游戏"
-                    type="checkbox"
-                    checked={options.fullscreen}
-                    onChange={(event) =>
-                      setOptions({
-                        ...options,
-                        fullscreen: event.target.checked,
-                      })
-                    }
-                  />
-                </label>
-                <button className="primary" type="submit" disabled={!closed}>
-                  保存音画设置
+                {world.gameMode !== null && (
+                  <label>
+                    默认游戏模式
+                    <select
+                      aria-label="默认游戏模式"
+                      value={world.gameMode}
+                      onChange={(event) =>
+                        setWorld({
+                          ...world,
+                          gameMode: Number(event.target.value),
+                        })
+                      }
+                    >
+                      {['生存', '创造', '冒险', '旁观者'].map(
+                        (value, index) => (
+                          <option key={value} value={index}>
+                            {value}
+                          </option>
+                        ),
+                      )}
+                    </select>
+                    <small>
+                      只修改世界默认模式，不覆盖已有玩家的独立模式。
+                    </small>
+                  </label>
+                )}
+                {world.allowCommands !== null && (
+                  <label className="toggle-row">
+                    <span>允许作弊命令</span>
+                    <input
+                      aria-label="允许作弊命令"
+                      type="checkbox"
+                      checked={world.allowCommands}
+                      onChange={(event) =>
+                        setWorld({
+                          ...world,
+                          allowCommands: event.target.checked,
+                        })
+                      }
+                    />
+                  </label>
+                )}
+                {world.dayTime !== null && (
+                  <label>
+                    世界时间（刻数）
+                    <input
+                      aria-label="世界时间"
+                      value={world.dayTime}
+                      inputMode="numeric"
+                      pattern="[0-9]{1,19}"
+                      onChange={(event) =>
+                        setWorld({ ...world, dayTime: event.target.value })
+                      }
+                    />
+                    <small>24000 刻为一天；不修改世界总运行年龄。</small>
+                  </label>
+                )}
+                {world.weather !== null && (
+                  <label>
+                    天气
+                    <select
+                      aria-label="世界天气"
+                      value={world.weather}
+                      onChange={(event) =>
+                        setWorld({
+                          ...world,
+                          weather: event.target
+                            .value as WorldSettings['weather'],
+                        })
+                      }
+                    >
+                      <option value="clear">晴朗</option>
+                      <option value="rain">下雨</option>
+                      <option value="thunder">雷雨</option>
+                    </select>
+                    <small>
+                      切换天气时设置约 10 分钟计时，后续由天气循环规则控制。
+                    </small>
+                  </label>
+                )}
+                <button
+                  className="primary"
+                  disabled={!closed}
+                  onClick={() => void save('world')}
+                >
+                  保存世界设置
                 </button>
               </fieldset>
-            </form>
-          )}
-        </section>
+            )}
+          </section>
+        )}
+        {section !== 'world' && (
+          <section className="card">
+            <h3>
+              <Volume2 size={18} />
+              游戏音画选项
+            </h3>
+            <p className="hint">
+              来自此实例的 options.txt，对整个实例生效，和所选世界独立保存。
+            </p>
+            {options && (
+              <form
+                onSubmit={(event) => {
+                  event.preventDefault();
+                  void save('options');
+                }}
+              >
+                <fieldset className="native-fieldset" disabled={locked}>
+                  <label>
+                    主音量：{Math.round(options.masterVolume * 100)}%
+                    <input
+                      aria-label="主音量"
+                      type="range"
+                      min={0}
+                      max={100}
+                      value={Math.round(options.masterVolume * 100)}
+                      onChange={(event) =>
+                        setOptions({
+                          ...options,
+                          masterVolume: Number(event.target.value) / 100,
+                        })
+                      }
+                    />
+                  </label>
+                  <label>
+                    音乐音量：{Math.round(options.musicVolume * 100)}%
+                    <input
+                      aria-label="音乐音量"
+                      type="range"
+                      min={0}
+                      max={100}
+                      value={Math.round(options.musicVolume * 100)}
+                      onChange={(event) =>
+                        setOptions({
+                          ...options,
+                          musicVolume: Number(event.target.value) / 100,
+                        })
+                      }
+                    />
+                  </label>
+                  <label>
+                    渲染距离（区块）
+                    <input
+                      aria-label="渲染距离"
+                      type="number"
+                      required
+                      min={2}
+                      max={64}
+                      value={options.renderDistance}
+                      onChange={(event) =>
+                        setOptions({
+                          ...options,
+                          renderDistance: Number(event.target.value),
+                        })
+                      }
+                    />
+                  </label>
+                  <label className="toggle-row">
+                    <span>全屏游戏</span>
+                    <input
+                      aria-label="全屏游戏"
+                      type="checkbox"
+                      checked={options.fullscreen}
+                      onChange={(event) =>
+                        setOptions({
+                          ...options,
+                          fullscreen: event.target.checked,
+                        })
+                      }
+                    />
+                  </label>
+                  <button className="primary" type="submit" disabled={!closed}>
+                    保存音画设置
+                  </button>
+                </fieldset>
+              </form>
+            )}
+          </section>
+        )}
       </div>
-      {world && world.gameRules.length > 0 && (
+      {section !== 'options' && world && world.gameRules.length > 0 && (
         <section className="card game-rules">
           <div className="section-heading">
             <div>

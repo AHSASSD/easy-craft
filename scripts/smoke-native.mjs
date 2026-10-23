@@ -74,9 +74,9 @@ try {
   await page.waitForFunction((previous) => innerWidth === previous, width);
   await page
     .getByRole('navigation')
-    .getByRole('button', { name: '下载中心', exact: true })
+    .getByRole('button', { name: '设置', exact: true })
     .click();
-  await page.getByRole('heading', { name: '原版下载与启动' }).waitFor();
+  await page.getByRole('button', { name: '启动', exact: true }).click();
   originalSettings = await page.evaluate(async () => {
     const state = await window.__TAURI_INTERNALS__.invoke('native_status');
     await window.__TAURI_INTERNALS__.invoke('native_settings', {
@@ -93,6 +93,12 @@ try {
   assert((await java.inputValue()).includes('java.exe'));
   await page.getByRole('button', { name: '检测 Java', exact: true }).click();
   await page.getByText('Java 21 · 64 位 · 检测成功', { exact: true }).waitFor();
+  await page
+    .getByRole('navigation')
+    .getByRole('button', { name: '下载', exact: true })
+    .click();
+  await page.getByRole('button', { name: '原版游戏', exact: true }).click();
+  await page.getByRole('heading', { name: '原版游戏', exact: true }).waitFor();
   if (!process.argv.includes('--cached')) {
     await page.getByRole('button', { name: '刷新官方版本' }).click();
     await page.getByText('已读取官方正式版本清单。', { exact: true }).waitFor();
@@ -107,6 +113,7 @@ try {
       .getByRole('combobox', { name: '真实实例加载器' })
       .selectOption('vanilla');
   }
+  await page.getByRole('button', { name: '整合包', exact: true }).click();
   await page
     .getByLabel('选择整合包', { exact: true })
     .setInputFiles(path.join(project, '.native/fixtures/preview.mrpack'));
@@ -114,6 +121,10 @@ try {
     .getByRole('heading', { name: '测试包 · MRPACK', exact: true })
     .waitFor();
   await page.getByText('fabric-loader: 0.16.14', { exact: true }).waitFor();
+  await page
+    .getByRole('navigation')
+    .getByRole('button', { name: '游戏库', exact: true })
+    .click();
   assert(
     await page
       .getByRole('button', { name: '启动游戏', exact: true })
@@ -196,10 +207,10 @@ try {
   );
   await page
     .getByRole('navigation')
-    .getByRole('button', { name: '版本', exact: true })
+    .getByRole('button', { name: '游戏库', exact: true })
     .click();
   await page.locator('.library-instance').first().click();
-  await page.getByRole('tab', { name: '存档与设置', exact: true }).click();
+  await page.getByRole('tab', { name: '存档', exact: true }).click();
   await page.getByLabel('选择存档', { exact: true }).selectOption(worldId);
   await page.getByLabel('世界难度', { exact: true }).waitFor();
   assert.equal(
@@ -242,6 +253,8 @@ try {
     await readFile(backup),
     await readFile(path.join(project, '.native/fixtures/world/level.dat')),
   );
+  await page.getByRole('tab', { name: '实例设置', exact: true }).click();
+  await page.getByLabel('确认游戏已关闭').check();
   await page.getByLabel('渲染距离', { exact: true }).fill('10');
   await page.getByRole('button', { name: '保存音画设置', exact: true }).click();
   await page.waitForFunction(
@@ -260,6 +273,7 @@ try {
     .getByRole('navigation')
     .getByRole('button', { name: '设置', exact: true })
     .click();
+  await page.getByRole('button', { name: '启动', exact: true }).click();
   await page.getByRole('meter', { name: '系统已使用内存' }).waitFor();
   await page
     .getByRole('combobox', { name: '内存分配方式' })
@@ -298,13 +312,8 @@ try {
   });
   await page
     .getByRole('navigation')
-    .getByRole('button', { name: '下载中心', exact: true })
+    .getByRole('button', { name: '游戏库', exact: true })
     .click();
-  await page
-    .getByText('当前启动身份：离线 · EC_OfflineTest（以已保存配置为准）', {
-      exact: true,
-    })
-    .waitFor();
   assert(
     await page
       .getByRole('button', { name: '启动游戏', exact: true })
@@ -314,7 +323,7 @@ try {
   if (process.argv.includes('--launch-offline')) {
     await page
       .getByRole('navigation')
-      .getByRole('button', { name: '版本', exact: true })
+      .getByRole('button', { name: '游戏库', exact: true })
       .click();
     const chosen = process.argv.includes('--fabric')
       ? page
@@ -389,6 +398,14 @@ try {
       rendered,
       'Actual game did not reach engine initialization within 120 seconds',
     );
+    await page.getByRole('button', { name: '关闭窗口', exact: true }).click();
+    await page.getByRole('dialog', { name: '游戏仍在运行' }).waitFor();
+    await page.getByRole('button', { name: '取消关闭', exact: true }).click();
+    const stillRunning = await page.evaluate(() =>
+      window.__TAURI_INTERNALS__.invoke('native_status'),
+    );
+    assert(stillRunning.task.pid, 'Cancelling close must keep the game alive');
+    await page.getByRole('button', { name: '查看任务', exact: true }).click();
     await page
       .getByRole('button', { name: '结束游戏进程', exact: true })
       .click();
@@ -397,6 +414,7 @@ try {
         (await window.__TAURI_INTERNALS__.invoke('native_status')).task
           .status === 'cancelled',
     );
+    await page.getByRole('button', { name: '关闭弹窗', exact: true }).click();
   }
   assert.deepEqual(errors, []);
   await mkdir(path.join(project, 'output/playwright'), { recursive: true });

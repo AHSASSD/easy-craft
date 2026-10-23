@@ -11,12 +11,26 @@ import {
 import { AccountPanel } from '../src/features/AccountPanel';
 import { MemoryPanel } from '../src/features/MemoryPanel';
 import { WorldSettingsPanel } from '../src/features/WorldSettingsPanel';
+import { JavaPanel } from '../src/features/JavaPanel';
+import {
+  UnsavedChanges,
+  useNavigationGuard,
+} from '../src/features/UnsavedChanges';
 import type { invoke } from '@tauri-apps/api/core';
 import {
   createNativeService,
   validNativeState,
 } from '../src/app/native-service';
 import type { NativeState, WorldSettings } from '../src/core/native-contracts';
+// jsdom does not implement the native dialog APIs; browser tests cover the real modal.
+Object.assign(HTMLDialogElement.prototype, {
+  showModal(this: HTMLDialogElement) {
+    this.setAttribute('open', '');
+  },
+  close(this: HTMLDialogElement) {
+    this.removeAttribute('open');
+  },
+});
 const state = (): NativeState => ({
   dataRoot: 'E:/EasyCraft/data',
   settings: {
@@ -42,9 +56,78 @@ const state = (): NativeState => ({
   loginPending: false,
   loginCode: null,
 });
+function LeaveEditor({ onLeave }: { onLeave(): void }) {
+  const guard = useNavigationGuard();
+  return createElement('button', { onClick: () => guard(onLeave) }, '离开表单');
+}
+test('unsaved Java changes block navigation, preserve errors, and save before leaving', async () => {
+  const current = state();
+  let fail = true;
+  const call = vi.fn(
+    async (command: string, args?: Record<string, unknown>) => {
+      if (command === 'native_settings') {
+        if (fail) throw '模拟磁盘错误';
+        current.settings = args!.settings as NativeState['settings'];
+      }
+      return structuredClone(current);
+    },
+  );
+  const service = createNativeService(true, call as typeof invoke);
+  await service.refresh();
+  const leave = vi.fn();
+  render(
+    createElement(UnsavedChanges, {
+      children: [
+        createElement(JavaPanel, { service, key: 'java' }),
+        createElement(LeaveEditor, { onLeave: leave, key: 'leave' }),
+      ],
+    }),
+  );
+  fireEvent.change(screen.getByLabelText('Java 可执行文件'), {
+    target: { value: 'E:/new/java.exe' },
+  });
+  fireEvent.click(screen.getByText('离开表单'));
+  await screen.findByRole('dialog', { name: '有尚未保存的修改' });
+  expect(leave).not.toHaveBeenCalled();
+  fireEvent.click(screen.getByText('保存并离开'));
+  await screen.findByRole('alert');
+  expect(leave).not.toHaveBeenCalled();
+  expect(
+    (screen.getByLabelText('Java 可执行文件') as HTMLInputElement).value,
+  ).toBe('E:/new/java.exe');
+  fail = false;
+  fireEvent.click(screen.getByText('保存并离开'));
+  await waitFor(() => expect(leave).toHaveBeenCalledOnce());
+  expect(current.settings.javaPath).toBe('E:/new/java.exe');
+  service.stop();
+});
 afterEach(() => {
   vi.useRealTimers();
   cleanup();
+});
+test('a fresh status waits for the in-flight poll and then reads the host again', async () => {
+  const current = state();
+  let resolveFirst!: (value: NativeState) => void;
+  const call = vi
+    .fn()
+    .mockImplementationOnce(
+      () =>
+        new Promise<NativeState>((resolve) => {
+          resolveFirst = resolve;
+        }),
+    )
+    .mockImplementation(async () => structuredClone(current));
+  const service = createNativeService(true, call as typeof invoke);
+  const poll = service.refresh();
+  const fresh = service.refresh(true);
+  const old = state();
+  old.task.status = 'running';
+  current.task.status = 'cancelled';
+  resolveFirst(old);
+  await Promise.all([poll, fresh]);
+  expect(service.snapshot().state?.task.status).toBe('cancelled');
+  expect(call).toHaveBeenCalledTimes(2);
+  service.stop();
 });
 test('world controls read discovered rules and save only after the closed-game acknowledgement', async () => {
   let world: WorldSettings = {

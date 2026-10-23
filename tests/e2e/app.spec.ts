@@ -8,17 +8,37 @@ test('real library is the default and remains usable at minimum size', async ({
     page.getByRole('button', { name: '启动游戏', exact: true }),
   ).toBeDisabled();
   await expect(page.getByRole('img', { name: '默认玩家头像' })).toBeVisible();
+  await expect(page.getByRole('navigation').getByRole('button')).toHaveCount(3);
   await page
     .getByRole('navigation')
     .getByRole('button', { name: '设置', exact: true })
     .click();
+  await expect(page.locator('.context-category-list button')).toHaveCount(4);
+  await page.getByRole('button', { name: '个性化', exact: true }).click();
   await page.getByRole('button', { name: /草方块亮色/ }).click();
   await page
     .getByRole('navigation')
-    .getByRole('button', { name: '版本', exact: true })
+    .getByRole('button', { name: '游戏库', exact: true })
     .click();
   await page.screenshot({ path: 'output/playwright/library-light.png' });
-  await page.getByRole('tab', { name: '存档与设置' }).click();
+  await page
+    .getByRole('navigation')
+    .getByRole('button', { name: '下载', exact: true })
+    .click();
+  await expect(page.locator('.context-category-list button')).toHaveCount(6);
+  await page.getByRole('button', { name: '模组', exact: true }).click();
+  await page
+    .getByRole('navigation')
+    .getByRole('button', { name: '设置', exact: true })
+    .click();
+  await expect(page.getByRole('heading', { name: '个性化设置' })).toBeVisible();
+  await page.reload();
+  await expect(page.getByRole('heading', { name: '个性化设置' })).toBeVisible();
+  await page
+    .getByRole('navigation')
+    .getByRole('button', { name: '游戏库', exact: true })
+    .click();
+  await page.getByRole('tab', { name: '存档', exact: true }).click();
   await page.setViewportSize({ width: 800, height: 540 });
   expect(
     await page.evaluate(

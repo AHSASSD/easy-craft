@@ -7,6 +7,7 @@ import {
   validPreferences,
 } from '../src/core/services';
 import type { StorageAdapter } from '../src/core/persistence/store';
+import { defaultNavigation } from '../src/core/navigation';
 function memory(): StorageAdapter {
   const map = new Map<string, string>();
   return {
@@ -16,6 +17,30 @@ function memory(): StorageAdapter {
     },
   };
 }
+test('navigation persists independently while old preferences remain valid', () => {
+  const storage = memory();
+  const preferences = createPreferences(storage);
+  expect(validPreferences(preferences.snapshot())).toBe(true);
+  preferences.update({
+    navigation: {
+      ...defaultNavigation,
+      section: 'download',
+      downloadCategory: 'mod',
+      instanceTabs: { instance: 'worlds' },
+      scroll: { download: 70 },
+    },
+  });
+  expect(createPreferences(storage).snapshot().navigation).toMatchObject({
+    section: 'download',
+    downloadCategory: 'mod',
+    instanceTabs: { instance: 'worlds' },
+  });
+  expect(() =>
+    preferences.update({
+      navigation: { ...defaultNavigation, scroll: { bad: NaN } },
+    }),
+  ).toThrow();
+});
 test('preferences and instance edits persist across reload; duplicate versions have unique ids', async () => {
   const storage = memory();
   const prefs = createPreferences(storage);

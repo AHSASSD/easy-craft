@@ -152,7 +152,7 @@ export function createNativeService(
   };
   const listeners = new Set<() => void>();
   let stopped = false;
-  let refreshing = false;
+  let refreshing: Promise<void> | null = null;
   const identity = (state: NativeState | null) =>
     JSON.stringify([
       state?.settings.launchMode,
@@ -181,9 +181,16 @@ export function createNativeService(
       );
     }
   }
-  async function refresh() {
-    if (!available || refreshing || stopped) return;
-    refreshing = true;
+  async function refresh(fresh = false) {
+    if (!available || stopped) return;
+    if (refreshing) {
+      await refreshing;
+      if (!fresh || stopped) return;
+    }
+    if (!refreshing) refreshing = readState();
+    await refreshing;
+  }
+  async function readState() {
     try {
       let value = await request('native_status');
       if (!validNativeState(value)) throw new Error('原生状态格式无效');
@@ -208,7 +215,7 @@ export function createNativeService(
         error: error instanceof Error ? error.message : '无法读取原生状态',
       });
     } finally {
-      refreshing = false;
+      refreshing = null;
     }
   }
   const operation = async (name: string, args?: Record<string, unknown>) => {

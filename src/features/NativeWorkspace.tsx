@@ -12,9 +12,11 @@ import { PackInspector } from './PackInspector';
 export function NativeWorkspace({
   service,
   onAccount,
+  compact = false,
 }: {
   service: NativeService;
   onAccount(): void;
+  compact?: boolean;
 }) {
   const snapshot = useSyncExternalStore(service.subscribe, service.snapshot);
   const [draft, setDraft] = useState<NativeSettings | null>(null);
@@ -69,8 +71,10 @@ export function NativeWorkspace({
   return (
     <div className="native-workspace">
       <div className="eyebrow">VANILLA / 原版旅程</div>
-      <h1>原版下载与启动</h1>
-      <p>V0.3 · 此处执行真实下载和游戏进程；左侧样例实例仍使用模拟流程。</p>
+      <h1>{compact ? '原版游戏' : '原版下载与启动'}</h1>
+      <p>
+        从官方来源安装独立实例，支持原版与 Fabric。安装成功后在游戏库中启动。
+      </p>
       {!snapshot.available && (
         <div className="notice" role="status">
           浏览器仅提供演示。请运行桌面版使用正版登录、资源下载和游戏启动；此页面不会在浏览器中模拟这些能力。
@@ -96,51 +100,55 @@ export function NativeWorkspace({
         disabled={!snapshot.available || !state}
         className="native-fieldset"
       >
-        <section className="card">
-          <h2>
-            <ShieldCheck size={17} />
-            运行配置
-          </h2>
-          <form onSubmit={save}>
-            <label>
-              Java 可执行文件
-              <input
-                aria-label="Java 可执行文件"
-                value={settings.javaPath}
-                placeholder="E:\…\bin\java.exe"
-                onChange={(event) =>
-                  setDraft({ ...settings, javaPath: event.target.value })
-                }
-              />
-            </label>
-            <div className="button-row">
-              <button
-                type="button"
-                disabled={locked || !settings.javaPath}
-                onClick={() =>
-                  void run(async () => {
-                    const java = await service.probeJava(settings.javaPath);
-                    setFeedback(
-                      `Java ${java.major} · ${java.is64Bit ? '64 位' : '32 位'} · 检测成功`,
-                    );
-                  })
-                }
-              >
-                检测 Java
+        {!compact && (
+          <section className="card">
+            <h2>
+              <ShieldCheck size={17} />
+              运行配置
+            </h2>
+            <form onSubmit={save}>
+              <label>
+                Java 可执行文件
+                <input
+                  aria-label="Java 可执行文件"
+                  value={settings.javaPath}
+                  placeholder="E:\…\bin\java.exe"
+                  onChange={(event) =>
+                    setDraft({ ...settings, javaPath: event.target.value })
+                  }
+                />
+              </label>
+              <div className="button-row">
+                <button
+                  type="button"
+                  disabled={locked || !settings.javaPath}
+                  onClick={() =>
+                    void run(async () => {
+                      const java = await service.probeJava(settings.javaPath);
+                      setFeedback(
+                        `Java ${java.major} · ${java.is64Bit ? '64 位' : '32 位'} · 检测成功`,
+                      );
+                    })
+                  }
+                >
+                  检测 Java
+                </button>
+              </div>
+              <p className="hint">内存分配可在「设置 → 游戏内存」调整。</p>
+              <button className="primary" type="submit" disabled={locked}>
+                保存原生配置
               </button>
-            </div>
-            <p className="hint">内存分配可在「设置 → 游戏内存」调整。</p>
-            <button className="primary" type="submit" disabled={locked}>
-              保存原生配置
-            </button>
-          </form>
-          {state && <p className="data-root">数据目录：{state.dataRoot}</p>}
-        </section>
-        <section className="card">
-          <h2>游戏账户</h2>
-          <p>点击左下角头像，选择正版登录或离线登录。</p>
-          <button onClick={onAccount}>切换游戏账户</button>
-        </section>
+            </form>
+            {state && <p className="data-root">数据目录：{state.dataRoot}</p>}
+          </section>
+        )}
+        {!compact && (
+          <section className="card">
+            <h2>游戏账户</h2>
+            <p>点击左下角头像，选择正版登录或离线登录。</p>
+            <button onClick={onAccount}>切换游戏账户</button>
+          </section>
+        )}
         <section className="card">
           <div className="section-heading">
             <h2>
@@ -252,55 +260,60 @@ export function NativeWorkspace({
             Microsoft 账户启动，均需匹配版本的 64 位 Java。
           </p>
         </section>
-        <section className="card">
-          <h2>已安装的真实实例</h2>
-          <p>
-            当前启动身份：
-            {state?.settings.launchMode === 'offline'
-              ? `离线 · ${state.settings.offlineName}`
-              : state?.account
-                ? `Microsoft · ${state.account.name}`
-                : 'Microsoft · 尚未登录'}
-            （以已保存配置为准）
-          </p>
-          <p className="hint">
-            此版本关闭启动器时会结束由它启动的游戏，请先保存并退出世界。
-          </p>
-          {state?.instances.length ? (
-            <div className="native-instances">
-              {state.instances.map((instance) => (
-                <div key={instance.id}>
-                  <div>
-                    <strong>{instance.name}</strong>
-                    <small>
-                      Minecraft {instance.version} · Java {instance.javaMajor} ·
-                      {instance.fabricVersion
-                        ? `Fabric ${instance.fabricVersion}`
-                        : '原版'}{' '}
-                      · 独立目录
-                    </small>
+        {!compact && (
+          <section className="card">
+            <h2>已安装的真实实例</h2>
+            <p>
+              当前启动身份：
+              {state?.settings.launchMode === 'offline'
+                ? `离线 · ${state.settings.offlineName}`
+                : state?.account
+                  ? `Microsoft · ${state.account.name}`
+                  : 'Microsoft · 尚未登录'}
+              （以已保存配置为准）
+            </p>
+            <p className="hint">
+              此版本关闭启动器时会结束由它启动的游戏，请先保存并退出世界。
+            </p>
+            {state?.instances.length ? (
+              <div className="native-instances">
+                {state.instances.map((instance) => (
+                  <div key={instance.id}>
+                    <div>
+                      <strong>{instance.name}</strong>
+                      <small>
+                        Minecraft {instance.version} · Java {instance.javaMajor}{' '}
+                        ·
+                        {instance.fabricVersion
+                          ? `Fabric ${instance.fabricVersion}`
+                          : '原版'}{' '}
+                        · 独立目录
+                      </small>
+                    </div>
+                    <button
+                      disabled={
+                        locked ||
+                        (state.settings.launchMode === 'microsoft' &&
+                          !state.account)
+                      }
+                      onClick={() =>
+                        void run(() => service.launch(instance.id))
+                      }
+                    >
+                      <Play size={15} />
+                      启动游戏
+                    </button>
                   </div>
-                  <button
-                    disabled={
-                      locked ||
-                      (state.settings.launchMode === 'microsoft' &&
-                        !state.account)
-                    }
-                    onClick={() => void run(() => service.launch(instance.id))}
-                  >
-                    <Play size={15} />
-                    启动游戏
-                  </button>
-                </div>
-              ))}
-            </div>
-          ) : (
-            <p>还没有已安装实例。安装成功后才会出现在这里。</p>
-          )}
-        </section>
+                ))}
+              </div>
+            ) : (
+              <p>还没有已安装实例。安装成功后才会出现在这里。</p>
+            )}
+          </section>
+        )}
       </fieldset>
-      <PackInspector service={service} />
-      {state && state.task.status !== 'idle' && (
+      {!compact && <PackInspector service={service} />}
+      {!compact && state && state.task.status !== 'idle' && (
         <section className="card" aria-label="原版任务" ref={taskRef}>
           <h2>
             {state.task.phase === 'game' && active

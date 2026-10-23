@@ -1,5 +1,6 @@
 import { useEffect, useState, useSyncExternalStore } from 'react';
 import type { MemoryInfo, NativeService } from '../core/native-contracts';
+import { useEditor } from './UnsavedChanges';
 
 export function MemoryPanel({ service }: { service: NativeService }) {
   const { available, state } = useSyncExternalStore(
@@ -36,6 +37,38 @@ export function MemoryPanel({ service }: { service: NativeService }) {
     };
   }, [available, service]);
   const target = mode === 'auto' ? (info?.recommendedMb ?? 2048) : amount;
+  async function save() {
+    const current = service.snapshot().state;
+    if (!current || current.task.status === 'running')
+      throw new Error('请先结束当前任务再保存');
+    setBusy(true);
+    try {
+      await service.saveSettings({
+        ...current.settings,
+        memoryMode: mode,
+        memoryMb: amount,
+        optimizeMemory: optimize,
+      });
+      setMessage('内存设置已保存，下次启动生效。');
+    } finally {
+      setBusy(false);
+    }
+  }
+  useEditor({
+    dirty:
+      !!state &&
+      (mode !== state.settings.memoryMode ||
+        amount !== state.settings.memoryMb ||
+        optimize !== state.settings.optimizeMemory),
+    save,
+    discard: () => {
+      if (state) {
+        setMode(state.settings.memoryMode);
+        setAmount(state.settings.memoryMb);
+        setOptimize(state.settings.optimizeMemory);
+      }
+    },
+  });
   return (
     <section className="card" aria-label="游戏内存管理">
       <h2>游戏内存</h2>
@@ -62,21 +95,9 @@ export function MemoryPanel({ service }: { service: NativeService }) {
       <form
         onSubmit={(event) => {
           event.preventDefault();
-          const settings = service.snapshot().state?.settings;
-          if (!settings) return;
-          setBusy(true);
-          void service
-            .saveSettings({
-              ...settings,
-              memoryMode: mode,
-              memoryMb: amount,
-              optimizeMemory: optimize,
-            })
-            .then(() => setMessage('内存设置已保存，下次启动生效。'))
-            .catch((error: unknown) =>
-              setMessage(error instanceof Error ? error.message : '保存失败'),
-            )
-            .finally(() => setBusy(false));
+          void save().catch((error: unknown) =>
+            setMessage(error instanceof Error ? error.message : '保存失败'),
+          );
         }}
       >
         <fieldset

@@ -4,9 +4,11 @@ import { Box, Minus, Square, X } from 'lucide-react';
 export function Titlebar({
   report,
   realMode = false,
+  onClose,
 }: {
   report(message: string): void;
   realMode?: boolean;
+  onClose?(): void;
 }) {
   const native = isTauri();
   const control = (
@@ -49,7 +51,10 @@ export function Titlebar({
           >
             <Square size={13} />
           </button>
-          <button aria-label="关闭窗口" onClick={() => control('close')}>
+          <button
+            aria-label="关闭窗口"
+            onClick={() => (onClose ? onClose() : control('close'))}
+          >
             <X size={17} />
           </button>
         </div>

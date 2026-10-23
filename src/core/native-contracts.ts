@@ -88,7 +88,7 @@ export type MemoryInfo = {
   reserveMb: number;
 };
 export interface NativeService extends Observable<NativeSnapshot> {
-  refresh(): Promise<void>;
+  refresh(fresh?: boolean): Promise<void>;
   worlds(id: string): Promise<WorldEntry[]>;
   world(id: string, worldId: string): Promise<WorldSettings>;
   saveWorld(

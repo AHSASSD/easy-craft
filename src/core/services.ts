@@ -7,6 +7,7 @@ import {
   type ThemeService,
 } from './contracts';
 import { createStore, type StorageAdapter } from './persistence/store';
+import { validNavigation } from './navigation';
 const ids = [
   '9aca7640-cc42-43bd-88ba-03601d0e6631',
   '9aca7640-cc42-43bd-88ba-03601d0e6632',
@@ -60,7 +61,8 @@ export function validPreferences(value: unknown): value is Preferences {
     typeof value.selectedId === 'string' &&
     typeof value.doubleClickLaunch === 'boolean' &&
     typeof value.developerEnabled === 'boolean' &&
-    (value.sort === 'name' || value.sort === 'recent')
+    (value.sort === 'name' || value.sort === 'recent') &&
+    (value.navigation === undefined || validNavigation(value.navigation))
   );
 }
 export function validInstances(value: unknown): value is GameInstance[] {
