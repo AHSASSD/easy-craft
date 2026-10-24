@@ -25,23 +25,41 @@ await new Promise((resolve, reject) => {
 });
 const port = reservation.address().port;
 await new Promise((resolve) => reservation.close(resolve));
-const child = spawn(executable, [], {
-  cwd: project,
-  windowsHide: true,
-  env: {
-    ...process.env,
-    EASYCRAFT_DATA_DIR: path.join(project, '.native/integration'),
-    WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: `--remote-debugging-port=${port}`,
-  },
-  stdio: ['ignore', 'pipe', 'pipe'],
-});
 let failure = '';
-child.on('error', (error) => {
-  failure = error.message;
-});
-child.stderr.on('data', (chunk) => {
-  failure = (failure + chunk).slice(-64000);
-});
+function launchDesktop() {
+  failure = '';
+  const desktop = spawn(executable, [], {
+    cwd: project,
+    windowsHide: true,
+    env: {
+      ...process.env,
+      EASYCRAFT_DATA_DIR: path.join(project, '.native/integration'),
+      WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: `--remote-debugging-port=${port}`,
+    },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  desktop.on('error', (error) => {
+    failure = error.message;
+  });
+  desktop.stderr.on('data', (chunk) => {
+    failure = (failure + chunk).slice(-64000);
+  });
+  return desktop;
+}
+let child = launchDesktop();
+async function connectDesktop() {
+  for (let attempt = 0; attempt < 40; attempt++) {
+    if (child.exitCode !== null) throw new Error(`Desktop exited: ${failure}`);
+    try {
+      return await chromium.connectOverCDP(`http://127.0.0.1:${port}`, {
+        timeout: 1000,
+      });
+    } catch {
+      await new Promise((resolve) => setTimeout(resolve, 500));
+    }
+  }
+  throw new Error(`WebView2 debugging endpoint unavailable: ${failure}`);
+}
 let browser;
 let originalSettings;
 let page;
@@ -88,18 +106,7 @@ async function selectNativeFile(button, file) {
   });
 }
 try {
-  for (let attempt = 0; attempt < 40; attempt++) {
-    if (child.exitCode !== null) throw new Error(`Desktop exited: ${failure}`);
-    try {
-      browser = await chromium.connectOverCDP(`http://127.0.0.1:${port}`, {
-        timeout: 1000,
-      });
-      break;
-    } catch {
-      await new Promise((resolve) => setTimeout(resolve, 500));
-    }
-  }
-  assert(browser, `WebView2 debugging endpoint unavailable: ${failure}`);
+  browser = await connectDesktop();
   const context = browser.contexts()[0];
   page = context.pages()[0];
   if (!page) page = await context.waitForEvent('page');
@@ -142,7 +149,29 @@ try {
         window.__TAURI_INTERNALS__.invoke('native_background'),
       );
       assert.match(saved, /^data:image\/png;base64,/);
-      await page.reload();
+      const oldPid = child.pid;
+      const exiting = new Promise((resolve) => child.once('exit', resolve));
+      await page
+        .getByRole('button', { name: '关闭窗口', exact: true })
+        .click()
+        .catch(() => {});
+      await Promise.race([
+        exiting,
+        new Promise((_, reject) =>
+          setTimeout(
+            () => reject(new Error('Background test desktop did not close')),
+            5000,
+          ),
+        ),
+      ]);
+      await browser.close();
+      child = launchDesktop();
+      assert.notEqual(child.pid, oldPid);
+      browser = await connectDesktop();
+      const reopened = browser.contexts()[0];
+      page = reopened.pages()[0] ?? (await reopened.waitForEvent('page'));
+      page.on('pageerror', (error) => errors.push(error.message));
+      await page.locator('.library-shell').waitFor();
       await page
         .getByRole('navigation')
         .getByRole('button', { name: '游戏库', exact: true })
@@ -165,7 +194,7 @@ try {
           .getByRole('button', { name: '设置', exact: true })
           .click();
         await page.getByRole('button', { name: '个性化', exact: true }).click();
-        await input.setInputFiles({
+        await page.getByLabel('选择背景图片').setInputFiles({
           name: 'background.' + mime.split('/')[1],
           mimeType: mime,
           buffer: Buffer.from(data, 'base64'),
@@ -193,7 +222,7 @@ try {
         null,
       );
       console.log(
-        'PASS: PNG/JPEG/WebP background converted and persisted through native storage, renderer reload restores it, reset persists.',
+        'PASS: PNG/JPEG/WebP background converted and persisted; a newly started desktop process restores the actual hero background, reset persists.',
       );
     } finally {
       await page.evaluate(
