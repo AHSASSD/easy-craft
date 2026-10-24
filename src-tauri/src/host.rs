@@ -271,6 +271,10 @@ impl Host {
         inner.task.pid = None;
         inner.cancel = None;
     }
+    pub fn background(&self, bytes: Option<Vec<u8>>) -> Result<Option<String>> {
+        let _guard = self.inner.lock().map_err(|_| "宿主状态不可用")?;
+        crate::appearance::background(&self.root, bytes.as_deref())
+    }
     pub fn cancel(&self) {
         let inner = self.inner.lock().expect("host state poisoned");
         if ["resources-committed", "pack-committed"].contains(&inner.task.phase.as_str()) {

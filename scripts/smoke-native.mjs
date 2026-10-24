@@ -120,6 +120,96 @@ try {
     .getByRole('button', { name: '设置', exact: true })
     .click();
   await page.getByRole('button', { name: '启动', exact: true }).click();
+  if (process.argv.includes('--background')) {
+    const original = await page.evaluate(() =>
+      window.__TAURI_INTERNALS__.invoke('native_background'),
+    );
+    try {
+      await page.getByRole('button', { name: '个性化', exact: true }).click();
+      const input = page.getByLabel('选择背景图片');
+      await input.setInputFiles({
+        name: 'background.png',
+        mimeType: 'image/png',
+        buffer: Buffer.from(
+          'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jLl8AAAAASUVORK5CYII=',
+          'base64',
+        ),
+      });
+      await page
+        .getByText('背景已保存，下次打开仍然生效。', { exact: true })
+        .waitFor();
+      const saved = await page.evaluate(() =>
+        window.__TAURI_INTERNALS__.invoke('native_background'),
+      );
+      assert.match(saved, /^data:image\/png;base64,/);
+      await page.reload();
+      await page
+        .getByRole('navigation')
+        .getByRole('button', { name: '游戏库', exact: true })
+        .click();
+      await page.waitForFunction(
+        (saved) =>
+          document
+            .querySelector('.library-hero')
+            ?.style.backgroundImage.includes(saved),
+        saved,
+      );
+      for (const mime of ['image/jpeg', 'image/webp']) {
+        const data = await page.evaluate((mime) => {
+          const canvas = document.createElement('canvas');
+          canvas.width = canvas.height = 2;
+          return canvas.toDataURL(mime).split(',')[1];
+        }, mime);
+        await page
+          .getByRole('navigation')
+          .getByRole('button', { name: '设置', exact: true })
+          .click();
+        await page.getByRole('button', { name: '个性化', exact: true }).click();
+        await input.setInputFiles({
+          name: 'background.' + mime.split('/')[1],
+          mimeType: mime,
+          buffer: Buffer.from(data, 'base64'),
+        });
+        await page
+          .getByText('背景已保存，下次打开仍然生效。', { exact: true })
+          .waitFor();
+        assert.match(
+          await page.evaluate(() =>
+            window.__TAURI_INTERNALS__.invoke('native_background'),
+          ),
+          /^data:image\/png;base64,/,
+        );
+      }
+      await page
+        .getByRole('button', { name: '恢复原创背景', exact: true })
+        .click();
+      await page
+        .getByRole('button', { name: '恢复原创背景', exact: true })
+        .waitFor({ state: 'hidden' });
+      assert.equal(
+        await page.evaluate(() =>
+          window.__TAURI_INTERNALS__.invoke('native_background'),
+        ),
+        null,
+      );
+      console.log(
+        'PASS: PNG/JPEG/WebP background converted and persisted through native storage, renderer reload restores it, reset persists.',
+      );
+    } finally {
+      await page.evaluate(
+        (bytes) =>
+          window.__TAURI_INTERNALS__.invoke('native_background', { bytes }),
+        original
+          ? Array.from(Buffer.from(original.split(',')[1], 'base64'))
+          : [],
+      );
+    }
+    await page
+      .getByRole('navigation')
+      .getByRole('button', { name: '设置', exact: true })
+      .click();
+    await page.getByRole('button', { name: '启动', exact: true }).click();
+  }
   originalSettings = await page.evaluate(async () => {
     const state = await window.__TAURI_INTERNALS__.invoke('native_status');
     await window.__TAURI_INTERNALS__.invoke('native_settings', {

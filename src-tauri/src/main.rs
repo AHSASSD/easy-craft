@@ -1,5 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod appearance;
 mod auth;
 mod content;
 mod fabric;
@@ -277,6 +278,16 @@ async fn native_avatar(host: State<'_, Arc<Host>>) -> Result<Option<String>> {
     skins::avatar(&host).await
 }
 #[tauri::command]
+async fn native_background(
+    host: State<'_, Arc<Host>>,
+    bytes: Option<Vec<u8>>,
+) -> Result<Option<String>> {
+    let host = host.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || host.background(bytes))
+        .await
+        .map_err(|_| "背景保存任务失败".to_string())?
+}
+#[tauri::command]
 fn native_avatar_save(host: State<'_, Arc<Host>>, bytes: Vec<u8>) -> Result<()> {
     skins::save(&host, &bytes)
 }
@@ -446,6 +457,7 @@ fn main() {
             native_options_save,
             native_avatar,
             native_avatar_save,
+            native_background,
             native_pack_preview,
             native_pack_pick,
             native_pack_install,

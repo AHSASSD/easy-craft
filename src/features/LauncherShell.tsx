@@ -34,6 +34,7 @@ import { defaultNavigation, type Navigation } from '../core/navigation';
 import { Titlebar } from '../components/Titlebar';
 import { Modal } from '../components/Modal';
 import { SkinAvatar } from '../components/SkinAvatar';
+import { backgroundImage } from './background-image';
 import { AccountPanel } from './AccountPanel';
 import { MemoryPanel } from './MemoryPanel';
 import { JavaPanel } from './JavaPanel';
@@ -85,6 +86,7 @@ function Shell({ services }: { services: Services }) {
   const nav = preferences.navigation ?? defaultNavigation;
   const view = nav.section;
   const state = native.state;
+  const available = native.available;
   const selected =
     state?.instances.find((item) => item.id === preferences.selectedId) ??
     state?.instances[0];
@@ -104,6 +106,7 @@ function Shell({ services }: { services: Services }) {
   const [notice, setNotice] = useState('');
   const [collapsed, setCollapsed] = useState(false);
   const [background, setBackground] = useState('');
+  const [backgroundBusy, setBackgroundBusy] = useState(available);
   const [tasks, setTasks] = useState(false);
   const [closing, setClosing] = useState(false);
   const resourceKind =
@@ -209,12 +212,53 @@ function Shell({ services }: { services: Services }) {
       stop?.();
     };
   }, [requestClose]);
-  useEffect(
-    () => () => {
-      if (background) URL.revokeObjectURL(background);
-    },
-    [background],
-  );
+  useEffect(() => {
+    if (!available) return;
+    let disposed = false;
+    void services.native
+      .background()
+      .then((value) => {
+        if (!disposed) setBackground(value ?? '');
+      })
+      .catch((error) => {
+        if (!disposed)
+          setNotice(error instanceof Error ? error.message : '背景读取失败');
+      })
+      .finally(() => {
+        if (!disposed) setBackgroundBusy(false);
+      });
+    return () => {
+      disposed = true;
+    };
+  }, [available, services.native]);
+  async function changeBackground(file?: File) {
+    setBackgroundBusy(true);
+    try {
+      await run(async () => {
+        const png = file ? await backgroundImage(file) : null;
+        const value = available
+          ? await services.native.background(
+              png ? Array.from(new Uint8Array(await png.arrayBuffer())) : [],
+            )
+          : png
+            ? await new Promise<string>((resolve, reject) => {
+                const reader = new FileReader();
+                reader.onload = () => resolve(String(reader.result));
+                reader.onerror = () => reject(new Error('背景读取失败'));
+                reader.readAsDataURL(png);
+              })
+            : null;
+        setBackground(value ?? '');
+        setNotice(
+          available
+            ? '背景已保存，下次打开仍然生效。'
+            : '当前为浏览器预览，背景未保存到桌面应用。',
+        );
+      });
+    } finally {
+      setBackgroundBusy(false);
+    }
+  }
   async function run(operation: () => Promise<unknown>) {
     setNotice('');
     try {
@@ -875,34 +919,31 @@ function Shell({ services }: { services: Services }) {
                       ))}
                     </div>
                     <label className="file-setting">
-                      实例页背景（本地预览）
+                      实例页背景{available ? '（保存到本机）' : '（本地预览）'}
                       <input
                         aria-label="选择背景图片"
                         type="file"
                         accept="image/png,image/jpeg,image/webp"
+                        disabled={backgroundBusy}
                         onChange={(event) => {
                           const file = event.target.files?.[0];
-                          if (!file) return;
-                          if (
-                            file.size > 10 * 1024 * 1024 ||
-                            !['image/png', 'image/jpeg', 'image/webp'].includes(
-                              file.type,
-                            )
-                          ) {
-                            setNotice(
-                              '请选择小于 10 MB 的 PNG、JPEG 或 WebP 图片',
-                            );
-                            return;
-                          }
-                          setBackground(URL.createObjectURL(file));
+                          if (file) void changeBackground(file);
+                          event.target.value = '';
                         }}
                       />
                     </label>
                     {background && (
-                      <button onClick={() => setBackground('')}>
+                      <button
+                        disabled={backgroundBusy}
+                        onClick={() => void changeBackground()}
+                      >
                         恢复原创背景
                       </button>
                     )}
+                    <p className="hint">
+                      PNG、JPEG 或 WebP，最多 10 MiB / 1600 万像素；保存时转换为
+                      PNG。{backgroundBusy ? '正在读取或保存背景…' : ''}
+                    </p>
                   </section>
                 )}
                 {nav.settingsCategory === 'downloads' && (

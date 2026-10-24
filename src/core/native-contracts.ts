@@ -216,6 +216,7 @@ export interface NativeService extends Observable<NativeSnapshot> {
   saveOptions(id: string, options: ClientOptions): Promise<string>;
   avatar(): Promise<string | null>;
   saveAvatar(bytes: number[]): Promise<void>;
+  background(bytes?: number[]): Promise<string | null>;
   versions(): Promise<string[]>;
   previewPack(bytes: number[]): Promise<PackPreview>;
   pickPack(): Promise<PackPreview | null>;

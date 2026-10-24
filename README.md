@@ -100,6 +100,7 @@ node scripts/smoke-native.mjs debug --cached --native-picker
 powershell -ExecutionPolicy Bypass -File scripts/fetch-modpack-fixture.ps1
 node scripts/smoke-native.mjs debug --cached --public-pack --launch-offline
 node scripts/smoke-native.mjs debug --cached --online-pack --launch-offline
+node scripts/smoke-native.mjs debug --cached --background
 ```
 
 安装集成测试会在 `.native/integration` 下载真实官方 1.21.1 资源、验证缓存修复和参数构造，不启动游戏。`-Integration offline` 将 HTTP 路由到不可用的本地代理，验证完整缓存无需联网即可准备离线参数。桌面检查使用该测试目录与临时 WebView2 调试端口，验证窗口、IPC、Java、官方清单、正版模式登录限制和离线配置；加 `--launch-offline` 才会实际启动游戏，观察初始化后结束进程。测试临时修改并还原测试目录的设置，不修改用户 data 目录，不进行 Microsoft 登录。

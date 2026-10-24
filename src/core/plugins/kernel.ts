@@ -269,6 +269,7 @@ export class PluginManager {
             'saveOptions',
             'avatar',
             'saveAvatar',
+            'background',
             'snapshot',
             'subscribe',
             'refresh',

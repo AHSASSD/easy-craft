@@ -548,6 +548,22 @@ export function createNativeService(
     },
     refresh,
     avatar,
+    background: async (bytes) => {
+      if (bytes && bytes.length > 10 * 1024 * 1024)
+        throw new Error('背景文件超过 10 MiB');
+      const value = await request(
+        'native_background',
+        bytes === undefined ? undefined : { bytes },
+      );
+      if (
+        value !== null &&
+        (!string(value) ||
+          value.length > 14 * 1024 * 1024 ||
+          !/^data:image\/png;base64,[A-Za-z0-9+/=]+$/.test(value))
+      )
+        throw new Error('背景响应无效');
+      return value as string | null;
+    },
     saveAvatar: async (bytes) => {
       if (bytes.length > 2 * 1024 * 1024) throw new Error('皮肤文件超过 2 MB');
       await request('native_avatar_save', { bytes });

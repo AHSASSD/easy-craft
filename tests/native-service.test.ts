@@ -324,6 +324,19 @@ test('modpack browser selects archives over readmes and drops the prior preview 
   expect(screen.getAllByLabelText('整合包安全检查')).toHaveLength(1);
   service.stop();
 });
+test('background reads and resets use only the controlled native command and validate its response', async () => {
+  let response: unknown = 'data:image/png;base64,AAAA';
+  const call = vi.fn(async () => response);
+  const service = createNativeService(true, call as typeof invoke);
+  expect(await service.background()).toBe(response);
+  expect(call).toHaveBeenLastCalledWith('native_background', undefined);
+  response = null;
+  expect(await service.background([])).toBeNull();
+  expect(call).toHaveBeenLastCalledWith('native_background', { bytes: [] });
+  response = 'file:///private.png';
+  await expect(service.background()).rejects.toThrow('背景响应无效');
+  service.stop();
+});
 function LeaveEditor({ onLeave }: { onLeave(): void }) {
   const guard = useNavigationGuard();
   return createElement('button', { onClick: () => guard(onLeave) }, '离开表单');
