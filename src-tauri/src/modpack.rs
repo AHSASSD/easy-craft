@@ -48,6 +48,13 @@ impl Drop for Input {
 }
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct Origin {
+    pub project: String,
+    pub version: String,
+    pub filename: String,
+}
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Plan {
     pub token: String,
     pub name: String,
@@ -56,6 +63,8 @@ pub struct Plan {
     pub fabric_version: String,
     pub archive_sha512: String,
     pub files: Vec<Entry>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub origin: Option<Origin>,
     #[serde(skip)]
     input: Arc<Input>,
     #[serde(skip)]
@@ -274,6 +283,7 @@ fn parse(input: Arc<Input>, preview: &mut packs::PackPreview) -> Result<Plan> {
         fabric_version,
         archive_sha512,
         files: files.into_values().collect(),
+        origin: None,
         input,
         created: Instant::now(),
     })
@@ -311,6 +321,106 @@ pub fn inspect(root: &Path, reader: impl Read) -> Result<packs::PackPreview> {
         }
     }
     Ok(preview)
+}
+fn online_artifact(
+    project: &str,
+    version: &str,
+    filename: &str,
+    value: &Value,
+) -> Result<(net::Artifact, String)> {
+    crate::resources::id(project)?;
+    crate::resources::id(version)?;
+    if value["id"] != version || value["project_id"] != project {
+        return Err("整合包版本归属不符，请重新选择项目和版本".into());
+    }
+    if filename.len() > 512
+        || filename.contains(['/', '\\'])
+        || ![".mrpack", ".zip"]
+            .iter()
+            .any(|suffix| filename.to_ascii_lowercase().ends_with(suffix))
+    {
+        return Err("请选择明确的 MRPACK / ZIP 归档文件".into());
+    }
+    let files = value["files"]
+        .as_array()
+        .filter(|files| !files.is_empty() && files.len() <= 64)
+        .ok_or("整合包版本文件列表无效")?;
+    let matching: Vec<_> = files
+        .iter()
+        .filter(|file| file["filename"] == filename)
+        .collect();
+    if matching.len() != 1 {
+        return Err("归档文件不存在或名称重复，请重新读取版本".into());
+    }
+    let file = matching[0];
+    let sha512 = hash(&file["hashes"], "sha512", 128)?;
+    let sha1 = hash(&file["hashes"], "sha1", 40)?;
+    let url = crate::resources::text(file, "url", 2048)?;
+    net::resource_download_url(&url)?;
+    let size = file["size"]
+        .as_u64()
+        .filter(|size| *size > 0 && *size <= crate::file_picker::MAX_FILE)
+        .ok_or("在线归档超过 512 MiB 或为空")?;
+    Ok((
+        net::Artifact {
+            url,
+            sha1,
+            size: Some(size),
+            path: format!("pack-archives/{sha512}.mrpack"),
+        },
+        sha512,
+    ))
+}
+pub async fn online(
+    host: &Host,
+    project: &str,
+    version: &str,
+    filename: &str,
+    cancel: &CancellationToken,
+) -> Result<packs::PackPreview> {
+    crate::resources::id(project)?;
+    crate::resources::id(version)?;
+    let value = net::resource_json(
+        &host.client,
+        &format!("https://api.modrinth.com/v2/version/{version}"),
+        cancel,
+    )
+    .await?;
+    let (artifact, expected) = online_artifact(project, version, filename, &value)?;
+    host.progress("pack-archive", "下载并校验选定的整合包归档", 0, 1);
+    let cached = net::resource_download(&host.client, &host.root, &artifact, cancel).await?;
+    if cancel.is_cancelled() {
+        return Err("归档检查已取消".into());
+    }
+    host.progress("pack-inspect", "检查整合包归档与安装变更", 0, 1);
+    let root = host.root.clone();
+    let source = Origin {
+        project: project.into(),
+        version: version.into(),
+        filename: filename.into(),
+    };
+    let preview = tauri::async_runtime::spawn_blocking(move || {
+        let (_, input) = crate::file_picker::open(cached.clone(), &["mrpack"])?;
+        if !net::matches(&cached, &artifact.sha1, artifact.size)?
+            || resource_install::sum(&cached)? != expected
+        {
+            return Err("在线归档缓存的大小或哈希不一致，未生成安装计划".into());
+        }
+        let mut preview = inspect(&root, input)?;
+        if preview.kind != "MRPACK" {
+            return Err("选定归档不包含受支持的 MRPACK 清单；未创建实例".into());
+        }
+        if let Some(plan) = &mut preview.install {
+            plan.origin = Some(source);
+        }
+        Ok(preview)
+    })
+    .await
+    .map_err(|_| "归档检查任务失败".to_string())?;
+    if cancel.is_cancelled() {
+        return Err("归档检查已取消".into());
+    }
+    preview
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -652,7 +762,7 @@ pub async fn stage(
     }
     let directory = transaction.directory(&host.root, false)?;
     fs::create_dir_all(model::safe_path(&directory, "game")?).map_err(|_| "无法创建游戏目录")?;
-    let provenance = serde_json::to_vec_pretty(&serde_json::json!({"pack":plan.name,"version":plan.pack_version,"archiveSha512":plan.archive_sha512,"files":plan.files.iter().filter(|entry| !entry.optional || selected.contains(&entry.path)).map(|entry| serde_json::json!({"path":entry.path,"sha512":entry.sha512,"source":entry.source})).collect::<Vec<_>>()})).map_err(|_| "来源记录编码失败")?;
+    let provenance = serde_json::to_vec_pretty(&serde_json::json!({"pack":plan.name,"version":plan.pack_version,"archiveSha512":plan.archive_sha512,"origin":plan.origin,"files":plan.files.iter().filter(|entry| !entry.optional || selected.contains(&entry.path)).map(|entry| serde_json::json!({"path":entry.path,"sha512":entry.sha512,"source":entry.source})).collect::<Vec<_>>()})).map_err(|_| "来源记录编码失败")?;
     copy(
         &host.root,
         transaction,
@@ -711,6 +821,74 @@ mod tests {
     use super::*;
     use serde_json::json;
     use std::io::Cursor;
+    #[test]
+    fn online_archive_is_bound_to_project_version_file_and_verified_metadata() {
+        let file = json!({
+            "filename":"fixture.mrpack", "size":12,
+            "url":"https://cdn.modrinth.com/data/Proj1234/versions/Vers1234/fixture.mrpack",
+            "hashes":{"sha1":"a".repeat(40),"sha512":"b".repeat(128)}
+        });
+        let metadata = json!({"id":"Vers1234","project_id":"Proj1234","files":[file]});
+        let resolve =
+            |value: &Value| online_artifact("Proj1234", "Vers1234", "fixture.mrpack", value);
+        let (artifact, sha512) = resolve(&metadata).unwrap();
+        assert_eq!(sha512, "b".repeat(128));
+        assert_eq!(artifact.path, format!("pack-archives/{sha512}.mrpack"));
+        assert_eq!(artifact.size, Some(12));
+        assert_eq!(artifact.sha1, "a".repeat(40));
+        for (field, value) in [("id", "Other123"), ("project_id", "Other123")] {
+            let mut invalid = metadata.clone();
+            invalid[field] = json!(value);
+            assert!(resolve(&invalid).is_err());
+        }
+        let mut duplicate = metadata.clone();
+        duplicate["files"]
+            .as_array_mut()
+            .unwrap()
+            .push(metadata["files"][0].clone());
+        assert!(resolve(&duplicate).is_err());
+        for (field, value) in [
+            ("size", json!(0)),
+            ("size", json!(crate::file_picker::MAX_FILE + 1)),
+            (
+                "url",
+                json!("https://cdn.modrinth.com.evil.example/data/fixture.mrpack"),
+            ),
+            (
+                "hashes",
+                json!({"sha1":"a".repeat(40),"sha512":"../unsafe"}),
+            ),
+        ] {
+            let mut invalid = metadata.clone();
+            invalid["files"][0][field] = value;
+            assert!(resolve(&invalid).is_err());
+        }
+        for name in ["readme.txt", "../fixture.mrpack", "folder\\fixture.mrpack"] {
+            assert!(online_artifact("Proj1234", "Vers1234", name, &metadata).is_err());
+        }
+    }
+    #[tokio::test]
+    async fn invalid_online_request_releases_task_without_creating_instance() {
+        let root = root();
+        let host = Host::new(root.clone()).unwrap();
+        assert!(host
+            .online_pack_preview(
+                "../invalid".into(),
+                "Vers1234".into(),
+                "fixture.mrpack".into()
+            )
+            .await
+            .is_err());
+        assert_eq!(host.status().task.status, "failed");
+        assert!(host.status().instances.is_empty());
+        assert!(!root.join("instances.json").exists());
+        let bytes = archive(&manifest(), &[]);
+        assert!(host
+            .pack_preview(inspect(&root, bytes.as_slice()).unwrap())
+            .is_ok());
+        drop(host);
+        fs::remove_dir_all(root).unwrap();
+    }
     #[tokio::test]
     #[ignore = "Requires the verified public Adrenaline archive and cached .native/integration resources"]
     async fn public_pack_stage_and_rollback_integration() {

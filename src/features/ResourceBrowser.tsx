@@ -7,6 +7,7 @@ import type {
   ResourcePlan,
   WorldEntry,
 } from '../core/native-contracts';
+import { PackInspector } from './PackInspector';
 
 const dependencyNames: Record<string, string> = {
   required: '必需',
@@ -129,7 +130,12 @@ export function ResourceBrowser({
       if (ticket !== request.current) return;
       setDetail(value);
       setVersionId(value.versions[0]?.id ?? '');
-      setFile(value.versions[0]?.files[0]?.filename ?? '');
+      setFile(
+        value.versions[0]?.files.find(
+          (file) =>
+            kind !== 'modpack' || /\.(mrpack|zip)$/i.test(file.filename),
+        )?.filename ?? '',
+      );
       setPlan(null);
       setMessage('');
       setClosed(false);
@@ -187,9 +193,16 @@ export function ResourceBrowser({
   return (
     <section className="resource-browser">
       <p className="hint">
-        来源：Modrinth · 当前目标：
-        {native.state?.instances.find((item) => item.id === targetId)?.name ||
-          '尚未选择实例，可先浏览'}
+        来源：Modrinth ·{' '}
+        {kind === 'modpack' ? (
+          '安装目标：全新实例'
+        ) : (
+          <>
+            当前目标：
+            {native.state?.instances.find((item) => item.id === targetId)
+              ?.name || '尚未选择实例，可先浏览'}
+          </>
+        )}
         。{kind === 'mod' ? '本轮模组筛选使用 Fabric。' : ''}
       </p>
       <form
@@ -274,8 +287,13 @@ export function ResourceBrowser({
                       const id = event.target.value;
                       setVersionId(id);
                       setFile(
-                        detail.versions.find((v) => v.id === id)?.files[0]
-                          ?.filename ?? '',
+                        detail.versions
+                          .find((v) => v.id === id)
+                          ?.files.find(
+                            (file) =>
+                              kind !== 'modpack' ||
+                              /\.(mrpack|zip)$/i.test(file.filename),
+                          )?.filename ?? '',
                       );
                       setPlan(null);
                       setClosed(false);
@@ -475,7 +493,7 @@ export function ResourceBrowser({
             ) : (
               <p className="notice">
                 {kind === 'modpack'
-                  ? '在线整合包安装尚未接入。已有 ZIP/MRPACK 可在下方检查，支持的包可新建实例。'
+                  ? '在下方获取选定归档并检查安装变更；整合包始终新建实例。'
                   : '此版本暂没有可用的安装路径，请检查兼容条件。'}
               </p>
             )}
@@ -541,6 +559,44 @@ export function ResourceBrowser({
             输入名称与游戏版本后搜索真实资源。结果与文件信息以来源接口为准。
           </p>
         </section>
+      )}
+      {kind === 'modpack' && (
+        <>
+          {selected && (
+            <label className="field-label">
+              整合包归档文件
+              <select
+                aria-label="在线整合包归档文件"
+                disabled={busy || installing}
+                value={file}
+                onChange={(event) => setFile(event.target.value)}
+              >
+                {selected.files
+                  .filter((file) => /\.(mrpack|zip)$/i.test(file.filename))
+                  .map((file) => (
+                    <option key={file.filename} value={file.filename}>
+                      {file.filename}
+                    </option>
+                  ))}
+              </select>
+            </label>
+          )}
+          <PackInspector
+            key={`${detail?.id ?? ''}:${selected?.id ?? ''}:${file}`}
+            service={service}
+            onlineSource={
+              detail &&
+              selected &&
+              selected.files.some(
+                (item) =>
+                  item.filename === file &&
+                  /\.(mrpack|zip)$/i.test(item.filename),
+              )
+                ? { project: detail.id, version: selected.id, filename: file }
+                : undefined
+            }
+          />
+        </>
       )}
     </section>
   );

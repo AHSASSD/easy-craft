@@ -1,6 +1,16 @@
 import { useState, useSyncExternalStore } from 'react';
-import type { NativeService, PackPreview } from '../core/native-contracts';
-export function PackInspector({ service }: { service: NativeService }) {
+import type {
+  NativeService,
+  PackPreview,
+  PackInstallPlan,
+} from '../core/native-contracts';
+export function PackInspector({
+  service,
+  onlineSource,
+}: {
+  service: NativeService;
+  onlineSource?: PackInstallPlan['origin'];
+}) {
   const { available, state } = useSyncExternalStore(
     service.subscribe,
     service.snapshot,
@@ -21,13 +31,23 @@ export function PackInspector({ service }: { service: NativeService }) {
     );
     setSelected([]);
   }
-  async function inspect(file?: File, native = false) {
-    if (!file && !native) return;
+  async function inspect(file?: File, native = false, online = false) {
+    if (!file && !native && !online) return;
     setPreview(null);
     setError('');
     setMessage('');
     setBusy(true);
     try {
+      if (online && onlineSource) {
+        show(
+          await service.previewOnlinePack(
+            onlineSource.project,
+            onlineSource.version,
+            onlineSource.filename,
+          ),
+        );
+        return;
+      }
       if (native) {
         show(await service.pickPack());
         return;
@@ -62,6 +82,21 @@ export function PackInspector({ service }: { service: NativeService }) {
         选择或拖入 ZIP / MRPACK，检查内部目录、依赖和下载来源。支持的原版/Fabric
         整合包可以预览变更后新建实例；其他 ZIP 仅检查，不覆盖现有游戏。
       </p>
+      {onlineSource && (
+        <div className="card">
+          <p>选定归档：{onlineSource.filename}</p>
+          <p className="hint">
+            项目 {onlineSource.project} · 版本 {onlineSource.version}
+            。先下载并检查内容，再确认新建实例。
+          </p>
+          <button
+            disabled={!available || locked}
+            onClick={() => void inspect(undefined, false, true)}
+          >
+            下载此版本并检查整合包
+          </button>
+        </div>
+      )}
       <button
         disabled={!available || locked}
         onClick={() => void inspect(undefined, true)}
@@ -84,7 +119,11 @@ export function PackInspector({ service }: { service: NativeService }) {
           />
         </label>
       </details>
-      {busy && <p role="status">正在检查压缩包目录与清单…</p>}
+      {busy && (
+        <p role="status">
+          正在获取或检查归档；联网进度与取消操作可在底部任务中查看…
+        </p>
+      )}
       {error && (
         <p role="alert" className="notice">
           {error}
@@ -118,6 +157,13 @@ export function PackInspector({ service }: { service: NativeService }) {
           {preview.install && (
             <section className="card" aria-label="整合包安装变更预览">
               <h3>安装到全新实例</h3>
+              {preview.install.origin && (
+                <p className="hint">
+                  归档来源：Modrinth {preview.install.origin.project} /{' '}
+                  {preview.install.origin.version} ·{' '}
+                  {preview.install.origin.filename}
+                </p>
+              )}
               <p>
                 Minecraft {preview.install.gameVersion} ·{' '}
                 {preview.install.fabricVersion

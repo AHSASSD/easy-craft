@@ -496,23 +496,45 @@ try {
   await page.getByRole('button', { name: '整合包', exact: true }).click();
   if (
     process.argv.includes('--install-pack') ||
-    process.argv.includes('--public-pack')
+    process.argv.includes('--public-pack') ||
+    process.argv.includes('--online-pack')
   ) {
     const before = await page.evaluate(() =>
       window.__TAURI_INTERNALS__.invoke('native_status'),
     );
-    await page
-      .getByLabel('选择整合包', { exact: true })
-      .setInputFiles(
-        path.join(
-          project,
-          process.argv.includes('--public-pack')
-            ? '.native/fixtures/adrenaline-1.21.1.mrpack'
-            : '.native/fixtures/installable.mrpack',
-        ),
-      );
+    if (process.argv.includes('--online-pack')) {
+      await page.getByLabel('搜索在线资源').fill('Adrenaline');
+      await page.getByLabel('在线资源游戏版本').fill('1.21.1');
+      await page.getByRole('button', { name: '搜索资源', exact: true }).click();
+      await page
+        .getByRole('button', { name: '查看 Adrenaline', exact: true })
+        .click();
+      await page.getByLabel('在线资源兼容版本').selectOption('5SA4P3Eo');
+      await page
+        .getByRole('button', { name: '下载此版本并检查整合包', exact: true })
+        .click();
+    } else
+      await page
+        .getByLabel('选择整合包', { exact: true })
+        .setInputFiles(
+          path.join(
+            project,
+            process.argv.includes('--public-pack')
+              ? '.native/fixtures/adrenaline-1.21.1.mrpack'
+              : '.native/fixtures/installable.mrpack',
+          ),
+        );
     const preview = page.getByLabel('整合包安装变更预览');
-    await preview.waitFor();
+    await preview.waitFor({ timeout: 120000 });
+    if (process.argv.includes('--online-pack')) {
+      const checked = await page.evaluate(() =>
+        window.__TAURI_INTERNALS__.invoke('native_status'),
+      );
+      assert.deepEqual(checked.instances, before.instances);
+      assert.equal(checked.task.phase, 'pack-checked');
+      assert.equal(checked.task.status, 'succeeded');
+      assert.match(checked.task.message, /尚未安装/);
+    }
     const name = `EC MRPACK ${randomUUID().slice(0, 8)}`;
     await page.getByLabel('整合包新实例名称').fill(name);
     await preview.screenshot({
@@ -554,7 +576,10 @@ try {
       installedPack.id,
       'game',
     );
-    if (!process.argv.includes('--public-pack')) {
+    if (
+      !process.argv.includes('--public-pack') &&
+      !process.argv.includes('--online-pack')
+    ) {
       assert.equal(
         await readFile(path.join(game, 'config/example.json'), 'utf8'),
         'client',
@@ -570,6 +595,15 @@ try {
     const origin = JSON.parse(
       await readFile(path.join(game, '.easycraft-pack.json'), 'utf8'),
     );
+    if (process.argv.includes('--online-pack')) {
+      assert.equal(origin.origin.project, 'BYN9yKrV');
+      assert.equal(origin.origin.version, '5SA4P3Eo');
+      assert.match(origin.origin.filename, /\.mrpack$/);
+      assert.equal(
+        origin.archiveSha512,
+        '4f91d6537e6341beccf03d39e9127584faa99ef702f93ee71fa3d5e9c0f3a6fd4429303e46943e84ee719d9b8785716a82a455cb4feb6d3a2209e7614ac33ba7',
+      );
+    }
     for (const file of origin.files)
       assert.equal(
         createHash('sha512')
@@ -1100,7 +1134,10 @@ try {
               `with Fabric Loader ${installedPack.fabricVersion}`,
             ),
           );
-        if (process.argv.includes('--public-pack'))
+        if (
+          process.argv.includes('--public-pack') ||
+          process.argv.includes('--online-pack')
+        )
           assert(
             launchLog.includes('ferritecore'),
             'Published pack mods must appear in the actual game log',

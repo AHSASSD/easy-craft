@@ -259,7 +259,14 @@ impl Host {
         inner.task.message = if cancel.is_cancelled() {
             "任务已取消，已校验缓存保留".into()
         } else {
-            result.err().unwrap_or_else(|| "任务完成".into())
+            result.err().unwrap_or_else(|| {
+                if inner.task.phase == "pack-checked" {
+                    "归档检查完成；尚未安装。"
+                } else {
+                    "任务完成"
+                }
+                .into()
+            })
         };
         inner.task.pid = None;
         inner.cancel = None;
@@ -363,6 +370,32 @@ impl Host {
         }
         inner.pack_plan = preview.install.clone();
         Ok(preview)
+    }
+    pub async fn online_pack_preview(
+        &self,
+        project: String,
+        version: String,
+        filename: String,
+    ) -> Result<crate::packs::PackPreview> {
+        let cancel = self.begin_task("获取选定的整合包归档")?;
+        let result = crate::modpack::online(self, &project, &version, &filename, &cancel)
+            .await
+            .and_then(|preview| {
+                let mut inner = self.inner.lock().map_err(|_| "宿主状态不可用")?;
+                if cancel.is_cancelled() {
+                    return Err("归档检查已取消".into());
+                }
+                inner.pack_plan = preview.install.clone();
+                Ok(preview)
+            });
+        if result.is_ok() {
+            self.progress("pack-checked", "归档检查完成；尚未安装。", 1, 1);
+        }
+        self.finish(result.as_ref().map(|_| ()).map_err(Clone::clone), &cancel);
+        if cancel.is_cancelled() {
+            return Err("归档检查已取消".into());
+        }
+        result
     }
     pub fn start_pack(
         self: &Arc<Self>,

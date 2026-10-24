@@ -150,6 +150,7 @@ export type PackInstallPlan = {
   gameVersion: string;
   fabricVersion: string;
   archiveSha512: string;
+  origin?: { project: string; version: string; filename: string };
   files: {
     path: string;
     size: number;
@@ -218,6 +219,11 @@ export interface NativeService extends Observable<NativeSnapshot> {
   versions(): Promise<string[]>;
   previewPack(bytes: number[]): Promise<PackPreview>;
   pickPack(): Promise<PackPreview | null>;
+  previewOnlinePack(
+    project: string,
+    version: string,
+    filename: string,
+  ): Promise<PackPreview>;
   installPack(token: string, name: string, selected: string[]): Promise<void>;
   fabricVersions(version: string): Promise<string[]>;
   saveSettings(settings: NativeSettings): Promise<void>;

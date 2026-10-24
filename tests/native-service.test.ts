@@ -173,6 +173,157 @@ test('pack installation previews optional files and sends only the frozen token,
   await expect(service.pickPack()).rejects.toThrow('整合包预览响应无效');
   service.stop();
 });
+test('online packs verify source binding and require a separate installation confirmation', async () => {
+  const origin = {
+    project: 'Proj1234',
+    version: 'Vers1234',
+    filename: 'fixture.mrpack',
+  };
+  const preview = {
+    kind: 'MRPACK',
+    name: 'Online fixture',
+    files: 1,
+    expandedBytes: 1,
+    downloads: 0,
+    dependencies: [],
+    paths: [],
+    warnings: [],
+    install: {
+      token: '11111111-1111-4111-8111-111111111111',
+      name: 'Online fixture',
+      packVersion: '1',
+      gameVersion: '1.21.1',
+      fabricVersion: '',
+      archiveSha512: 'a'.repeat(128),
+      files: [],
+      origin,
+    },
+  };
+  let response: unknown = preview;
+  const call = vi.fn(async (command: string) =>
+    command === 'native_pack_online' ? response : state(),
+  );
+  const service = createNativeService(true, call as typeof invoke);
+  await service.refresh();
+  render(createElement(PackInspector, { service, onlineSource: origin }));
+  fireEvent.click(screen.getByText('下载此版本并检查整合包'));
+  await screen.findByLabelText('整合包安装变更预览');
+  expect(call).toHaveBeenCalledWith('native_pack_online', origin);
+  expect(
+    call.mock.calls.some(([command]) => command === 'native_pack_install'),
+  ).toBe(false);
+  fireEvent.click(screen.getByText('确认变更并安装整合包'));
+  await waitFor(() =>
+    expect(call).toHaveBeenCalledWith('native_pack_install', {
+      token: preview.install.token,
+      name: preview.install.name,
+      selected: [],
+    }),
+  );
+  for (const changed of [
+    { project: 'Other123' },
+    { version: 'Other123' },
+    { filename: 'other.mrpack' },
+  ]) {
+    response = {
+      ...preview,
+      install: { ...preview.install, origin: { ...origin, ...changed } },
+    };
+    await expect(
+      service.previewOnlinePack(
+        origin.project,
+        origin.version,
+        origin.filename,
+      ),
+    ).rejects.toThrow('在线归档来源');
+  }
+  service.stop();
+});
+test('modpack browser selects archives over readmes and drops the prior preview on version changes', async () => {
+  const file = (filename: string) => ({
+    filename,
+    size: 1,
+    sha1: 'a'.repeat(40),
+  });
+  const versions = ['Vers1234', 'Vers5678'].map((id, index) => ({
+    id,
+    name: `Release ${index}`,
+    number: `${index}`,
+    environment: 'unknown',
+    loaders: ['fabric'],
+    files: [file('readme.txt'), file(`${id}.mrpack`)],
+    dependencies: [],
+  }));
+  const call = vi.fn(async (command: string) => {
+    if (command === 'native_resource_search')
+      return {
+        hits: [
+          {
+            id: 'Proj1234',
+            title: 'Pack fixture',
+            description: 'Fixture',
+            author: 'Fixture',
+          },
+        ],
+        total: 1,
+        offset: 0,
+      };
+    if (command === 'native_resource_detail')
+      return {
+        id: 'Proj1234',
+        title: 'Pack fixture',
+        description: 'Fixture',
+        body: '',
+        versions,
+      };
+    if (command === 'native_pack_online')
+      return {
+        kind: 'MRPACK',
+        name: 'Old version preview',
+        files: 1,
+        expandedBytes: 1,
+        downloads: 0,
+        dependencies: [],
+        paths: [],
+        warnings: [],
+      };
+    return state();
+  });
+  const service = createNativeService(true, call as typeof invoke);
+  await service.refresh();
+  render(
+    createElement(ResourceBrowser, {
+      service,
+      kind: 'modpack',
+      query: 'Fixture',
+      gameVersion: '1.21.1',
+      onFilter: vi.fn(),
+    }),
+  );
+  expect(screen.getAllByLabelText('整合包安全检查')).toHaveLength(1);
+  fireEvent.click(screen.getByText('搜索资源'));
+  fireEvent.click(await screen.findByText('查看 Pack fixture'));
+  await screen.findByLabelText('在线整合包归档文件');
+  expect(
+    (screen.getByLabelText('在线整合包归档文件') as HTMLSelectElement).value,
+  ).toBe('Vers1234.mrpack');
+  fireEvent.click(screen.getByText('下载此版本并检查整合包'));
+  await screen.findByText('Old version preview · MRPACK');
+  expect(call).toHaveBeenCalledWith('native_pack_online', {
+    project: 'Proj1234',
+    version: 'Vers1234',
+    filename: 'Vers1234.mrpack',
+  });
+  fireEvent.change(screen.getByLabelText('在线资源兼容版本'), {
+    target: { value: 'Vers5678' },
+  });
+  expect(screen.queryByText('Old version preview · MRPACK')).toBeNull();
+  expect(
+    (screen.getByLabelText('在线整合包归档文件') as HTMLSelectElement).value,
+  ).toBe('Vers5678.mrpack');
+  expect(screen.getAllByLabelText('整合包安全检查')).toHaveLength(1);
+  service.stop();
+});
 function LeaveEditor({ onLeave }: { onLeave(): void }) {
   const guard = useNavigationGuard();
   return createElement('button', { onClick: () => guard(onLeave) }, '离开表单');

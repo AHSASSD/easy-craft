@@ -57,6 +57,11 @@ function validPackPlan(value: unknown): boolean {
     !bounded(value.fabricVersion, 100) ||
     !string(value.archiveSha512) ||
     !/^[a-f0-9]{128}$/.test(value.archiveSha512) ||
+    (value.origin !== undefined &&
+      (!isRecord(value.origin) ||
+        !resourceId(value.origin.project) ||
+        !resourceId(value.origin.version) ||
+        !bounded(value.origin.filename, 512))) ||
     !Array.isArray(value.files) ||
     value.files.length > 10000
   )
@@ -598,6 +603,25 @@ export function createNativeService(
     pickPack: async () => {
       const value = await request('native_pack_pick');
       return value === null ? null : packPreview(value);
+    },
+    previewOnlinePack: async (project, version, filename) => {
+      try {
+        const value = packPreview(
+          await request('native_pack_online', { project, version, filename }),
+        );
+        const origin = value.install?.origin;
+        if (
+          value.install &&
+          (!origin ||
+            origin.project !== project ||
+            origin.version !== version ||
+            origin.filename !== filename)
+        )
+          throw new Error('在线归档来源与所选项目/版本/文件不一致');
+        return value;
+      } finally {
+        await refresh(true);
+      }
     },
     installPack: (token, name, selected) =>
       operation('native_pack_install', { token, name, selected }),

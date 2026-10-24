@@ -38,7 +38,6 @@ import { AccountPanel } from './AccountPanel';
 import { MemoryPanel } from './MemoryPanel';
 import { JavaPanel } from './JavaPanel';
 import { NativeWorkspace } from './NativeWorkspace';
-import { PackInspector } from './PackInspector';
 import { WorldSettingsPanel } from './WorldSettingsPanel';
 import { ContentPanel } from './ContentPanel';
 import { ResourceBrowser } from './ResourceBrowser';
@@ -967,7 +966,11 @@ function Shell({ services }: { services: Services }) {
                     <div className="library-page-heading">
                       <span>CONTENT</span>
                       <h1>{category}</h1>
-                      <p>安装前选择目标实例，并检查版本兼容和变更。</p>
+                      <p>
+                        {nav.downloadCategory === 'modpack'
+                          ? '选择整合包版本，检查归档后创建独立实例。'
+                          : '安装前选择目标实例，并检查版本兼容和变更。'}
+                      </p>
                     </div>
                     <ResourceBrowser
                       key={nav.downloadCategory}
@@ -1009,9 +1012,6 @@ function Shell({ services }: { services: Services }) {
                         })
                       }
                     />
-                    {nav.downloadCategory === 'modpack' && (
-                      <PackInspector service={services.native} />
-                    )}
                   </>
                 )}
               </div>

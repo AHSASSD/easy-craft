@@ -320,6 +320,15 @@ fn native_pack_install(
     host.start_pack(token, name, selected)
 }
 #[tauri::command]
+async fn native_pack_online(
+    host: State<'_, Arc<Host>>,
+    project: String,
+    version: String,
+    filename: String,
+) -> Result<packs::PackPreview> {
+    host.online_pack_preview(project, version, filename).await
+}
+#[tauri::command]
 async fn native_versions(host: State<'_, Arc<Host>>) -> Result<Vec<model::Version>> {
     minecraft::versions(&host, &tokio_util::sync::CancellationToken::new()).await
 }
@@ -440,6 +449,7 @@ fn main() {
             native_pack_preview,
             native_pack_pick,
             native_pack_install,
+            native_pack_online,
             native_resource_search,
             native_resource_detail,
             native_resource_plan,

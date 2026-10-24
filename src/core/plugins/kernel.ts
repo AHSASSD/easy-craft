@@ -275,6 +275,7 @@ export class PluginManager {
             'versions',
             'previewPack',
             'pickPack',
+            'previewOnlinePack',
             'installPack',
             'fabricVersions',
             'saveSettings',
