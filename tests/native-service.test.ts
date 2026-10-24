@@ -15,6 +15,7 @@ import { JavaPanel } from '../src/features/JavaPanel';
 import { ContentPanel } from '../src/features/ContentPanel';
 import { ResourceBrowser } from '../src/features/ResourceBrowser';
 import { PackInspector } from '../src/features/PackInspector';
+import { instanceSettings } from '../src/core/instance-settings';
 import {
   UnsavedChanges,
   useNavigationGuard,
@@ -336,6 +337,107 @@ test('background reads and resets use only the controlled native command and val
   response = 'file:///private.png';
   await expect(service.background()).rejects.toThrow('背景响应无效');
   service.stop();
+});
+test('instance Java and memory save sequentially without changing global or other instances, and clear back to inheritance', async () => {
+  const current = state();
+  const item = {
+    id: 'one',
+    name: 'One',
+    version: '1.21.1',
+    manifestSha1: 'a'.repeat(40),
+    javaMajor: 21,
+    fabricVersion: '',
+    fabricSha1: '',
+  };
+  current.instances = [item, { ...item, id: 'two' }];
+  const global = structuredClone(current.settings);
+  const clean = (value: unknown) => JSON.parse(JSON.stringify(value));
+  const call = vi.fn(
+    async (command: string, args?: Record<string, unknown>) => {
+      if (command === 'native_instance_launch_settings') {
+        const target = current.instances.find((item) => item.id === args!.id)!;
+        expect(clean(args!.expected)).toEqual(target.launch ?? {});
+        target.launch = clean(args!.launch);
+      }
+      return structuredClone(current);
+    },
+  );
+  const service = createNativeService(true, call as typeof invoke);
+  await service.refresh();
+  const leave = vi.fn();
+  render(
+    createElement(UnsavedChanges, {
+      children: [
+        createElement(JavaPanel, { service, instanceId: 'one', key: 'java' }),
+        createElement(MemoryPanel, {
+          service,
+          instanceId: 'one',
+          key: 'memory',
+        }),
+        createElement(LeaveEditor, { onLeave: leave, key: 'leave' }),
+      ],
+    }),
+  );
+  expect(
+    (screen.getByLabelText('Java 可执行文件') as HTMLInputElement).disabled,
+  ).toBe(true);
+  fireEvent.click(screen.getByLabelText('继承全局 Java'));
+  fireEvent.change(screen.getByLabelText('Java 可执行文件'), {
+    target: { value: 'E:/instance-java/java.exe' },
+  });
+  fireEvent.click(screen.getByLabelText('继承全局内存'));
+  fireEvent.change(screen.getByLabelText('最大内存'), {
+    target: { value: '1536' },
+  });
+  fireEvent.click(screen.getByText('离开表单'));
+  await screen.findByRole('dialog', { name: '有尚未保存的修改' });
+  fireEvent.click(screen.getByText('保存并离开'));
+  await waitFor(() => expect(leave).toHaveBeenCalledOnce());
+  expect(current.settings).toEqual(global);
+  expect(current.instances[1].launch).toBeUndefined();
+  expect(current.instances[0].launch).toEqual({
+    javaPath: 'E:/instance-java/java.exe',
+    memory: { memoryMode: 'manual', memoryMb: 1536, optimizeMemory: false },
+  });
+  expect(instanceSettings(global, current.instances[0]).memoryMb).toBe(1536);
+  fireEvent.click(screen.getByLabelText('继承全局 Java'));
+  fireEvent.click(screen.getByText('保存 Java 设置'));
+  await waitFor(() =>
+    expect(current.instances[0].launch?.javaPath).toBeUndefined(),
+  );
+  expect(current.instances[0].launch?.memory?.memoryMb).toBe(1536);
+  fireEvent.click(screen.getByLabelText('继承全局内存'));
+  fireEvent.click(screen.getByText('保存内存设置'));
+  await waitFor(() => expect(current.instances[0].launch).toEqual({}));
+  expect(instanceSettings(global, current.instances[0])).toEqual(global);
+  expect(
+    call.mock.calls.some(([command]) => command === 'native_settings'),
+  ).toBe(false);
+  service.stop();
+});
+test('instance settings reject authentication overrides and invalid memory at the response boundary', () => {
+  const current = state();
+  const item = {
+    id: 'one',
+    name: 'One',
+    version: '1.21.1',
+    manifestSha1: 'a'.repeat(40),
+    javaMajor: 21,
+    fabricVersion: '',
+    fabricSha1: '',
+  };
+  current.instances = [{ ...item, launch: { javaPath: 'E:/java/java.exe' } }];
+  expect(validNativeState(current)).toBe(true);
+  for (const launch of [
+    { javaPath: '' },
+    { memory: { memoryMb: 0, memoryMode: 'manual', optimizeMemory: false } },
+    { launchMode: 'offline' },
+    { clientId: 'secret' },
+  ]) {
+    expect(
+      validNativeState({ ...current, instances: [{ ...item, launch }] }),
+    ).toBe(false);
+  }
 });
 function LeaveEditor({ onLeave }: { onLeave(): void }) {
   const guard = useNavigationGuard();

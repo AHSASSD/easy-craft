@@ -280,6 +280,7 @@ export class PluginManager {
             'installPack',
             'fabricVersions',
             'saveSettings',
+            'saveInstanceLaunch',
             'probeJava',
             'memory',
             'optimizeMemory',

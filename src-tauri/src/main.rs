@@ -278,6 +278,15 @@ async fn native_avatar(host: State<'_, Arc<Host>>) -> Result<Option<String>> {
     skins::avatar(&host).await
 }
 #[tauri::command]
+async fn native_instance_launch_settings(
+    host: State<'_, Arc<Host>>,
+    id: String,
+    expected: model::LaunchOverrides,
+    launch: model::LaunchOverrides,
+) -> Result<()> {
+    host.save_instance_launch(id, expected, launch).await
+}
+#[tauri::command]
 async fn native_background(
     host: State<'_, Arc<Host>>,
     bytes: Option<Vec<u8>>,
@@ -457,6 +466,7 @@ fn main() {
             native_options_save,
             native_avatar,
             native_avatar_save,
+            native_instance_launch_settings,
             native_background,
             native_pack_preview,
             native_pack_pick,

@@ -81,6 +81,7 @@ impl Host {
         let instances: Vec<Instance> = model::load_json(&root, "instances.json")?;
         if instances.iter().any(|item| {
             !model::valid_id(&item.id)
+                || item.launch.validate().is_err()
                 || !model::valid_id(&item.version)
                 || !model::valid_sha1(&item.manifest_sha1)
                 || (item.fabric_version.is_empty() != item.fabric_sha1.is_empty())
@@ -232,6 +233,49 @@ impl Host {
         inner.settings = settings;
         Ok(())
     }
+    pub async fn save_instance_launch(
+        &self,
+        id: String,
+        expected: model::LaunchOverrides,
+        launch: model::LaunchOverrides,
+    ) -> Result<()> {
+        launch.validate()?;
+        let instance = self
+            .status()
+            .instances
+            .into_iter()
+            .find(|item| item.id == id)
+            .ok_or("实例不存在")?;
+        if let Some(path) = &launch.java_path {
+            let java = minecraft::probe_java(path).await?;
+            if !java.is_64_bit || java.major != instance.java_major {
+                return Err(format!(
+                    "该实例需要 64 位 Java {}，当前为 Java {}",
+                    instance.java_major, java.major
+                ));
+            }
+        }
+        let mut inner = self.inner.lock().map_err(|_| "宿主状态不可用")?;
+        if inner.cancel.is_some() || inner.auth_cancel.is_some() {
+            return Err("请先结束当前任务或登录，再修改实例配置".into());
+        }
+        let disk: Vec<Instance> = model::load_json(&self.root, "instances.json")?;
+        if disk != inner.instances {
+            return Err("实例清单已被外部修改，未覆盖；请重新打开启动器".into());
+        }
+        let mut instances = inner.instances.clone();
+        let item = instances
+            .iter_mut()
+            .find(|item| item.id == id)
+            .ok_or("实例不存在")?;
+        if item.launch != expected {
+            return Err("实例配置已变化，请放弃修改并重新读取后再保存".into());
+        }
+        item.launch = launch;
+        model::save_json(&self.root, "instances.json", &instances)?;
+        inner.instances = instances;
+        Ok(())
+    }
     fn begin_task(&self, message: &str) -> Result<CancellationToken> {
         let mut inner = self.inner.lock().map_err(|_| "宿主状态不可用")?;
         if inner.cancel.is_some() || inner.auth_cancel.is_some() {
@@ -323,7 +367,13 @@ impl Host {
             }
             inner.resource_plan.take().ok_or("安装计划不可用")?
         };
-        if plan.java_path != self.status().settings.java_path {
+        let status = self.status();
+        let target = status
+            .instances
+            .iter()
+            .find(|item| item.id == plan.instance_id)
+            .ok_or("目标实例不存在")?;
+        if plan.java_path != target.launch.resolve(&status.settings).java_path {
             return Err("Java 配置已变化，请重新生成安装计划".into());
         }
         let cancel = self.begin_task("准备资源安装")?;
@@ -530,6 +580,7 @@ impl Host {
             java_major: prepared.java_major,
             fabric_version: loader.unwrap_or_default(),
             fabric_sha1,
+            launch: Default::default(),
         };
         Ok((instance, prepared))
     }
@@ -587,7 +638,13 @@ impl Host {
         Ok(())
     }
     async fn launch(&self, instance: Instance, cancel: &CancellationToken) -> Result<()> {
-        let mut settings = self.status().settings;
+        let state = self.status();
+        let instance = state
+            .instances
+            .into_iter()
+            .find(|item| item.id == instance.id)
+            .ok_or("本地实例不存在")?;
+        let mut settings = instance.launch.resolve(&state.settings);
         if settings.optimize_memory {
             match crate::memory::optimize_system() {
                 Ok(_) => self.log("已请求系统整理可访问进程的工作集", &[]),

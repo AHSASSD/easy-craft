@@ -35,6 +35,7 @@ import { Titlebar } from '../components/Titlebar';
 import { Modal } from '../components/Modal';
 import { SkinAvatar } from '../components/SkinAvatar';
 import { backgroundImage } from './background-image';
+import { instanceSettings } from '../core/instance-settings';
 import { AccountPanel } from './AccountPanel';
 import { MemoryPanel } from './MemoryPanel';
 import { JavaPanel } from './JavaPanel';
@@ -91,6 +92,9 @@ function Shell({ services }: { services: Services }) {
     state?.instances.find((item) => item.id === preferences.selectedId) ??
     state?.instances[0];
   const tab = (selected && nav.instanceTabs[selected.id]) ?? 'overview';
+  const effectiveSettings = state
+    ? instanceSettings(state.settings, selected)
+    : null;
   const running = state?.task.status === 'running';
   const task = state?.task;
   const identity =
@@ -753,14 +757,25 @@ function Shell({ services }: { services: Services }) {
                           {selected
                             ? `Java ${selected.javaMajor} (x64)`
                             : '等待选择实例'}
+                          {selected &&
+                            ` · ${selected.launch?.javaPath ? '实例覆盖' : '全局默认'}`}
                         </dd>
+                        {selected && (
+                          <>
+                            <dt>Java 路径</dt>
+                            <dd className="resource-hash">
+                              {effectiveSettings?.javaPath || '尚未配置'}
+                            </dd>
+                          </>
+                        )}
                         <dt>启动身份</dt>
                         <dd>{identity || '尚未选择账户'}</dd>
                         <dt>堆内存</dt>
                         <dd>
-                          {state?.settings.memoryMode === 'auto'
-                            ? '自动分配 · 全局默认'
-                            : `${state?.settings.memoryMb ?? 2048} MB · 全局默认`}
+                          {effectiveSettings?.memoryMode === 'auto'
+                            ? '自动分配'
+                            : `${effectiveSettings?.memoryMb ?? 2048} MB`}
+                          {` · ${selected?.launch?.memory ? '实例覆盖' : '全局默认'}`}
                         </dd>
                       </dl>
                     </section>
@@ -831,23 +846,37 @@ function Shell({ services }: { services: Services }) {
                     />
                   </>
                 ) : selected ? (
-                  <WorldSettingsPanel
-                    key={`${selected.id}:${tab}`}
-                    service={services.native}
-                    id={selected.id}
-                    running={!!running}
-                    section={tab === 'options' ? 'options' : 'world'}
-                    onDatapacks={(worldId) =>
-                      change({
-                        section: 'download',
-                        downloadCategory: 'datapack',
-                        datapackWorlds: {
-                          ...nav.datapackWorlds,
-                          [selected.id]: worldId,
-                        },
-                      })
-                    }
-                  />
+                  <>
+                    {tab === 'options' && (
+                      <div key={`${selected.id}:launch-settings`}>
+                        <JavaPanel
+                          service={services.native}
+                          instanceId={selected.id}
+                        />
+                        <MemoryPanel
+                          service={services.native}
+                          instanceId={selected.id}
+                        />
+                      </div>
+                    )}
+                    <WorldSettingsPanel
+                      key={`${selected.id}:${tab}`}
+                      service={services.native}
+                      id={selected.id}
+                      running={!!running}
+                      section={tab === 'options' ? 'options' : 'world'}
+                      onDatapacks={(worldId) =>
+                        change({
+                          section: 'download',
+                          downloadCategory: 'datapack',
+                          datapackWorlds: {
+                            ...nav.datapackWorlds,
+                            [selected.id]: worldId,
+                          },
+                        })
+                      }
+                    />
+                  </>
                 ) : (
                   <section className="card library-empty">
                     <Globe2 size={30} />

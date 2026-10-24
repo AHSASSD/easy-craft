@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
+import { spawn, execFile } from 'node:child_process';
 import { createServer } from 'node:net';
 import { mkdir, copyFile, readFile, rm } from 'node:fs/promises';
 import { createHash, randomUUID } from 'node:crypto';
@@ -62,6 +62,7 @@ async function connectDesktop() {
 }
 let browser;
 let originalSettings;
+let originalInstanceLaunch;
 let page;
 let installedPack;
 let launchedGame;
@@ -1192,6 +1193,71 @@ try {
             .first()
         : page.locator('.library-instance').first();
     await chosen.click();
+    if (process.argv.includes('--instance-settings')) {
+      const id = (
+        installedPack ??
+        (process.argv.includes('--fabric')
+          ? fabricInstance
+          : testState.instances[0])
+      ).id;
+      const before = await page.evaluate(() =>
+        window.__TAURI_INTERNALS__.invoke('native_status'),
+      );
+      originalInstanceLaunch = {
+        id,
+        launch: before.instances.find((item) => item.id === id).launch ?? {},
+      };
+      await page.getByRole('tab', { name: '实例设置', exact: true }).click();
+      await page.getByLabel('继承全局 Java').uncheck();
+      await page.getByLabel('Java 可执行文件').fill(before.settings.javaPath);
+      await page
+        .getByRole('button', { name: '保存 Java 设置', exact: true })
+        .click();
+      await page
+        .getByText('Java 设置已保存，下次启动生效。', { exact: true })
+        .waitFor();
+      await page.getByLabel('继承全局内存').uncheck();
+      await page.getByLabel('内存分配方式').selectOption('manual');
+      await page.getByLabel('最大内存', { exact: true }).fill('1536');
+      await page.getByLabel('启动前内存整理').uncheck();
+      await page
+        .getByRole('button', { name: '保存内存设置', exact: true })
+        .click();
+      await page
+        .getByText('内存设置已保存，下次启动生效。', { exact: true })
+        .waitFor();
+      const saved = await page.evaluate(() =>
+        window.__TAURI_INTERNALS__.invoke('native_status'),
+      );
+      assert.deepEqual(saved.settings, before.settings);
+      assert.deepEqual(
+        saved.instances.filter((item) => item.id !== id),
+        before.instances.filter((item) => item.id !== id),
+      );
+      assert.deepEqual(saved.instances.find((item) => item.id === id).launch, {
+        javaPath: before.settings.javaPath,
+        memory: { memoryMode: 'manual', memoryMb: 1536, optimizeMemory: false },
+      });
+      await page.reload();
+      await page.getByLabel('继承全局 Java').waitFor();
+      assert.equal(await page.getByLabel('继承全局 Java').isChecked(), false);
+      assert.equal(
+        await page.getByLabel('最大内存', { exact: true }).inputValue(),
+        '1536',
+      );
+      await page.evaluate(async () => {
+        const state = await window.__TAURI_INTERNALS__.invoke('native_status');
+        await window.__TAURI_INTERNALS__.invoke('native_settings', {
+          settings: {
+            ...state.settings,
+            javaPath: '',
+            memoryMode: 'manual',
+            memoryMb: 4096,
+            optimizeMemory: false,
+          },
+        });
+      });
+    }
     await page.getByRole('tab', { name: '实例详情', exact: true }).click();
     await page.locator('.page-content').evaluate((element) => {
       element.scrollTop = 0;
@@ -1236,6 +1302,49 @@ try {
           sawMemoryAllocation,
           'The launch must report its actual heap allocation before startup',
         );
+        if (process.argv.includes('--instance-settings')) {
+          const info = await new Promise((resolve, reject) =>
+            execFile(
+              'powershell.exe',
+              [
+                '-NoProfile',
+                '-Command',
+                `$game = Get-CimInstance Win32_Process -Filter 'ProcessId = ${state.task.pid}'; [pscustomobject]@{ Path = $game.ExecutablePath; Args = $game.CommandLine } | ConvertTo-Json -Compress`,
+              ],
+              { windowsHide: true },
+              (error, stdout) =>
+                error ? reject(error) : resolve(JSON.parse(stdout)),
+            ),
+          );
+          const target = state.instances.find(
+            (item) => item.id === originalInstanceLaunch.id,
+          );
+          assert.equal(
+            path.normalize(info.Path).toLowerCase(),
+            path.normalize(target.launch.javaPath).toLowerCase(),
+          );
+          assert.match(info.Args, /(?:^|\s)-Xmx1536M(?:\s|$)/);
+          assert.equal(state.settings.javaPath, '');
+          assert.equal(state.settings.memoryMb, 4096);
+          const refused = await page.evaluate(
+            async ({ id, expected }) => {
+              try {
+                await window.__TAURI_INTERNALS__.invoke(
+                  'native_instance_launch_settings',
+                  { id, expected, launch: {} },
+                );
+                return '';
+              } catch (error) {
+                return String(error);
+              }
+            },
+            { id: target.id, expected: target.launch },
+          );
+          assert.match(refused, /请先结束/);
+          console.log(
+            'PASS: actual game uses the instance Java and -Xmx1536M despite empty global Java and 4096 MB global memory; running edits are refused.',
+          );
+        }
         const launchLog = installedPack
           ? await readFile(
               path.join(
@@ -1323,6 +1432,44 @@ try {
       `Game stop did not finish: ${stopped.task.message}`,
     );
     await page.getByRole('button', { name: '关闭弹窗', exact: true }).click();
+    if (originalInstanceLaunch) {
+      await page.getByRole('tab', { name: '实例设置', exact: true }).click();
+      await page.getByLabel('继承全局 Java').check();
+      await page
+        .getByRole('button', { name: '保存 Java 设置', exact: true })
+        .click();
+      await page
+        .getByText('Java 设置已保存，下次启动生效。', { exact: true })
+        .waitFor();
+      await page.getByLabel('继承全局内存').check();
+      await page
+        .getByRole('button', { name: '保存内存设置', exact: true })
+        .click();
+      await page
+        .getByText('内存设置已保存，下次启动生效。', { exact: true })
+        .waitFor();
+      const cleared = await page.evaluate(() =>
+        window.__TAURI_INTERNALS__.invoke('native_status'),
+      );
+      assert.equal(
+        cleared.instances.find((item) => item.id === originalInstanceLaunch.id)
+          .launch,
+        undefined,
+      );
+      await page.evaluate(
+        ({ id, launch }) =>
+          window.__TAURI_INTERNALS__.invoke('native_instance_launch_settings', {
+            id,
+            expected: {},
+            launch,
+          }),
+        originalInstanceLaunch,
+      );
+      originalInstanceLaunch = undefined;
+      console.log(
+        'PASS: restoring inheritance removes both overrides; the test instance configuration is restored.',
+      );
+    }
   }
   assert.deepEqual(errors, []);
   await mkdir(path.join(project, 'output/playwright'), { recursive: true });
@@ -1370,20 +1517,36 @@ try {
 } finally {
   if (originalSettings && page) {
     await page
-      .evaluate(async (settings) => {
-        await window.__TAURI_INTERNALS__.invoke('native_cancel');
-        for (let attempt = 0; attempt < 50; attempt++) {
-          const state =
-            await window.__TAURI_INTERNALS__.invoke('native_status');
-          if (state.task.status !== 'running') {
-            await window.__TAURI_INTERNALS__.invoke('native_settings', {
-              settings,
-            });
-            return;
+      .evaluate(
+        async ({ settings, instanceLaunch }) => {
+          await window.__TAURI_INTERNALS__.invoke('native_cancel');
+          for (let attempt = 0; attempt < 50; attempt++) {
+            const state =
+              await window.__TAURI_INTERNALS__.invoke('native_status');
+            if (state.task.status !== 'running') {
+              if (instanceLaunch) {
+                const current = state.instances.find(
+                  (item) => item.id === instanceLaunch.id,
+                );
+                await window.__TAURI_INTERNALS__.invoke(
+                  'native_instance_launch_settings',
+                  {
+                    id: current.id,
+                    expected: current.launch ?? {},
+                    launch: instanceLaunch.launch,
+                  },
+                );
+              }
+              await window.__TAURI_INTERNALS__.invoke('native_settings', {
+                settings,
+              });
+              return;
+            }
+            await new Promise((resolve) => setTimeout(resolve, 100));
           }
-          await new Promise((resolve) => setTimeout(resolve, 100));
-        }
-      }, originalSettings)
+        },
+        { settings: originalSettings, instanceLaunch: originalInstanceLaunch },
+      )
       .catch(() => {});
   }
   try {

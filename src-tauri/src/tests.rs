@@ -21,6 +21,101 @@ fn automatic_memory_reserves_system_space_and_bounds_heap() {
     assert!(crate::memory::optimize().is_ok());
     assert!(!crate::memory::process_ids().unwrap().is_empty());
 }
+#[tokio::test]
+async fn instance_overrides_migrate_persist_clear_and_reject_stale_or_external_changes() {
+    let root = root();
+    let legacy = |id: &str| json!({"id":id,"name":id,"version":"1.21.1","manifestSha1":"a".repeat(40),"javaMajor":21});
+    model::save_json(
+        &root,
+        "instances.json",
+        &json!([legacy("one"), legacy("two")]),
+    )
+    .unwrap();
+    let host = host::Host::new(root.clone()).unwrap();
+    let original_global = serde_json::to_value(host.status().settings).unwrap();
+    let empty = model::LaunchOverrides::default();
+    assert!(host.status().instances[0].launch.is_empty());
+    let memory = model::LaunchOverrides {
+        java_path: None,
+        memory: Some(model::MemoryOverride {
+            memory_mode: model::MemoryMode::Manual,
+            memory_mb: 1536,
+            optimize_memory: false,
+        }),
+    };
+    host.save_instance_launch("one".into(), empty.clone(), memory.clone())
+        .await
+        .unwrap();
+    assert!(host.status().instances[1].launch.is_empty());
+    assert_eq!(
+        serde_json::to_value(host.status().settings).unwrap(),
+        original_global
+    );
+    assert_eq!(memory.resolve(&host.status().settings).memory_mb, 1536);
+    assert!(host
+        .save_instance_launch("one".into(), empty.clone(), empty.clone())
+        .await
+        .unwrap_err()
+        .contains("配置已变化"));
+    let mut invalid = memory.clone();
+    invalid.memory.as_mut().unwrap().memory_mb = 0;
+    assert!(host
+        .save_instance_launch("one".into(), memory.clone(), invalid)
+        .await
+        .is_err());
+    invalid = memory.clone();
+    invalid.java_path = Some(String::new());
+    assert!(host
+        .save_instance_launch("one".into(), memory.clone(), invalid)
+        .await
+        .is_err());
+    drop(host);
+    let host = host::Host::new(root.clone()).unwrap();
+    assert_eq!(host.status().instances[0].launch, memory);
+    host.save_instance_launch("one".into(), memory, empty.clone())
+        .await
+        .unwrap();
+    let saved: serde_json::Value = model::load_json(&root, "instances.json").unwrap();
+    assert!(saved[0].get("launch").is_none());
+    let mut disk = host.status().instances;
+    disk[1].name = "external edit".into();
+    model::save_json(&root, "instances.json", &disk).unwrap();
+    assert!(host
+        .save_instance_launch("one".into(), empty.clone(), empty)
+        .await
+        .unwrap_err()
+        .contains("外部修改"));
+    let reread: Vec<model::Instance> = model::load_json(&root, "instances.json").unwrap();
+    assert_eq!(reread, disk);
+    drop(host);
+    fs::remove_dir_all(root).unwrap();
+}
+#[test]
+fn resolved_instance_settings_preserve_identity_and_only_apply_explicit_overrides() {
+    let settings = model::Settings {
+        java_path: "global java".into(),
+        memory_mb: 2048,
+        optimize_memory: true,
+        offline_name: "EasyPlayer".into(),
+        ..Default::default()
+    };
+    let overrides = model::LaunchOverrides {
+        java_path: Some("instance java".into()),
+        memory: None,
+    };
+    let resolved = overrides.resolve(&settings);
+    assert_eq!(resolved.java_path, "instance java");
+    assert_eq!(resolved.memory_mb, 2048);
+    assert!(resolved.optimize_memory);
+    assert_eq!(resolved.offline_name, "EasyPlayer");
+    assert_eq!(settings.java_path, "global java");
+    assert_eq!(
+        model::LaunchOverrides::default()
+            .resolve(&settings)
+            .java_path,
+        "global java"
+    );
+}
 #[test]
 fn fabric_coordinates_are_bounded_and_cannot_escape_cache() {
     assert_eq!(
@@ -314,6 +409,7 @@ fn offline_and_microsoft_arguments_stay_distinct() {
         java_major: 21,
         fabric_version: String::new(),
         fabric_sha1: String::new(),
+        launch: Default::default(),
     };
     let mut settings = host.status().settings;
     settings.launch_mode = model::LaunchMode::Offline;

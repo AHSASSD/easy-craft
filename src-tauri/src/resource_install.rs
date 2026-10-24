@@ -392,7 +392,7 @@ pub async fn prepare(
     if kind == Kind::Mod && instance.fabric_version.is_empty() {
         return Err("模组安装需要 Fabric 实例".into());
     }
-    let java_path = host.status().settings.java_path;
+    let java_path = instance.launch.resolve(&host.status().settings).java_path;
     let java_major = if kind == Kind::Mod {
         crate::minecraft::probe_java(&java_path).await?.major
     } else {
@@ -1422,6 +1422,7 @@ mod tests {
             java_major: 21,
             fabric_version: "0.16.14".into(),
             fabric_sha1: "b".repeat(40),
+            launch: Default::default(),
         }
     }
     fn entry(path: &str, source: &Path) -> Entry {

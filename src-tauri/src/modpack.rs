@@ -965,6 +965,7 @@ mod tests {
             java_major: 21,
             fabric_version: String::new(),
             fabric_sha1: String::new(),
+            launch: Default::default(),
         }
     }
     fn download(path: &str, env: Value) -> Value {

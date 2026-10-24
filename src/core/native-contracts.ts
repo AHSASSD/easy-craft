@@ -8,6 +8,10 @@ export type NativeSettings = {
   launchMode: 'microsoft' | 'offline';
   offlineName: string;
 };
+export type LaunchOverrides = {
+  javaPath?: string;
+  memory?: Pick<NativeSettings, 'memoryMode' | 'memoryMb' | 'optimizeMemory'>;
+};
 export type NativeInstance = {
   id: string;
   name: string;
@@ -16,6 +20,7 @@ export type NativeInstance = {
   javaMajor: number;
   fabricVersion: string;
   fabricSha1: string;
+  launch?: LaunchOverrides;
 };
 export type NativeTask = {
   status: 'idle' | 'running' | 'succeeded' | 'failed' | 'cancelled';
@@ -228,6 +233,11 @@ export interface NativeService extends Observable<NativeSnapshot> {
   installPack(token: string, name: string, selected: string[]): Promise<void>;
   fabricVersions(version: string): Promise<string[]>;
   saveSettings(settings: NativeSettings): Promise<void>;
+  saveInstanceLaunch(
+    id: string,
+    expected: LaunchOverrides,
+    launch: LaunchOverrides,
+  ): Promise<void>;
   probeJava(path: string): Promise<JavaInfo>;
   memory(): Promise<MemoryInfo>;
   optimizeMemory(system?: boolean): Promise<MemoryInfo>;

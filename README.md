@@ -29,6 +29,7 @@ npm ci
 - 左下角头像直接打开账户弹窗，选择正版登录或离线登录，保存后显示当前真实身份；不必在下载中心寻找账户配置。
 - 头像默认从皮肤头部裁切并叠加帽子层。正版档案返回的官方皮肤会缓存；离线账户可以选择 64×64 或 64×32 PNG。离线图片只改变启动器头像，不会替换游戏内皮肤；没有可用皮肤时显示默认头像。
 - “设置 → 启动”提供 Java 路径/检测与实际物理/可用内存，支持自动分配、手动滑块与数值输入；启动时应用最大堆上限并记入日志。
+- “游戏库 → 实例设置”可单独覆盖 Java 和内存配置，或恢复继承全局；仅影响所选实例，下次启动生效。保存时验证 Java 条件与配置修订，运行中不能修改。
 - 内存整理默认关闭：可单独整理启动器工作集，或在确认后整理当前权限可访问进程的工作集；还可选择启动前执行系统整理。不会结束进程、提权或清空内核缓存，不保证固定释放量，可能短暂卡顿。
 - “下载 → 原版游戏”提供官方正式版本清单与原版/Fabric 独立实例安装。
 - 下载中的五类 Modrinth 内容提供真实搜索、版本与依赖信息。Mod、资源包、光影包可选择目标实例，预览必需依赖与文件后安装；大小、SHA-1/SHA-512 验证后提交，来源记录和事务恢复保护已有文件。只新增或保留同内容文件，不自动替换旧版；Mod 首轮支持已验证的 Fabric 路径，复杂或不明确条件会拒绝。资源包/光影包下载不等于在游戏中启用。
@@ -48,7 +49,7 @@ npm ci
 
 离线模式已经实际启动 Minecraft 1.21.1 的 Java 进程并观察到 OpenAL 引擎初始化，结束任务可回收进程。尚未创建世界、操作存档或验证多人游戏。Microsoft 本人授权与正版启动仍未进行端到端验收。
 
-旧式 minecraftArguments、任意继承版本、Forge/NeoForge/Quilt、实例文件复制、实例级 Java/内存覆盖、自动下载 Java 的 UI 和第三方插件均未实现。仍按 [UI 设计计划](docs/UI_DESIGN_PLAN.md) 分步推进，不宣称整版已完成。
+旧式 minecraftArguments、任意继承版本、Forge/NeoForge/Quilt、实例文件复制、自动下载 Java 的 UI 和第三方插件均未实现。仍按 [UI 设计计划](docs/UI_DESIGN_PLAN.md) 分步推进，不宣称整版已完成。
 
 ## 使用顺序
 
@@ -101,6 +102,7 @@ powershell -ExecutionPolicy Bypass -File scripts/fetch-modpack-fixture.ps1
 node scripts/smoke-native.mjs debug --cached --public-pack --launch-offline
 node scripts/smoke-native.mjs debug --cached --online-pack --launch-offline
 node scripts/smoke-native.mjs debug --cached --background
+node scripts/smoke-native.mjs debug --cached --instance-settings --launch-offline
 ```
 
 安装集成测试会在 `.native/integration` 下载真实官方 1.21.1 资源、验证缓存修复和参数构造，不启动游戏。`-Integration offline` 将 HTTP 路由到不可用的本地代理，验证完整缓存无需联网即可准备离线参数。桌面检查使用该测试目录与临时 WebView2 调试端口，验证窗口、IPC、Java、官方清单、正版模式登录限制和离线配置；加 `--launch-offline` 才会实际启动游戏，观察初始化后结束进程。测试临时修改并还原测试目录的设置，不修改用户 data 目录，不进行 Microsoft 登录。

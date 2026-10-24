@@ -13,7 +13,7 @@ pub enum LaunchMode {
     Microsoft,
     Offline,
 }
-#[derive(Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum MemoryMode {
     Auto,
@@ -49,6 +49,52 @@ impl Default for Settings {
         }
     }
 }
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct LaunchOverrides {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub java_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory: Option<MemoryOverride>,
+}
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct MemoryOverride {
+    pub memory_mode: MemoryMode,
+    pub memory_mb: u32,
+    pub optimize_memory: bool,
+}
+impl LaunchOverrides {
+    pub fn is_empty(&self) -> bool {
+        self.java_path.is_none() && self.memory.is_none()
+    }
+    pub fn validate(&self) -> Result<()> {
+        if self
+            .java_path
+            .as_ref()
+            .is_some_and(|path| path.trim().is_empty() || path.len() > 32768 || path.contains('\0'))
+            || self
+                .memory
+                .as_ref()
+                .is_some_and(|memory| !(512..=16384).contains(&memory.memory_mb))
+        {
+            return Err("实例启动覆盖无效；内存须为 512–16384 MB，继承项应移除覆盖".into());
+        }
+        Ok(())
+    }
+    pub fn resolve(&self, global: &Settings) -> Settings {
+        let mut result = global.clone();
+        if let Some(java) = &self.java_path {
+            result.java_path.clone_from(java);
+        }
+        if let Some(memory) = &self.memory {
+            result.memory_mode = memory.memory_mode;
+            result.memory_mb = memory.memory_mb;
+            result.optimize_memory = memory.optimize_memory;
+        }
+        result
+    }
+}
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Instance {
@@ -61,6 +107,8 @@ pub struct Instance {
     pub fabric_version: String,
     #[serde(default)]
     pub fabric_sha1: String,
+    #[serde(default, skip_serializing_if = "LaunchOverrides::is_empty")]
+    pub launch: LaunchOverrides,
 }
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Profile {

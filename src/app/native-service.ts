@@ -275,6 +275,27 @@ function validMemory(value: unknown): value is MemoryInfo {
     integer(value.reserveMb)
   );
 }
+export function validLaunchOverrides(value: unknown): boolean {
+  return (
+    isRecord(value) &&
+    Object.keys(value).every((key) => ['javaPath', 'memory'].includes(key)) &&
+    (value.javaPath === undefined ||
+      (string(value.javaPath) &&
+        value.javaPath.trim().length > 0 &&
+        value.javaPath.length <= 32768 &&
+        !value.javaPath.includes('\0'))) &&
+    (value.memory === undefined ||
+      (isRecord(value.memory) &&
+        Object.keys(value.memory).every((key) =>
+          ['memoryMode', 'memoryMb', 'optimizeMemory'].includes(key),
+        ) &&
+        ['auto', 'manual'].includes(String(value.memory.memoryMode)) &&
+        integer(value.memory.memoryMb) &&
+        value.memory.memoryMb >= 512 &&
+        value.memory.memoryMb <= 16384 &&
+        typeof value.memory.optimizeMemory === 'boolean'))
+  );
+}
 export function validNativeState(value: unknown): value is NativeState {
   if (
     !isRecord(value) ||
@@ -320,6 +341,7 @@ export function validNativeState(value: unknown): value is NativeState {
         integer(item.javaMajor) &&
         string(item.fabricVersion) &&
         string(item.fabricSha1) &&
+        (item.launch === undefined || validLaunchOverrides(item.launch)) &&
         (item.fabricVersion === ''
           ? item.fabricSha1 === ''
           : /^[A-Za-z0-9._+-]{1,100}$/.test(item.fabricVersion) &&
@@ -611,6 +633,15 @@ export function createNativeService(
       return value.map((item: { id: string }) => item.id);
     },
     saveSettings: (settings) => operation('native_settings', { settings }),
+    saveInstanceLaunch: (id, expected, launch) => {
+      if (!validLaunchOverrides(expected) || !validLaunchOverrides(launch))
+        return Promise.reject(new Error('实例启动配置无效'));
+      return operation('native_instance_launch_settings', {
+        id,
+        expected,
+        launch,
+      });
+    },
     previewPack: async (bytes) => {
       if (bytes.length > 16 * 1024 * 1024)
         throw new Error('预览文件须小于 16 MB');
