@@ -474,7 +474,9 @@ export function ResourceBrowser({
               </section>
             ) : (
               <p className="notice">
-                此类别的安装需要整合包或目标世界的专用流程，目前可查询元数据。
+                {kind === 'modpack'
+                  ? '在线整合包安装尚未接入。已有 ZIP/MRPACK 可在下方检查，支持的包可新建实例。'
+                  : '此版本暂没有可用的安装路径，请检查兼容条件。'}
               </p>
             )}
           </article>

@@ -34,7 +34,7 @@ npm ci
 - 下载中的五类 Modrinth 内容提供真实搜索、版本与依赖信息。Mod、资源包、光影包可选择目标实例，预览必需依赖与文件后安装；大小、SHA-1/SHA-512 验证后提交，来源记录和事务恢复保护已有文件。只新增或保留同内容文件，不自动替换旧版；Mod 首轮支持已验证的 Fabric 路径，复杂或不明确条件会拒绝。资源包/光影包下载不等于在游戏中启用。
 - 数据包须选择实例及具体世界，校验存档版本、客户端数据包格式与 pack.mcmeta 后提交到该世界 datapacks/，保持 level.dat 不变；存档页可回读文件和进入下载。已验证文件校验与世界隔离，尚未验收游戏内启用和效果。
 - Fabric 稳定版本查询、官方元数据与 Maven 下载、依赖 SHA-1 校验、锁定配置、独立实例和实际启动。不会自动附带 Fabric API 或其他 Mod。
-- ZIP/MRPACK 内容预览：本机读取压缩目录与清单、检查越界/重复路径、大小上限、MRPACK 依赖和哈希字段格式、Modrinth CDN 来源；识别 CurseForge 清单。此阶段不批量下载或安装整合包。
+- 本地 ZIP/MRPACK 先检查内容；有效的原版/Fabric MRPACK 可预览全部文件与可选项，确认后下载、校验并创建独立实例。处理客户端条件及覆盖层级，完成后才原子加入游戏库；失败或中断有记录可恢复，不覆盖已有实例。当前只下载 Modrinth CDN 内容，其他加载器/来源或不明确兼容条件会拒绝；普通 ZIP/CurseForge 清单仅识别。在线整合包详情到归档下载的联动仍待接入。
 - 基础资源仅允许 Mojang/Minecraft 官方域名，Fabric 依赖仅允许其官方元数据/Maven 域名；禁止重定向到其他来源，逐文件 SHA-1 校验成功才提交缓存。
 - 限制并发、连接超时、有限重试、取消、临时文件续传和已校验缓存复用。损坏缓存会重新下载，实例清单只在安装成功后提交。
 - 每个真实实例使用独立的 game/natives 目录；不删除或覆盖用户存档。
@@ -48,7 +48,7 @@ npm ci
 
 离线模式已经实际启动 Minecraft 1.21.1 的 Java 进程并观察到 OpenAL 引擎初始化，结束任务可回收进程。尚未创建世界、操作存档或验证多人游戏。Microsoft 本人授权与正版启动仍未进行端到端验收。
 
-旧式 minecraftArguments、任意继承版本、Forge/NeoForge/Quilt、整合包事务导入、实例文件复制、实例级 Java/内存覆盖、自动下载 Java 的 UI 和第三方插件均未实现。仍按 [UI 设计计划](docs/UI_DESIGN_PLAN.md) 分步推进，不宣称整版已完成。
+旧式 minecraftArguments、任意继承版本、Forge/NeoForge/Quilt、在线整合包一键准备、实例文件复制、实例级 Java/内存覆盖、自动下载 Java 的 UI 和第三方插件均未实现。仍按 [UI 设计计划](docs/UI_DESIGN_PLAN.md) 分步推进，不宣称整版已完成。
 
 ## 使用顺序
 
@@ -97,6 +97,8 @@ node scripts/smoke-native.mjs debug --launch-offline --fabric
 node scripts/smoke-native.mjs debug --cached --resources --install-resources --install-dependencies --install-shader --launch-offline --fabric
 node scripts/smoke-native.mjs debug --cached --resources --install-datapack
 node scripts/smoke-native.mjs debug --cached --native-picker
+powershell -ExecutionPolicy Bypass -File scripts/fetch-modpack-fixture.ps1
+node scripts/smoke-native.mjs debug --cached --public-pack --launch-offline
 ```
 
 安装集成测试会在 `.native/integration` 下载真实官方 1.21.1 资源、验证缓存修复和参数构造，不启动游戏。`-Integration offline` 将 HTTP 路由到不可用的本地代理，验证完整缓存无需联网即可准备离线参数。桌面检查使用该测试目录与临时 WebView2 调试端口，验证窗口、IPC、Java、官方清单、正版模式登录限制和离线配置；加 `--launch-offline` 才会实际启动游戏，观察初始化后结束进程。测试临时修改并还原测试目录的设置，不修改用户 data 目录，不进行 Microsoft 登录。
@@ -121,6 +123,7 @@ src-tauri/src/minecraft.rs 元数据、平台规则、参数与 Java
 src-tauri/src/fabric.rs  Fabric 元数据、Maven 依赖与启动配置
 src-tauri/src/memory.rs  实际内存检测、自动分配与可选工作集整理
 src-tauri/src/packs.rs   ZIP/MRPACK 内容检查（不写入实例）
+src-tauri/src/modpack.rs MRPACK 固定计划、客户端文件、覆盖层级与新实例事务
 src-tauri/src/content.rs 本地内容扫描、启停、导入、截图与目录入口
 src-tauri/src/resources.rs Modrinth 搜索、项目和兼容版本查询
 src-tauri/src/resource_install.rs 固定依赖计划、JAR 条件校验、SHA-512 与事务恢复

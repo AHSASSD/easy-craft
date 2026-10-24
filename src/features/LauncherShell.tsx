@@ -392,8 +392,8 @@ function Shell({ services }: { services: Services }) {
                 >
                   <FolderOpen size={22} />
                   <span>
-                    <strong>整合包内容检查</strong>
-                    <small>ZIP / MRPACK，安装能力逐步接入</small>
+                    <strong>导入整合包</strong>
+                    <small>ZIP / MRPACK，先预览再新建实例</small>
                   </span>
                 </button>
               </div>

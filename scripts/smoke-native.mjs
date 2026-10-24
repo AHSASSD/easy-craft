@@ -45,6 +45,8 @@ child.stderr.on('data', (chunk) => {
 let browser;
 let originalSettings;
 let page;
+let installedPack;
+let launchedGame;
 async function selectNativeFile(button, file) {
   assert.equal(
     profile,
@@ -492,6 +494,96 @@ try {
     }
   }
   await page.getByRole('button', { name: '整合包', exact: true }).click();
+  if (
+    process.argv.includes('--install-pack') ||
+    process.argv.includes('--public-pack')
+  ) {
+    const before = await page.evaluate(() =>
+      window.__TAURI_INTERNALS__.invoke('native_status'),
+    );
+    await page
+      .getByLabel('选择整合包', { exact: true })
+      .setInputFiles(
+        path.join(
+          project,
+          process.argv.includes('--public-pack')
+            ? '.native/fixtures/adrenaline-1.21.1.mrpack'
+            : '.native/fixtures/installable.mrpack',
+        ),
+      );
+    const preview = page.getByLabel('整合包安装变更预览');
+    await preview.waitFor();
+    const name = `EC MRPACK ${randomUUID().slice(0, 8)}`;
+    await page.getByLabel('整合包新实例名称').fill(name);
+    await preview.screenshot({
+      path: path.join(project, 'output/playwright/modpack-plan.png'),
+    });
+    await page
+      .getByRole('button', { name: '确认变更并安装整合包', exact: true })
+      .click();
+    await page
+      .getByText('整合包安装任务已开始，请查看底部任务状态。', { exact: true })
+      .waitFor();
+    let result;
+    for (let attempt = 0; attempt < 180; attempt++) {
+      result = await page.evaluate(() =>
+        window.__TAURI_INTERNALS__.invoke('native_status'),
+      );
+      assert(
+        !['failed', 'cancelled'].includes(result.task.status),
+        `${result.task.message}\n${result.task.logs.join('\n')}`,
+      );
+      installedPack = result.instances.find(
+        (instance) => instance.name === name,
+      );
+      if (installedPack && result.task.status === 'succeeded') break;
+      await new Promise((resolve) => setTimeout(resolve, 500));
+    }
+    assert(
+      installedPack && result.task.status === 'succeeded',
+      'MRPACK task did not complete',
+    );
+    assert.equal(result.instances.length, before.instances.length + 1);
+    assert.deepEqual(
+      result.instances.filter((instance) => instance.id !== installedPack.id),
+      before.instances,
+    );
+    const game = path.join(
+      result.dataRoot,
+      'instances',
+      installedPack.id,
+      'game',
+    );
+    if (!process.argv.includes('--public-pack')) {
+      assert.equal(
+        await readFile(path.join(game, 'config/example.json'), 'utf8'),
+        'client',
+      );
+      assert.equal(
+        await readFile(path.join(game, 'options.txt'), 'utf8'),
+        'soundCategory_master:0.5\n',
+      );
+    } else {
+      assert.equal(installedPack.fabricVersion, '0.19.5');
+      assert.equal(installedPack.version, '1.21.1');
+    }
+    const origin = JSON.parse(
+      await readFile(path.join(game, '.easycraft-pack.json'), 'utf8'),
+    );
+    for (const file of origin.files)
+      assert.equal(
+        createHash('sha512')
+          .update(await readFile(path.join(game, file.path)))
+          .digest('hex'),
+        file.sha512,
+      );
+    assert(
+      !before.instances.some((instance) => instance.id === installedPack.id),
+    );
+    console.log(
+      'PASS: MRPACK created a new real instance, applied overrides, verified every stored file hash and preserved the prior instance catalog.',
+    );
+  }
   if (process.argv.includes('--native-picker')) {
     const picker = page.getByRole('button', { name: /从电脑选择 ZIP/ });
     await selectNativeFile(picker);
@@ -935,12 +1027,17 @@ try {
       .getByRole('navigation')
       .getByRole('button', { name: '游戏库', exact: true })
       .click();
-    const chosen = process.argv.includes('--fabric')
+    const chosen = installedPack
       ? page
           .locator('.library-instance')
-          .filter({ hasText: 'Fabric 0.16.14' })
+          .filter({ hasText: installedPack.name })
           .first()
-      : page.locator('.library-instance').first();
+      : process.argv.includes('--fabric')
+        ? page
+            .locator('.library-instance')
+            .filter({ hasText: 'Fabric 0.16.14' })
+            .first()
+        : page.locator('.library-instance').first();
     await chosen.click();
     await page.getByRole('tab', { name: '实例详情', exact: true }).click();
     await page.locator('.page-content').evaluate((element) => {
@@ -955,9 +1052,23 @@ try {
     });
     await launchButton.click();
     let rendered = false;
+    let sawMemoryAllocation = false;
     for (let attempt = 0; attempt < 120; attempt++) {
       const state = await page.evaluate(() =>
         window.__TAURI_INTERNALS__.invoke('native_status'),
+      );
+      if (state.task.pid && installedPack)
+        launchedGame = {
+          pid: state.task.pid,
+          directory: path.join(
+            state.dataRoot,
+            'instances',
+            installedPack.id,
+            'game',
+          ),
+        };
+      sawMemoryAllocation ||= state.task.logs.some((line) =>
+        line.includes('本次游戏最大堆内存'),
       );
       assert.notEqual(
         state.task.status,
@@ -969,9 +1080,32 @@ try {
         state.task.logs.some((line) => line.includes('OpenAL initialized'))
       ) {
         assert(
-          state.task.logs.some((line) => line.includes('本次游戏最大堆内存')),
+          sawMemoryAllocation,
+          'The launch must report its actual heap allocation before startup',
         );
-        if (process.argv.includes('--fabric'))
+        const launchLog = installedPack
+          ? await readFile(
+              path.join(
+                state.dataRoot,
+                'instances',
+                installedPack.id,
+                'game/logs/latest.log',
+              ),
+              'utf8',
+            )
+          : state.task.logs.join('\n');
+        if (installedPack?.fabricVersion)
+          assert(
+            launchLog.includes(
+              `with Fabric Loader ${installedPack.fabricVersion}`,
+            ),
+          );
+        if (process.argv.includes('--public-pack'))
+          assert(
+            launchLog.includes('ferritecore'),
+            'Published pack mods must appear in the actual game log',
+          );
+        if (process.argv.includes('--fabric') && !installedPack)
           assert(
             state.task.logs.some((line) =>
               line.includes('with Fabric Loader 0.16.14'),
@@ -1019,10 +1153,18 @@ try {
     await page
       .getByRole('button', { name: '结束游戏进程', exact: true })
       .click();
-    await page.waitForFunction(
-      async () =>
-        (await window.__TAURI_INTERNALS__.invoke('native_status')).task
-          .status === 'cancelled',
+    let stopped;
+    for (let attempt = 0; attempt < 300; attempt++) {
+      stopped = await page.evaluate(() =>
+        window.__TAURI_INTERNALS__.invoke('native_status'),
+      );
+      if (stopped.task.status === 'cancelled' && stopped.task.pid === null)
+        break;
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    assert(
+      stopped.task.status === 'cancelled' && stopped.task.pid === null,
+      `Game stop did not finish: ${stopped.task.message}`,
     );
     await page.getByRole('button', { name: '关闭弹窗', exact: true }).click();
   }
@@ -1088,6 +1230,42 @@ try {
       }, originalSettings)
       .catch(() => {});
   }
-  await browser?.close().catch(() => {});
-  if (child.exitCode === null) child.kill();
+  try {
+    if (launchedGame)
+      await new Promise((resolve, reject) => {
+        const cleanup = spawn(
+          'powershell.exe',
+          [
+            '-NoProfile',
+            '-ExecutionPolicy',
+            'Bypass',
+            '-File',
+            path.join(project, 'scripts/stop-native-test-processes.ps1'),
+            '-GameProcessId',
+            String(launchedGame.pid),
+            '-GameDirectory',
+            launchedGame.directory,
+          ],
+          { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] },
+        );
+        let output = '';
+        cleanup.stdout.on(
+          'data',
+          (chunk) => (output = (output + chunk).slice(-8000)),
+        );
+        cleanup.stderr.on(
+          'data',
+          (chunk) => (output = (output + chunk).slice(-8000)),
+        );
+        cleanup.once('error', reject);
+        cleanup.once('exit', (code) =>
+          code === 0 ? resolve() : reject(new Error(output)),
+        );
+      });
+  } finally {
+    await browser?.close().catch(() => {});
+    if (child.exitCode === null) child.kill();
+    child.stdout.destroy();
+    child.stderr.destroy();
+  }
 }

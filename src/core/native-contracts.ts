@@ -141,6 +141,22 @@ export type PackPreview = {
   dependencies: string[];
   paths: string[];
   warnings: string[];
+  install?: PackInstallPlan;
+};
+export type PackInstallPlan = {
+  token: string;
+  name: string;
+  packVersion: string;
+  gameVersion: string;
+  fabricVersion: string;
+  archiveSha512: string;
+  files: {
+    path: string;
+    size: number;
+    sha512: string;
+    optional: boolean;
+    source: 'download' | 'override' | 'client-override';
+  }[];
 };
 export type MemoryInfo = {
   totalMb: number;
@@ -202,6 +218,7 @@ export interface NativeService extends Observable<NativeSnapshot> {
   versions(): Promise<string[]>;
   previewPack(bytes: number[]): Promise<PackPreview>;
   pickPack(): Promise<PackPreview | null>;
+  installPack(token: string, name: string, selected: string[]): Promise<void>;
   fabricVersions(version: string): Promise<string[]>;
   saveSettings(settings: NativeSettings): Promise<void>;
   probeJava(path: string): Promise<JavaInfo>;

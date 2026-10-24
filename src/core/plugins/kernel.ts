@@ -275,6 +275,7 @@ export class PluginManager {
             'versions',
             'previewPack',
             'pickPack',
+            'installPack',
             'fabricVersions',
             'saveSettings',
             'probeJava',

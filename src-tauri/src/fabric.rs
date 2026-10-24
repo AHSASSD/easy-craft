@@ -188,3 +188,43 @@ pub async fn prepare(
     }
     Ok(())
 }
+pub(crate) fn loader_archive(
+    root: &std::path::Path,
+    instance: &Instance,
+) -> Result<Option<std::path::PathBuf>> {
+    if instance.fabric_version.is_empty() {
+        return Ok(None);
+    }
+    let profile = model::safe_path(
+        root,
+        &format!("loaders/fabric/{}.json", instance.fabric_sha1),
+    )?;
+    if std::fs::metadata(&profile)
+        .map_err(|_| "无法读取加载器锁定配置")?
+        .len()
+        > 8 * 1024 * 1024
+        || !net::matches(&profile, &instance.fabric_sha1, None)?
+    {
+        return Err("加载器锁定配置校验失败".into());
+    }
+    let value: Value =
+        serde_json::from_reader(std::fs::File::open(profile).map_err(|_| "无法读取加载器配置")?)
+            .map_err(|_| "加载器配置格式无效")?;
+    validate_profile(&value, &instance.version, &instance.fabric_version)?;
+    let name = format!("net.fabricmc:fabric-loader:{}", instance.fabric_version);
+    let library = value["libraries"]
+        .as_array()
+        .ok_or("缺少加载器依赖")?
+        .iter()
+        .find(|entry| entry["name"] == name)
+        .ok_or("缺少加载器自身归档")?;
+    let path = model::safe_path(root, &format!("libraries/{}", maven_path(&name)?))?;
+    if !net::matches(
+        &path,
+        library["sha1"].as_str().ok_or("缺少加载器固定哈希")?,
+        library["size"].as_u64(),
+    )? {
+        return Err("加载器归档校验失败，请修复后再安装模组".into());
+    }
+    Ok(Some(path))
+}

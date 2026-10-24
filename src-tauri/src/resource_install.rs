@@ -67,6 +67,8 @@ pub struct Plan {
     java_major: u32,
     #[serde(skip)]
     fabric_version: String,
+    #[serde(skip)]
+    bundled: Vec<Value>,
 }
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -512,6 +514,11 @@ pub async fn prepare(
         java_path,
         java_major,
         fabric_version: instance.fabric_version.clone(),
+        bundled: if kind == Kind::Mod {
+            bundled_metadata(&host.root, &instance)?
+        } else {
+            vec![]
+        },
     })
 }
 pub async fn download(
@@ -562,11 +569,16 @@ pub async fn download(
     }
     Ok(paths)
 }
-fn file_identity(path: &Path) -> Result<(u32, u32, u32)> {
+pub(crate) fn file_identity(path: &Path) -> Result<(u32, u32, u32)> {
+    use std::os::windows::fs::OpenOptionsExt;
     use windows_sys::Win32::Storage::FileSystem::{
         GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION,
     };
-    let file = fs::File::open(path).map_err(|_| "无法读取事务文件标识")?;
+    let file = fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(windows_sys::Win32::Storage::FileSystem::FILE_FLAG_BACKUP_SEMANTICS)
+        .open(path)
+        .map_err(|_| "无法读取事务文件标识")?;
     let mut info: BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
     if unsafe { GetFileInformationByHandle(file.as_raw_handle(), &mut info) } == 0 {
         return Err("无法核对事务文件身份".into());
@@ -701,7 +713,78 @@ fn mod_metadata<R: Read + std::io::Seek>(
     Ok(())
 }
 fn validate_mods(root: &Path, instance: &Instance, plan: &Plan, paths: &[PathBuf]) -> Result<()> {
-    let mut metadata = vec![];
+    validate_mod_files(
+        root,
+        instance,
+        plan.java_major,
+        &plan.files,
+        paths,
+        &plan.bundled,
+    )
+}
+fn bundled_metadata(cache: &Path, instance: &Instance) -> Result<Vec<Value>> {
+    let Some(path) = crate::fabric::loader_archive(cache, instance)? else {
+        return Ok(vec![]);
+    };
+    let mut values = vec![];
+    mod_metadata(
+        fs::File::open(path).map_err(|_| "无法读取加载器归档")?,
+        &mut values,
+        0,
+        &mut 0,
+    )?;
+    let root = values.pop().ok_or("加载器缺少元数据")?;
+    if root.value["id"] != "fabricloader" || root.value["version"] != instance.fabric_version {
+        return Err("加载器自身元数据不匹配".into());
+    }
+    Ok(values.into_iter().map(|metadata| metadata.value).collect())
+}
+pub(crate) fn validate_pack_mods(cache: &Path, root: &Path, instance: &Instance) -> Result<()> {
+    let directory = model::safe_path(root, "mods")?;
+    if directory.exists() {
+        for entry in fs::read_dir(directory).map_err(|_| "无法读取整合包模组")? {
+            let entry = entry.map_err(|_| "无法读取模组文件")?;
+            let name = entry
+                .file_name()
+                .into_string()
+                .map_err(|_| "模组文件名无效")?;
+            if !name.to_ascii_lowercase().ends_with(".jar") {
+                continue;
+            }
+            if instance.fabric_version.is_empty() {
+                return Err("整合包包含模组 JAR，但未声明已支持的 Fabric 加载器".into());
+            }
+            let file = model::safe_path(root, &format!("mods/{name}"))?;
+            crate::packs::preview_reader(fs::File::open(&file).map_err(|_| "无法读取模组")?)?;
+            let mut zip = zip::ZipArchive::new(fs::File::open(file).map_err(|_| "无法读取模组")?)
+                .map_err(|_| "模组不是有效 JAR")?;
+            content::validate_archive(content::Kind::Mods, &mut zip)?;
+        }
+    }
+    validate_mod_files(
+        root,
+        instance,
+        instance.java_major,
+        &[],
+        &[],
+        &bundled_metadata(cache, instance)?,
+    )
+}
+fn validate_mod_files(
+    root: &Path,
+    instance: &Instance,
+    java_major: u32,
+    replacing: &[Entry],
+    paths: &[PathBuf],
+    bundled: &[Value],
+) -> Result<()> {
+    let mut metadata: Vec<_> = bundled
+        .iter()
+        .map(|value| ModMetadata {
+            value: value.clone(),
+            nested: true,
+        })
+        .collect();
     let mut expanded = 0;
     let directory = model::safe_path(root, "mods")?;
     if directory.exists() {
@@ -712,7 +795,7 @@ fn validate_mods(root: &Path, instance: &Instance, plan: &Plan, paths: &[PathBuf
                 .into_string()
                 .map_err(|_| "模组文件名无效")?;
             if !filename.to_ascii_lowercase().ends_with(".jar")
-                || plan.files.iter().any(|file| {
+                || replacing.iter().any(|file| {
                     file.record
                         .path
                         .eq_ignore_ascii_case(&format!("mods/{filename}"))
@@ -762,6 +845,61 @@ fn validate_mods(root: &Path, instance: &Instance, plan: &Plan, paths: &[PathBuf
         if roots.len() > 1 {
             return Err(format!("模组 ID 重复：{id}，未安装"));
         }
+        if roots.is_empty() {
+            let core = [
+                ("minecraft", instance.version.clone()),
+                ("fabricloader", instance.fabric_version.clone()),
+                ("java", java_major.to_string()),
+            ];
+            let mut possible = Vec::new();
+            for index in group {
+                let value = &metadata[index].value;
+                let leaf = value
+                    .get("jars")
+                    .and_then(Value::as_array)
+                    .is_none_or(Vec::is_empty);
+                let mut compatible =
+                    value.get("environment").and_then(Value::as_str) != Some("server");
+                for (field, required) in [("depends", true), ("breaks", false)] {
+                    if let Some(conditions) = value.get(field) {
+                        let conditions = conditions.as_object().ok_or("模组依赖条件无效")?;
+                        for (id, version) in &core {
+                            if let Some(condition) = conditions.get(*id) {
+                                if satisfies(version, condition)? != required {
+                                    compatible = false;
+                                }
+                            }
+                        }
+                    }
+                }
+                // Fabric's IF_POSSIBLE leaves may be absent; a parent's required dependency still fails below.
+                if !leaf || compatible {
+                    possible.push(index);
+                }
+            }
+            group = possible;
+            if group.is_empty() {
+                continue;
+            }
+            let mut distinct = Vec::new();
+            group.retain(|index| {
+                let value = &metadata[*index].value;
+                let leaf = value
+                    .get("jars")
+                    .and_then(Value::as_array)
+                    .is_none_or(Vec::is_empty);
+                if leaf
+                    && distinct
+                        .iter()
+                        .any(|previous: &usize| metadata[*previous].value == *value)
+                {
+                    false
+                } else {
+                    distinct.push(*index);
+                    true
+                }
+            });
+        }
         // shortcut: ambiguous nested parents with their own children need Fabric's full dependency solver.
         if group.len() > 1
             && group.iter().any(|i| {
@@ -807,7 +945,7 @@ fn validate_mods(root: &Path, instance: &Instance, plan: &Plan, paths: &[PathBuf
                 &metadata[index].value
             })
             .collect();
-        match check_mod_constraints(instance, plan, &chosen, &mut evaluated) {
+        match check_mod_constraints(instance, java_major, &chosen, &mut evaluated) {
             Ok(()) => return Ok(()),
             Err(error) => last_error = error,
         }
@@ -819,14 +957,14 @@ fn validate_mods(root: &Path, instance: &Instance, plan: &Plan, paths: &[PathBuf
 }
 fn check_mod_constraints(
     instance: &Instance,
-    plan: &Plan,
+    java_major: u32,
     metadata: &[&Value],
     evaluated: &mut usize,
 ) -> Result<()> {
     let mut versions = BTreeMap::from([
         ("minecraft".to_string(), instance.version.clone()),
         ("fabricloader".into(), instance.fabric_version.clone()),
-        ("java".into(), plan.java_major.to_string()),
+        ("java".into(), java_major.to_string()),
     ]);
     for info in metadata {
         let id = resources::text(info, "id", 128)?;
@@ -1315,6 +1453,7 @@ mod tests {
             java_path: "fixture".into(),
             java_major: 21,
             fabric_version: instance.fabric_version.clone(),
+            bundled: vec![],
         }
     }
     fn journal(root: &Path, entry: Record) -> (Journal, PathBuf) {
@@ -1512,6 +1651,120 @@ mod tests {
         let mut plan = plan(&root, &instance, entry("mods/one.jar", &first), Kind::Mod);
         plan.files.push(entry("mods/two.jar", &second));
         validate_mods(&root, &instance, &plan, &[first, second]).unwrap();
+    }
+    #[test]
+    fn repeated_identical_nested_leaves_do_not_expand_the_candidate_product() {
+        fn parent(id: &str) -> Vec<u8> {
+            let mut zip = zip::ZipWriter::new(Cursor::new(vec![]));
+            let options = zip::write::SimpleFileOptions::default();
+            let jars: Vec<_> = (0..14)
+                .map(|index| json!({"file":format!("leaf{index}.jar")}))
+                .collect();
+            zip.start_file("fabric.mod.json", options).unwrap();
+            zip.write_all(
+                &serde_json::to_vec(&json!({"id":id,"version":"1.0.0","jars":jars})).unwrap(),
+            )
+            .unwrap();
+            for index in 0..14 {
+                zip.start_file(format!("leaf{index}.jar"), options).unwrap();
+                zip.write_all(&jar(
+                    json!({"id":format!("leaf{index}"),"version":"1.0.0"}),
+                    None,
+                ))
+                .unwrap();
+            }
+            zip.finish().unwrap().into_inner()
+        }
+        let root = root();
+        let instance = instance();
+        let first = root.join("one.jar");
+        let second = root.join("two.jar");
+        fs::write(&first, parent("one")).unwrap();
+        fs::write(&second, parent("two")).unwrap();
+        let mut plan = plan(&root, &instance, entry("mods/one.jar", &first), Kind::Mod);
+        plan.files.push(entry("mods/two.jar", &second));
+        validate_mods(&root, &instance, &plan, &[first, second]).unwrap();
+        fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn core_incompatible_optional_nested_leaf_is_absent_but_required_or_root_mod_is_rejected() {
+        let root = root();
+        let instance = instance();
+        let source = root.join("one.jar");
+        let child = jar(
+            json!({"id":"java25only","version":"1.0.0","depends":{"java":">=25"}}),
+            None,
+        );
+        let parent = json!({"id":"parent","version":"1.0.0","jars":[{"file":"nested.jar"}]});
+        fs::write(&source, jar(parent.clone(), Some(child.clone()))).unwrap();
+        let plan = plan(&root, &instance, entry("mods/one.jar", &source), Kind::Mod);
+        validate_mods(&root, &instance, &plan, std::slice::from_ref(&source)).unwrap();
+        let mut required = parent;
+        required["depends"] = json!({"java25only":"*"});
+        fs::write(&source, jar(required, Some(child.clone()))).unwrap();
+        assert!(
+            validate_mods(&root, &instance, &plan, std::slice::from_ref(&source))
+                .unwrap_err()
+                .contains("java25only")
+        );
+        fs::write(&source, child).unwrap();
+        assert!(
+            validate_mods(&root, &instance, &plan, std::slice::from_ref(&source))
+                .unwrap_err()
+                .contains("java")
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn loader_bundled_mods_require_both_locked_profile_and_library_hashes() {
+        use sha1::Digest as _;
+        let root = root();
+        let mut instance = instance();
+        let bytes = jar(
+            json!({"id":"fabricloader","version":instance.fabric_version,"jars":[{"file":"nested.jar"}]}),
+            Some(jar(json!({"id":"mixinextras","version":"0.5.5"}), None)),
+        );
+        let name = format!("net.fabricmc:fabric-loader:{}", instance.fabric_version);
+        let library_path = format!("libraries/{}", crate::fabric::maven_path(&name).unwrap());
+        model::write_file(&root, &library_path, &bytes).unwrap();
+        let hash = |bytes: &[u8]| {
+            sha1::Sha1::digest(bytes)
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>()
+        };
+        let profile = json!({"id":format!("fabric-loader-{}-{}",instance.fabric_version,instance.version),"inheritsFrom":instance.version,"mainClass":"net.fabricmc.loader.impl.launch.knot.KnotClient","libraries":[{"name":name,"url":"https://maven.fabricmc.net/","sha1":hash(&bytes)}]});
+        let encoded = serde_json::to_vec(&profile).unwrap();
+        instance.fabric_sha1 = hash(&encoded);
+        model::write_file(
+            &root,
+            &format!("loaders/fabric/{}.json", instance.fabric_sha1),
+            &encoded,
+        )
+        .unwrap();
+        let values = bundled_metadata(&root, &instance).unwrap();
+        assert_eq!(values.len(), 1);
+        assert_eq!(values[0]["id"], "mixinextras");
+        let required = root.join("required.jar");
+        fs::write(
+            &required,
+            jar(
+                json!({"id":"required","version":"1.0.0","depends":{"mixinextras":">=0.3.2"}}),
+                None,
+            ),
+        )
+        .unwrap();
+        let mut plan = plan(
+            &root,
+            &instance,
+            entry("mods/required.jar", &required),
+            Kind::Mod,
+        );
+        plan.bundled = values;
+        validate_mods(&root, &instance, &plan, &[required]).unwrap();
+        model::write_file(&root, &library_path, b"tampered").unwrap();
+        assert!(bundled_metadata(&root, &instance).is_err());
+        fs::remove_dir_all(root).unwrap();
     }
     #[tokio::test]
     async fn dependency_graph_rejects_cycles_ambiguous_required_and_cross_version() {

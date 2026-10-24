@@ -27,13 +27,14 @@ function packPreview(value: unknown): PackPreview {
   if (
     !isRecord(value) ||
     !bounded(value.kind, 64) ||
-    !bounded(value.name, 100) ||
+    !bounded(value.name, 200) ||
     !integer(value.files) ||
     value.files > 10000 ||
     !integer(value.expandedBytes) ||
     value.expandedBytes > 1024 * 1024 * 1024 ||
     !integer(value.downloads) ||
     value.downloads > 10000 ||
+    (value.install !== undefined && !validPackPlan(value.install)) ||
     ![value.dependencies, value.paths, value.warnings].every(
       (items: unknown) =>
         Array.isArray(items) &&
@@ -43,6 +44,62 @@ function packPreview(value: unknown): PackPreview {
   )
     throw new Error('整合包预览响应无效');
   return value as PackPreview;
+}
+function validPackPlan(value: unknown): boolean {
+  if (
+    !isRecord(value) ||
+    !string(value.token) ||
+    !/^[a-f0-9-]{36}$/.test(value.token) ||
+    !bounded(value.name, 200) ||
+    !bounded(value.packVersion, 256) ||
+    !string(value.gameVersion) ||
+    !/^[A-Za-z0-9._-]{1,99}$/.test(value.gameVersion) ||
+    !bounded(value.fabricVersion, 100) ||
+    !string(value.archiveSha512) ||
+    !/^[a-f0-9]{128}$/.test(value.archiveSha512) ||
+    !Array.isArray(value.files) ||
+    value.files.length > 10000
+  )
+    return false;
+  const paths = new Set<string>();
+  let total = 0;
+  let optional = 0;
+  return value.files.every((file: unknown) => {
+    if (
+      !isRecord(file) ||
+      !bounded(file.path, 512) ||
+      file.path.includes('\\') ||
+      file.path
+        .split('/')
+        .some(
+          (part) =>
+            !part ||
+            part === '.' ||
+            part === '..' ||
+            /[:<>"|?*]/.test(part) ||
+            Array.from(part).some(
+              (character) => character.charCodeAt(0) < 32,
+            ) ||
+            part.toLowerCase().startsWith('.easycraft') ||
+            part.toLowerCase() === 'session.lock',
+        ) ||
+      !integer(file.size) ||
+      file.size > 512 * 1024 * 1024 ||
+      !string(file.sha512) ||
+      !/^[a-f0-9]{128}$/.test(file.sha512) ||
+      typeof file.optional !== 'boolean' ||
+      !['download', 'override', 'client-override'].includes(
+        file.source as string,
+      )
+    )
+      return false;
+    const key = file.path.toLowerCase();
+    if (paths.has(key)) return false;
+    paths.add(key);
+    total += file.size;
+    if (file.optional) optional++;
+    return total <= 1024 * 1024 * 1024 && optional <= 200;
+  });
 }
 function contentEntries(value: unknown): ContentEntry[] {
   if (
@@ -542,6 +599,8 @@ export function createNativeService(
       const value = await request('native_pack_pick');
       return value === null ? null : packPreview(value);
     },
+    installPack: (token, name, selected) =>
+      operation('native_pack_install', { token, name, selected }),
     optimizeMemory: async (system = false) => {
       const value = await request('native_memory_optimize', { system });
       if (!validMemory(value)) throw new Error('内存检测响应无效');

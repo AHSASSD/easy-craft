@@ -27,6 +27,7 @@ struct Inner {
     auth_cancel: Option<CancellationToken>,
     auth_busy: bool,
     resource_plan: Option<crate::resource_install::Plan>,
+    pack_plan: Option<crate::modpack::Plan>,
 }
 pub struct Host {
     _lock: fs::File,
@@ -90,6 +91,7 @@ impl Host {
             return Err("实例清单无效，原文件保留".into());
         }
         let account = auth::load(&root)?;
+        let recovery = crate::modpack::recover(&root, &instances)?;
         Ok(Arc::new(Self {
             _lock: lock,
             root,
@@ -99,12 +101,34 @@ impl Host {
                 instances,
                 account,
                 session: None,
-                task: Task::default(),
+                task: Task {
+                    status: if recovery.is_empty() {
+                        "idle"
+                    } else {
+                        "failed"
+                    }
+                    .into(),
+                    phase: if recovery.is_empty() {
+                        ""
+                    } else {
+                        "pack-recovery"
+                    }
+                    .into(),
+                    message: if recovery.is_empty() {
+                        ""
+                    } else {
+                        "有未自动恢复的整合包数据，请查看任务日志；不确定内容已保留。"
+                    }
+                    .into(),
+                    logs: recovery,
+                    ..Task::default()
+                },
                 cancel: None,
                 login: None,
                 auth_cancel: None,
                 auth_busy: false,
                 resource_plan: None,
+                pack_plan: None,
             }),
         }))
     }
@@ -242,7 +266,7 @@ impl Host {
     }
     pub fn cancel(&self) {
         let inner = self.inner.lock().expect("host state poisoned");
-        if inner.task.phase == "resources-committed" {
+        if ["resources-committed", "pack-committed"].contains(&inner.task.phase.as_str()) {
             return;
         }
         if let Some(cancel) = &inner.cancel {
@@ -329,6 +353,88 @@ impl Host {
     pub fn start_install(self: &Arc<Self>, version: String, name: String) -> Result<()> {
         self.start_install_inner(version, name, None)
     }
+    pub fn pack_preview(
+        &self,
+        preview: crate::packs::PackPreview,
+    ) -> Result<crate::packs::PackPreview> {
+        let mut inner = self.inner.lock().map_err(|_| "宿主状态不可用")?;
+        if inner.cancel.is_some() {
+            return Err("请先结束当前任务，再检查整合包".into());
+        }
+        inner.pack_plan = preview.install.clone();
+        Ok(preview)
+    }
+    pub fn start_pack(
+        self: &Arc<Self>,
+        token: String,
+        name: String,
+        selected: Vec<String>,
+    ) -> Result<()> {
+        if name.trim().is_empty() || name.chars().count() > 60 || name.chars().any(char::is_control)
+        {
+            return Err("实例名称须为 1–60 个可见字符".into());
+        }
+        let plan = {
+            let mut inner = self.inner.lock().map_err(|_| "宿主状态不可用")?;
+            if inner.cancel.is_some() || inner.auth_cancel.is_some() {
+                return Err("请先结束当前任务或登录".into());
+            }
+            let plan = inner
+                .pack_plan
+                .as_ref()
+                .filter(|plan| plan.token == token)
+                .ok_or("整合包计划无效或已被替换，请重新检查")?;
+            crate::modpack::check_selection(plan, &selected)?;
+            inner.pack_plan.take().ok_or("整合包计划不可用")?
+        };
+        let cancel = self.begin_task("准备整合包新实例")?;
+        let host = self.clone();
+        tauri::async_runtime::spawn(async move {
+            let mut transaction = None;
+            let result = async {
+                let (instance, _) = host
+                    .prepare_instance(
+                        plan.game_version.clone(),
+                        name,
+                        if plan.fabric_version.is_empty() {
+                            None
+                        } else {
+                            Some(plan.fabric_version.clone())
+                        },
+                        &cancel,
+                    )
+                    .await?;
+                transaction = Some(crate::modpack::begin(&host.root, &plan, instance)?);
+                let transaction = transaction.as_mut().ok_or("整合包事务不可用")?;
+                crate::modpack::stage(&host, &plan, transaction, &selected, &cancel).await?;
+                let mut inner = host.inner.lock().map_err(|_| "宿主状态不可用")?;
+                inner.instances =
+                    crate::modpack::publish(&host.root, transaction, &inner.instances, &cancel)?;
+                inner.task.phase = "pack-committed".into();
+                inner.task.completed = plan.files.len();
+                inner.task.total = plan.files.len();
+                Ok(())
+            }
+            .await;
+            let result = if let Err(error) = result {
+                let cleanup = transaction
+                    .as_ref()
+                    .map(|transaction| crate::modpack::rollback(&host.root, transaction))
+                    .transpose();
+                Err(match cleanup {
+                    Ok(_) => error,
+                    Err(cleanup) => format!("{error}；暂存数据已保留：{cleanup}"),
+                })
+            } else {
+                Ok(())
+            };
+            if let Err(error) = &result {
+                host.log(error, &[]);
+            }
+            host.finish(result, &cancel);
+        });
+        Ok(())
+    }
     pub fn start_install_fabric(
         self: &Arc<Self>,
         version: String,
@@ -357,13 +463,13 @@ impl Host {
         });
         Ok(())
     }
-    async fn install(
+    async fn prepare_instance(
         &self,
         version: String,
         name: String,
         loader: Option<String>,
         cancel: &CancellationToken,
-    ) -> Result<()> {
+    ) -> Result<(Instance, minecraft::Prepared)> {
         let entry = minecraft::versions(self, cancel)
             .await?
             .into_iter()
@@ -388,6 +494,16 @@ impl Host {
             fabric_version: loader.unwrap_or_default(),
             fabric_sha1,
         };
+        Ok((instance, prepared))
+    }
+    async fn install(
+        &self,
+        version: String,
+        name: String,
+        loader: Option<String>,
+        cancel: &CancellationToken,
+    ) -> Result<()> {
+        let (instance, prepared) = self.prepare_instance(version, name, loader, cancel).await?;
         minecraft::extract_natives(
             &prepared.native_archives,
             &self.root,

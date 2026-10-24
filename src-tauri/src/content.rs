@@ -182,14 +182,17 @@ pub fn toggle(root: &Path, file: &str, expected: &str, enabled: bool) -> Result<
     let new = file_path(root, Kind::Mods, &target)?;
     move_no_replace(&old, &new)
 }
-fn move_no_replace(old: &Path, new: &Path) -> Result<()> {
+pub(crate) fn move_no_replace(old: &Path, new: &Path) -> Result<()> {
     let from: Vec<u16> = old.as_os_str().encode_wide().chain(Some(0)).collect();
     let to: Vec<u16> = new.as_os_str().encode_wide().chain(Some(0)).collect();
     // MoveFileW refuses to overwrite an existing destination, including a racing external writer.
     if unsafe { windows_sys::Win32::Storage::FileSystem::MoveFileW(from.as_ptr(), to.as_ptr()) }
         == 0
     {
-        return Err("无法提交文件：目标已存在或文件被占用，原文件保留".into());
+        return Err(format!(
+            "无法提交文件：目标已存在或文件被占用，原文件保留（{}）",
+            std::io::Error::last_os_error()
+        ));
     }
     Ok(())
 }
@@ -441,6 +444,30 @@ pub fn open(root: &Path, kind: Option<Kind>) -> Result<()> {
 mod tests {
     use super::*;
     use std::io::Write;
+    #[test]
+    fn no_overwrite_move_refuses_an_open_directory_and_preserves_existing_target() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let root = root();
+        let old = root.join("old");
+        let new = root.join("new");
+        fs::create_dir(&old).unwrap();
+        fs::write(old.join("resource.jar"), b"fixture").unwrap();
+        let input = fs::OpenOptions::new()
+            .read(true)
+            .share_mode(windows_sys::Win32::Storage::FileSystem::FILE_SHARE_READ)
+            .open(old.join("resource.jar"))
+            .unwrap();
+        assert!(move_no_replace(&old, &new).is_err());
+        assert!(!new.exists());
+        drop(input);
+        move_no_replace(&old, &new).unwrap();
+        assert_eq!(fs::read(new.join("resource.jar")).unwrap(), b"fixture");
+        fs::create_dir(&old).unwrap();
+        assert!(move_no_replace(&old, &new).is_err());
+        assert!(old.exists());
+        assert!(new.join("resource.jar").exists());
+        fs::remove_dir_all(root).unwrap();
+    }
     #[test]
     fn streamed_file_import_exceeds_ipc_limit_and_cleans_failed_staging() {
         let root = root();

@@ -71,3 +71,11 @@
 后续实施已完成 Mod/资源包/光影的真实下载、校验和部分 Mod 启动验证，实际记录见 [IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md)。本笔记前述“未下载”描述是调研时点，不是当前实现状态。`.mrpack` 最新格式规范旧地址返回 404，本笔记不以其为依据设计完整整合包安装器。
 
 共享内置库与版本范围校验另参照 Fabric 官方的 [Nested JARs](https://docs.fabricmc.net/develop/loader/#nested-jars) 和 [fabric.mod.json 依赖规则](https://docs.fabricmc.net/develop/loader/fabric-mod-json#dependency-resolution)：不能把所有嵌套同名候选一律视为顶层重复 Mod；空预发布范围和忽略构建元数据的比较也需要单独处理。Easy Craft 当前实现有明确边界，不等同于 Fabric 的完整依赖求解器。
+
+## 2026-10-25：MRPACK 实施依据与公开样本
+
+本轮重新核验了可访问的 [Modrinth 官方 MRPACK 规范](https://support.modrinth.com/en/articles/8802351-modrinth-modpack-format-mrpack)，不继续沿用失效旧地址。当前实现处理客户端 required/optional/unsupported、SHA-1/SHA-512、运行依赖、通用与客户端覆盖层级；服务器覆盖不用于客户端。Easy Craft 当前下载白名单只接受 Modrinth CDN，其他规范允许的托管来源仍明确拒绝，未宣称支持全部生态。
+
+实际固定测试 [Adrenaline 版本 5SA4P3Eo](https://api.modrinth.com/v2/version/5SA4P3Eo)：项目 BYN9yKrV，版本 26.5.1+mc1.21.1.fabric，归档 7198 字节，内部声明 Minecraft 1.21.1 / Fabric Loader 0.19.5。获取脚本核对固定 SHA-512 与 API 返回的 SHA-1/大小，再写入 .native/fixtures；归档安装后在独立实例验证实际文件和游戏日志，详见实施记录。
+
+内置库行为额外核对 Fabric Loader 0.19.5 的 [ModLoadCondition](https://raw.githubusercontent.com/FabricMC/fabric-loader/0.19.5/src/main/java/net/fabricmc/loader/impl/discovery/ModLoadCondition.java) 与 [ModCandidateImpl](https://raw.githubusercontent.com/FabricMC/fabric-loader/0.19.5/src/main/java/net/fabricmc/loader/impl/discovery/ModCandidateImpl.java)：顶层为 ALWAYS，嵌套默认 IF_POSSIBLE。当前只裁剪明确不满足核心环境的嵌套叶节点，父节点的必需依赖依然检查；多级候选关系没有被假定为已完整实现。加载器自带库来自已验证的锁定归档，不能硬编码一个任意 MixinExtras 版本当作已存在。

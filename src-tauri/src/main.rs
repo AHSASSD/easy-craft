@@ -8,6 +8,7 @@ mod host;
 mod memory;
 mod minecraft;
 mod model;
+mod modpack;
 mod net;
 mod packs;
 mod resource_install;
@@ -280,21 +281,43 @@ fn native_avatar_save(host: State<'_, Arc<Host>>, bytes: Vec<u8>) -> Result<()> 
     skins::save(&host, &bytes)
 }
 #[tauri::command]
-async fn native_pack_preview(bytes: Vec<u8>) -> Result<packs::PackPreview> {
-    tauri::async_runtime::spawn_blocking(move || packs::preview(&bytes))
-        .await
-        .map_err(|_| "压缩包检查任务失败".to_string())?
+async fn native_pack_preview(
+    host: State<'_, Arc<Host>>,
+    bytes: Vec<u8>,
+) -> Result<packs::PackPreview> {
+    if bytes.len() > 16 * 1024 * 1024 {
+        return Err("小文件检查须在 16 MiB 内；大文件请使用系统选择器".into());
+    }
+    let host = host.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        host.pack_preview(modpack::inspect(&host.root, bytes.as_slice())?)
+    })
+    .await
+    .map_err(|_| "压缩包检查任务失败".to_string())?
 }
 #[tauri::command]
-async fn native_pack_pick(window: tauri::WebviewWindow) -> Result<Option<packs::PackPreview>> {
+async fn native_pack_pick(
+    window: tauri::WebviewWindow,
+    host: State<'_, Arc<Host>>,
+) -> Result<Option<packs::PackPreview>> {
     let owner = window.hwnd().map_err(|_| "无法读取窗口")?.0 as isize;
+    let host = host.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
         file_picker::pick(owner, &["zip", "mrpack"])?
-            .map(|(_, input)| packs::preview_reader(input))
+            .map(|(_, input)| host.pack_preview(modpack::inspect(&host.root, input)?))
             .transpose()
     })
     .await
     .map_err(|_| "压缩包检查任务失败".to_string())?
+}
+#[tauri::command]
+fn native_pack_install(
+    host: State<'_, Arc<Host>>,
+    token: String,
+    name: String,
+    selected: Vec<String>,
+) -> Result<()> {
+    host.start_pack(token, name, selected)
 }
 #[tauri::command]
 async fn native_versions(host: State<'_, Arc<Host>>) -> Result<Vec<model::Version>> {
@@ -416,6 +439,7 @@ fn main() {
             native_avatar_save,
             native_pack_preview,
             native_pack_pick,
+            native_pack_install,
             native_resource_search,
             native_resource_detail,
             native_resource_plan,

@@ -1,11 +1,7 @@
 use crate::model::{self, Result};
 use serde::Serialize;
 use serde_json::Value;
-use std::{
-    collections::HashSet,
-    io::{Cursor, Read},
-    path::Path,
-};
+use std::{collections::HashSet, io::Read, path::Path};
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -18,16 +14,19 @@ pub struct PackPreview {
     pub dependencies: Vec<String>,
     pub paths: Vec<String>,
     pub warnings: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub install: Option<crate::modpack::Plan>,
 }
 fn check_path(path: &str) -> Result<()> {
     model::safe_path(Path::new("C:/EasyCraftArchivePreview"), path).map(|_| ())
 }
+#[cfg(test)]
 pub fn preview(bytes: &[u8]) -> Result<PackPreview> {
     // Byte-array/drop previews remain bounded; the native picker uses preview_reader directly.
     if bytes.is_empty() || bytes.len() > 16 * 1024 * 1024 {
         return Err("预览文件须小于 16 MB".into());
     }
-    preview_reader(Cursor::new(bytes))
+    preview_reader(std::io::Cursor::new(bytes))
 }
 pub(crate) fn preview_reader<R: Read + std::io::Seek>(input: R) -> Result<PackPreview> {
     let mut zip = zip::ZipArchive::new(input).map_err(|_| "不是有效的 ZIP / MRPACK 文件")?;
@@ -43,6 +42,7 @@ pub(crate) fn preview_reader<R: Read + std::io::Seek>(input: R) -> Result<PackPr
         dependencies: vec![],
         paths: vec![],
         warnings: vec![],
+        install: None,
     };
     let mut names = HashSet::new();
     let mut index = None;
@@ -177,6 +177,6 @@ pub(crate) fn preview_reader<R: Read + std::io::Seek>(input: R) -> Result<PackPr
             }
         }
     }
-    result.warnings.push("仅检查压缩包目录和索引，没有解压、下载或执行内容；目录检查不能证明 Mod 安全。批量导入尚未实现".into());
+    result.warnings.push("此次仅检查压缩包目录和索引，没有解压到实例、下载或执行内容；安装需另行确认，目录检查不能证明 Mod 安全。".into());
     Ok(result)
 }

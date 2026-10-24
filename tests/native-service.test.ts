@@ -97,6 +97,82 @@ test('native file picking accepts cancellation, validates previews and does not 
   });
   service.stop();
 });
+test('pack installation previews optional files and sends only the frozen token, name and explicit choices', async () => {
+  const current = state();
+  const plan = {
+    token: '11111111-1111-4111-8111-111111111111',
+    name: 'Pack fixture',
+    packVersion: '1.0',
+    gameVersion: '1.21.1',
+    fabricVersion: '0.16.14',
+    archiveSha512: 'a'.repeat(128),
+    files: [
+      {
+        path: 'mods/required.jar',
+        size: 1,
+        sha512: 'b'.repeat(128),
+        optional: false,
+        source: 'download',
+      },
+      {
+        path: 'mods/optional.jar',
+        size: 2,
+        sha512: 'c'.repeat(128),
+        optional: true,
+        source: 'download',
+      },
+    ],
+  };
+  const preview = {
+    kind: 'MRPACK',
+    name: 'Pack fixture',
+    files: 1,
+    expandedBytes: 1,
+    downloads: 2,
+    dependencies: [],
+    paths: [],
+    warnings: [],
+    install: plan,
+  };
+  let response: unknown = preview;
+  const call = vi.fn(async (command: string) => {
+    if (command === 'native_pack_pick') return response;
+    if (command === 'native_pack_install') {
+      current.task.status = 'running';
+      return;
+    }
+    return structuredClone(current);
+  });
+  const service = createNativeService(true, call as typeof invoke);
+  await service.refresh();
+  render(createElement(PackInspector, { service }));
+  fireEvent.click(screen.getByRole('button', { name: /从电脑选择/ }));
+  await screen.findByLabelText('整合包新实例名称');
+  expect(
+    (
+      screen.getByLabelText(
+        '安装可选文件 mods/optional.jar',
+      ) as HTMLInputElement
+    ).checked,
+  ).toBe(false);
+  fireEvent.click(screen.getByLabelText('安装可选文件 mods/optional.jar'));
+  fireEvent.change(screen.getByLabelText('整合包新实例名称'), {
+    target: { value: 'My pack' },
+  });
+  fireEvent.click(screen.getByRole('button', { name: '确认变更并安装整合包' }));
+  await screen.findByText('整合包安装任务已开始，请查看底部任务状态。');
+  expect(call).toHaveBeenCalledWith('native_pack_install', {
+    token: plan.token,
+    name: 'My pack',
+    selected: ['mods/optional.jar'],
+  });
+  response = {
+    ...preview,
+    install: { ...plan, files: [{ ...plan.files[0], path: '../outside.jar' }] },
+  };
+  await expect(service.pickPack()).rejects.toThrow('整合包预览响应无效');
+  service.stop();
+});
 function LeaveEditor({ onLeave }: { onLeave(): void }) {
   const guard = useNavigationGuard();
   return createElement('button', { onClick: () => guard(onLeave) }, '离开表单');
