@@ -26,6 +26,7 @@ pub struct Session {
 pub struct Pending {
     device_code: String,
     pub user_code: String,
+    pub verification_uri: String,
     pub interval: u64,
     expires: Instant,
     next: Instant,
@@ -34,6 +35,7 @@ pub struct Pending {
 #[serde(rename_all = "camelCase")]
 pub struct DeviceCode {
     pub user_code: String,
+    pub verification_uri: String,
     pub interval: u64,
     pub expires_in: u64,
 }
@@ -41,6 +43,7 @@ impl Pending {
     pub fn public(&self) -> DeviceCode {
         DeviceCode {
             user_code: self.user_code.clone(),
+            verification_uri: self.verification_uri.clone(),
             interval: self.interval,
             expires_in: self
                 .expires
@@ -51,6 +54,21 @@ impl Pending {
 }
 pub fn valid_client(id: &str) -> bool {
     uuid::Uuid::parse_str(id).is_ok() && id.len() == 36
+}
+pub fn verification_uri(value: &str) -> Result<String> {
+    if [
+        "https://microsoft.com/link",
+        "https://www.microsoft.com/link",
+        "https://microsoft.com/devicelogin",
+        "https://www.microsoft.com/devicelogin",
+        "https://login.microsoftonline.com/common/oauth2/deviceauth",
+    ]
+    .contains(&value)
+    {
+        Ok(value.to_string())
+    } else {
+        Err("微软授权返回了不支持的登录网址，请重试".into())
+    }
 }
 async fn response_json(response: reqwest::Response, cancel: &CancellationToken) -> Result<Value> {
     let mut stream = response.bytes_stream();
@@ -112,6 +130,9 @@ pub async fn begin(
     Ok(Pending {
         device_code: value["device_code"].as_str().ok_or("设备码缺失")?.into(),
         user_code: value["user_code"].as_str().ok_or("用户码缺失")?.into(),
+        verification_uri: verification_uri(
+            value["verification_uri"].as_str().ok_or("登录网址缺失")?,
+        )?,
         interval,
         expires: Instant::now() + Duration::from_secs(expires),
         next: Instant::now() + Duration::from_secs(interval),
@@ -308,6 +329,22 @@ pub fn protect(bytes: &[u8], encrypt: bool) -> Result<Vec<u8>> {
 pub fn save(root: &Path, account: &Stored) -> Result<()> {
     let bytes = serde_json::to_vec(account).map_err(|_| "无法序列化安全凭据")?;
     write_file(root, "account.dpapi", &protect(&bytes, true)?)
+}
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn device_browser_url_accepts_only_known_official_verification_endpoints() {
+        assert!(super::verification_uri("https://www.microsoft.com/link").is_ok());
+        for value in [
+            "http://microsoft.com/link",
+            "https://microsoft.com.evil.test/link",
+            "https://user@microsoft.com/link",
+            "https://microsoft.com/link?next=https://evil.test",
+            "file:///login",
+        ] {
+            assert!(super::verification_uri(value).is_err());
+        }
+    }
 }
 pub fn load(root: &Path) -> Result<Option<Stored>> {
     let path = safe_path(root, "account.dpapi")?;

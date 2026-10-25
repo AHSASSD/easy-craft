@@ -328,6 +328,133 @@ test('modpack browser selects archives over readmes and drops the prior preview 
   expect(screen.getAllByLabelText('整合包安全检查')).toHaveLength(1);
   service.stop();
 });
+test('resource browse loads real-service results by default and forwards category, partial query and ordering', async () => {
+  const call = vi.fn(async (command: string) => {
+    if (command === 'native_resource_categories')
+      return ['optimization', 'technology'];
+    if (command === 'native_resource_search')
+      return {
+        hits: [
+          {
+            id: 'Proj1234',
+            title: 'Search fixture',
+            description: 'Fixture',
+            author: 'Fixture',
+          },
+        ],
+        total: 1,
+        offset: 0,
+      };
+    return state();
+  });
+  const service = createNativeService(true, call as typeof invoke);
+  await service.refresh();
+  const onFilter = vi.fn();
+  render(
+    createElement(ResourceBrowser, {
+      service,
+      kind: 'mod',
+      query: 'Ferrite',
+      gameVersion: '1.21.1',
+      onFilter,
+    }),
+  );
+  await screen.findByText('查看 Search fixture');
+  await screen.findByRole('option', { name: '性能优化 · optimization' });
+  expect(call).toHaveBeenCalledWith('native_resource_search', {
+    kind: 'mod',
+    query: 'Ferrite',
+    gameVersion: '1.21.1',
+    offset: 0,
+    category: '',
+    index: 'relevance',
+  });
+  fireEvent.change(screen.getByLabelText('在线资源分类'), {
+    target: { value: 'optimization' },
+  });
+  fireEvent.change(screen.getByLabelText('在线资源排序'), {
+    target: { value: 'updated' },
+  });
+  expect(screen.getByText(/筛选已修改/)).toBeTruthy();
+  fireEvent.click(screen.getByText('搜索资源'));
+  await waitFor(() =>
+    expect(call).toHaveBeenCalledWith('native_resource_search', {
+      kind: 'mod',
+      query: 'Ferrite',
+      gameVersion: '1.21.1',
+      offset: 0,
+      category: 'optimization',
+      index: 'updated',
+    }),
+  );
+  await waitFor(() => expect(screen.queryByText(/筛选已修改/)).toBeNull());
+  fireEvent.click(screen.getByText('在 Modrinth 查看 ↗'));
+  await waitFor(() =>
+    expect(call).toHaveBeenCalledWith('native_open_resource', {
+      kind: 'mod',
+      project: 'Proj1234',
+    }),
+  );
+  fireEvent.click(screen.getByText('重置条件'));
+  expect(onFilter).toHaveBeenCalledWith('', '1.21.1');
+  expect(
+    (screen.getByLabelText('在线资源分类') as HTMLSelectElement).value,
+  ).toBe('');
+  service.stop();
+});
+
+test('Microsoft login opens the official browser after a device code and allows retry after browser failure', async () => {
+  const current = state();
+  current.settings.clientId = '11111111-1111-4111-8111-111111111111';
+  let browserFailure = true;
+  const call = vi.fn(
+    async (command: string, args?: Record<string, unknown>) => {
+      if (command === 'native_settings')
+        current.settings = args!.settings as NativeState['settings'];
+      if (command === 'native_login_begin') {
+        current.loginPending = true;
+        current.loginCode = {
+          userCode: 'TEST-CODE',
+          interval: 5,
+          expiresIn: 900,
+        };
+        return current.loginCode;
+      }
+      if (command === 'native_open_login' && browserFailure)
+        return Promise.reject('浏览器无法打开');
+      if (command === 'native_login_poll') return false;
+      if (command === 'native_login_cancel') {
+        current.loginPending = false;
+        current.loginCode = null;
+      }
+      return structuredClone(current);
+    },
+  );
+  const service = createNativeService(true, call as typeof invoke);
+  await service.refresh();
+  render(createElement(AccountPanel, { service, onDone: vi.fn() }));
+  fireEvent.click(screen.getByRole('button', { name: '登录 Microsoft' }));
+  await screen.findByText('浏览器无法打开');
+  expect(screen.getByText('TEST-CODE')).toBeTruthy();
+  const commands = call.mock.calls.map(([command]) => command);
+  expect(commands.indexOf('native_open_login')).toBeGreaterThan(
+    commands.indexOf('native_login_begin'),
+  );
+  browserFailure = false;
+  fireEvent.click(
+    screen.getByRole('button', {
+      name: '打开 Microsoft 登录网页',
+    }),
+  );
+  await waitFor(() => expect(screen.queryByText('浏览器无法打开')).toBeNull());
+  expect(
+    call.mock.calls.filter(([command]) => command === 'native_open_login'),
+  ).toHaveLength(2);
+  fireEvent.click(screen.getByRole('button', { name: '取消本次登录' }));
+  await waitFor(() => expect(screen.queryByText('TEST-CODE')).toBeNull());
+  service.stop();
+});
+
 test('background reads and resets use only the controlled native command and validate its response', async () => {
   let response: unknown = 'data:image/png;base64,AAAA';
   const call = vi.fn(async () => response);

@@ -31,6 +31,26 @@ const resourceId = (value: unknown): value is string =>
   string(value) && /^[A-Za-z0-9]{1,64}$/.test(value);
 const bounded = (value: unknown, max: number): value is string =>
   string(value) && value.length <= max;
+function validDeviceCode(value: unknown): value is DeviceCode {
+  return (
+    isRecord(value) &&
+    bounded(value.userCode, 64) &&
+    value.userCode.length > 0 &&
+    integer(value.interval) &&
+    value.interval >= 1 &&
+    value.interval <= 60 &&
+    integer(value.expiresIn) &&
+    value.expiresIn <= 1800 &&
+    (value.verificationUri === undefined ||
+      [
+        'https://microsoft.com/link',
+        'https://www.microsoft.com/link',
+        'https://microsoft.com/devicelogin',
+        'https://www.microsoft.com/devicelogin',
+        'https://login.microsoftonline.com/common/oauth2/deviceauth',
+      ].includes(value.verificationUri as string))
+  );
+}
 const cacheFolders: Record<CacheGroup, string> = {
   resources: 'cache/modrinth',
   packFiles: 'pack-cache',
@@ -416,11 +436,7 @@ export function validNativeState(value: unknown): value is NativeState {
         string(account.name) &&
         string(account.xuid))) &&
     typeof value.loginPending === 'boolean' &&
-    (value.loginCode === null ||
-      (isRecord(value.loginCode) &&
-        string(value.loginCode.userCode) &&
-        integer(value.loginCode.interval) &&
-        integer(value.loginCode.expiresIn))) &&
+    (value.loginCode === null || validDeviceCode(value.loginCode)) &&
     value.instances.every(
       (item: unknown) =>
         isRecord(item) &&
@@ -632,12 +648,30 @@ export function createNativeService(
     },
     installResources: (token) =>
       operation('native_resource_install', { token }),
-    searchResources: async (kind, query, gameVersion, offset) => {
+    openResource: (kind, project) =>
+      operation('native_open_resource', { kind, project }),
+    resourceCategories: async (kind) => {
+      const value = await request('native_resource_categories', { kind });
+      if (
+        !Array.isArray(value) ||
+        value.length > 2048 ||
+        !value.every(
+          (item: unknown) =>
+            typeof item === 'string' && /^[a-zA-Z0-9+-]{1,64}$/.test(item),
+        )
+      )
+        throw new Error('资源分类响应无效');
+      return value as string[];
+    },
+    searchResources: async (kind, query, gameVersion, offset, filters) => {
       const value = await request('native_resource_search', {
         kind,
         query,
         gameVersion,
         offset,
+        ...(filters
+          ? { category: filters.category, index: filters.index }
+          : {}),
       });
       if (
         !isRecord(value) ||
@@ -1044,14 +1078,7 @@ export function createNativeService(
     },
     beginLogin: async () => {
       const value = await request('native_login_begin');
-      if (
-        !isRecord(value) ||
-        !string(value.userCode) ||
-        !integer(value.interval) ||
-        value.interval < 1 ||
-        !integer(value.expiresIn)
-      )
-        throw new Error('设备码响应无效');
+      if (!validDeviceCode(value)) throw new Error('设备码响应无效');
       await refresh();
       return value as DeviceCode;
     },

@@ -190,6 +190,7 @@ export type ClientOptions = {
   fullscreen: boolean;
 };
 export type DeviceCode = {
+  verificationUri?: string;
   userCode: string;
   interval: number;
   expiresIn: number;
@@ -247,7 +248,10 @@ export interface NativeService extends Observable<NativeSnapshot> {
     query: string,
     gameVersion: string,
     offset: number,
+    filters?: { category: string; index: string },
   ): Promise<ResourceSearch>;
+  resourceCategories(kind: ResourceKind): Promise<string[]>;
+  openResource(kind: ResourceKind, project: string): Promise<void>;
   resourceDetail(
     project: string,
     kind: ResourceKind,

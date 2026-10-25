@@ -910,6 +910,52 @@ try {
       return catalog;
     }
     await page.getByRole('button', { name: '模组', exact: true }).click();
+    if (process.argv.includes('--resource-browse')) {
+      await page.locator('.resource-hit').first().waitFor({ timeout: 60000 });
+      assert((await page.locator('.resource-hit').count()) > 0);
+      await page
+        .getByLabel('在线资源分类')
+        .locator('option[value="optimization"]')
+        .waitFor({ state: 'attached', timeout: 60000 });
+      const boxes = await Promise.all(
+        [
+          '搜索在线资源',
+          '在线资源游戏版本',
+          '在线资源分类',
+          '在线资源排序',
+        ].map((name) => page.getByLabel(name, { exact: true }).boundingBox()),
+      );
+      for (const box of boxes) assert.equal(box.height, 40);
+      assert.equal(boxes[0].y, boxes[1].y);
+      assert.equal(boxes[2].y, boxes[3].y);
+      await page.getByLabel('搜索在线资源').fill('Ferrite');
+      await page.getByLabel('在线资源分类').selectOption('optimization');
+      await page.getByLabel('在线资源排序').selectOption('relevance');
+      await page.getByRole('button', { name: '搜索资源', exact: true }).click();
+      await page
+        .getByRole('button', { name: '查看 FerriteCore', exact: true })
+        .waitFor({ timeout: 60000 });
+      await page.getByText(/结果：Ferrite ·/).waitFor({ timeout: 60000 });
+      await page
+        .getByRole('button', { name: '搜索资源', exact: true })
+        .waitFor();
+      await page.locator('.resource-hit').first().scrollIntoViewIfNeeded();
+      const session = await page.context().newCDPSession(page);
+      const capture = await session.send('Page.captureScreenshot', {
+        format: 'png',
+        fromSurface: true,
+        captureBeyondViewport: false,
+      });
+      await writeFixtureFile(
+        path.join(project, 'output/playwright/native-resource-browse.png'),
+        Buffer.from(capture.data, 'base64'),
+      );
+      await session.detach();
+      await page.getByLabel('在线资源分类').selectOption('');
+      console.log(
+        'PASS: real Modrinth default browse, live categories and partial-name filtered search; labeled controls share aligned 40px heights.',
+      );
+    }
     await page.getByLabel('搜索在线资源').fill('FerriteCore');
     await page.getByLabel('在线资源游戏版本').fill('1.21.1');
     await page.getByRole('button', { name: '搜索资源', exact: true }).click();
@@ -1401,6 +1447,18 @@ try {
     'Host must reject an unsigned launch even if UI guard is bypassed',
   );
   await page.getByRole('button', { name: '管理游戏账户', exact: true }).click();
+  if (process.argv.includes('--login-site')) {
+    await page.getByRole('button', { name: '正版登录', exact: true }).click();
+    await page
+      .getByRole('button', { name: '打开微软官方登录网站', exact: true })
+      .click();
+    await page
+      .getByText('已请求系统浏览器打开微软官方授权页。', { exact: true })
+      .waitFor();
+    console.log(
+      'PASS: native account UI requested the official Microsoft page through the system browser; user authorization was not attempted.',
+    );
+  }
   await page.getByRole('button', { name: '离线登录', exact: true }).click();
   await page
     .getByRole('textbox', { name: '离线用户名', exact: true })

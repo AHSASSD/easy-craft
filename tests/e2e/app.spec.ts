@@ -1,4 +1,47 @@
 import { expect, test } from '@playwright/test';
+test('resource filters align as labeled fields and wrap without overflow', async ({
+  page,
+}) => {
+  await page.goto('/');
+  await page
+    .getByRole('navigation')
+    .getByRole('button', { name: '下载', exact: true })
+    .click();
+  await page.getByRole('button', { name: '模组', exact: true }).click();
+  const controls = [
+    '搜索在线资源',
+    '在线资源游戏版本',
+    '在线资源分类',
+    '在线资源排序',
+  ];
+  for (const width of [1120, 800]) {
+    await page.setViewportSize({ width, height: 720 });
+    const boxes = await Promise.all(
+      controls.map((name) =>
+        page.getByLabel(name, { exact: true }).boundingBox(),
+      ),
+    );
+    for (const box of boxes) {
+      expect(box!.height).toBe(40);
+      expect(box!.x + box!.width).toBeLessThanOrEqual(width);
+    }
+    if (width === 1120) {
+      expect(boxes[0]!.y).toBe(boxes[1]!.y);
+      expect(boxes[2]!.y).toBe(boxes[3]!.y);
+    }
+    expect(
+      await page.evaluate(
+        () => document.documentElement.scrollWidth <= innerWidth,
+      ),
+    ).toBe(true);
+  }
+  await page.screenshot({
+    path: 'output/playwright/resource-filters-minimum.png',
+  });
+  await expect(
+    page.getByText('在线资源查询需要桌面版。', { exact: true }),
+  ).toBeVisible();
+});
 test('real library is the default and remains usable at minimum size', async ({
   page,
 }) => {

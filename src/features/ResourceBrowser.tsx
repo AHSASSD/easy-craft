@@ -1,4 +1,10 @@
-import { useEffect, useRef, useState, useSyncExternalStore } from 'react';
+import {
+  useEffect,
+  useEffectEvent,
+  useRef,
+  useState,
+  useSyncExternalStore,
+} from 'react';
 import type {
   NativeService,
   ResourceDetail,
@@ -22,6 +28,50 @@ const environments: Record<string, string> = {
   dedicated_server_only: '仅独立服务器',
   client_or_server: '客户端或服务器',
   client_and_server: '客户端与服务器均需',
+};
+const categoryLabels: Record<string, string> = {
+  optimization: '性能优化',
+  technology: '科技',
+  adventure: '冒险',
+  decoration: '装饰',
+  library: '前置库',
+  utility: '实用工具',
+  magic: '魔法',
+  worldgen: '世界生成',
+  storage: '存储',
+  equipment: '装备',
+  food: '食物',
+  mobs: '生物',
+  'game-mechanics': '游戏机制',
+  transportation: '交通',
+  management: '管理',
+  realistic: '写实',
+  simplistic: '简约',
+  'vanilla-like': '原版风格',
+  themed: '主题',
+  tweaks: '细节调整',
+  gui: '界面',
+  audio: '音效',
+  blocks: '方块',
+  entities: '实体',
+  items: '物品',
+  fonts: '字体',
+  environment: '环境',
+  models: '模型',
+  locale: '语言',
+  combat: '战斗',
+  lightweight: '轻量',
+  multiplayer: '多人',
+  quests: '任务',
+  challenging: '挑战',
+  atmosphere: '氛围',
+  cartoon: '卡通',
+  fantasy: '奇幻',
+  low: '低配置',
+  medium: '中等配置',
+  high: '高配置',
+  reflections: '反射',
+  shadows: '阴影',
 };
 export function ResourceBrowser({
   service,
@@ -64,12 +114,38 @@ export function ResourceBrowser({
     query: string;
     game: string;
     time: string;
+    category: string;
+    index: string;
   } | null>(null);
   const [detail, setDetail] = useState<ResourceDetail | null>(null);
   const [versionId, setVersionId] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
+  const [category, setCategory] = useState('');
+  const [index, setIndex] = useState(query ? 'relevance' : 'downloads');
+  const [categories, setCategories] = useState<string[]>([]);
+  const [categoryError, setCategoryError] = useState('');
   const request = useRef(0);
+  const initialSearch = useEffectEvent(() => {
+    if (gameVersion) void search();
+  });
+  useEffect(() => {
+    if (!native.available) return;
+    initialSearch();
+    let disposed = false;
+    void service
+      .resourceCategories(kind)
+      .then((value) => {
+        if (!disposed) setCategories(value);
+      })
+      .catch(() => {
+        if (!disposed)
+          setCategoryError('分类加载失败，可继续搜索或重新进入此分类重试。');
+      });
+    return () => {
+      disposed = true;
+    };
+  }, [service, kind, native.available]);
   useEffect(() => {
     if (kind !== 'datapack' || !targetId || installing || !native.available)
       return;
@@ -107,6 +183,7 @@ export function ResourceBrowser({
         query,
         gameVersion,
         offset,
+        { category, index },
       );
       if (ticket !== request.current) return;
       setResult({
@@ -114,6 +191,8 @@ export function ResourceBrowser({
         query,
         game: gameVersion,
         time: new Date().toLocaleTimeString(),
+        category,
+        index,
       });
       setDetail(null);
       setPlan(null);
@@ -210,19 +289,22 @@ export function ResourceBrowser({
         。{kind === 'mod' ? '本轮模组筛选使用 Fabric。' : ''}
       </p>
       <form
-        className="content-toolbar"
+        className="resource-search-form card"
         onSubmit={(event) => {
           event.preventDefault();
           void search();
         }}
       >
-        <input
-          aria-label="搜索在线资源"
-          placeholder="搜索项目名称…"
-          maxLength={256}
-          value={query}
-          onChange={(event) => onFilter(event.target.value, gameVersion)}
-        />
+        <label className="resource-query-field">
+          名称关键词
+          <input
+            aria-label="搜索在线资源"
+            placeholder="输入部分名称或关键词…"
+            maxLength={256}
+            value={query}
+            onChange={(event) => onFilter(event.target.value, gameVersion)}
+          />
+        </label>
         <label>
           游戏版本{' '}
           <input
@@ -232,13 +314,64 @@ export function ResourceBrowser({
             onChange={(event) => onFilter(query, event.target.value)}
           />
         </label>
-        <button
-          type="submit"
-          disabled={busy || !service.snapshot().available || !gameVersion}
-        >
-          搜索资源
-        </button>
+        <label>
+          分类
+          <select
+            aria-label="在线资源分类"
+            value={category}
+            onChange={(event) => setCategory(event.target.value)}
+          >
+            <option value="">全部分类</option>
+            {categories.map((item) => (
+              <option key={item} value={item}>
+                {categoryLabels[item]
+                  ? `${categoryLabels[item]} · ${item}`
+                  : item}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label>
+          排序
+          <select
+            aria-label="在线资源排序"
+            value={index}
+            onChange={(event) => setIndex(event.target.value)}
+          >
+            <option value="relevance">相关程度</option>
+            <option value="downloads">下载最多</option>
+            <option value="updated">最近更新</option>
+            <option value="newest">最新发布</option>
+          </select>
+        </label>
+        <div className="button-row resource-search-actions">
+          <button
+            type="submit"
+            disabled={busy || !service.snapshot().available || !gameVersion}
+          >
+            搜索资源
+          </button>
+          <button
+            type="button"
+            disabled={busy}
+            onClick={() => {
+              onFilter('', gameVersion);
+              setCategory('');
+              setIndex('downloads');
+            }}
+          >
+            重置条件
+          </button>
+          <span className="hint">
+            来源：Modrinth · 支持关键词相关搜索，无需完整名称
+          </span>
+        </div>
       </form>
+      {categoryError && (
+        <p className="hint" role="status">
+          {categoryError}
+        </p>
+      )}
       {error && (
         <p role="alert" className="notice">
           {error}
@@ -508,7 +641,10 @@ export function ResourceBrowser({
           <p className="hint">
             结果：{result.query || '全部项目'} · Minecraft {result.game} · 共{' '}
             {result.value.total} 项 · 查询于 {result.time}
-            {result.query !== query || result.game !== gameVersion
+            {result.query !== query ||
+            result.game !== gameVersion ||
+            result.category !== category ||
+            result.index !== index
               ? ' · 筛选已修改，请重新搜索'
               : ''}
           </p>
@@ -521,6 +657,22 @@ export function ResourceBrowser({
                   <span>作者：{hit.author}</span>
                   <button disabled={busy} onClick={() => void open(hit.id)}>
                     查看 {hit.title}
+                  </button>
+                  <button
+                    disabled={busy}
+                    onClick={() =>
+                      void service
+                        .openResource(kind, hit.id)
+                        .catch((error: unknown) =>
+                          setError(
+                            error instanceof Error
+                              ? error.message
+                              : '无法打开项目页面',
+                          ),
+                        )
+                    }
+                  >
+                    在 Modrinth 查看 ↗
                   </button>
                 </div>
               </article>
@@ -536,7 +688,9 @@ export function ResourceBrowser({
                 busy ||
                 result.value.offset === 0 ||
                 result.query !== query ||
-                result.game !== gameVersion
+                result.game !== gameVersion ||
+                result.category !== category ||
+                result.index !== index
               }
               onClick={() => void search(Math.max(0, result.value.offset - 20))}
             >
@@ -549,7 +703,9 @@ export function ResourceBrowser({
                 result.value.offset + 20 >= result.value.total ||
                 result.value.offset >= 10000 ||
                 result.query !== query ||
-                result.game !== gameVersion
+                result.game !== gameVersion ||
+                result.category !== category ||
+                result.index !== index
               }
               onClick={() => void search(result.value.offset + 20)}
             >
@@ -560,7 +716,9 @@ export function ResourceBrowser({
       ) : (
         <section className="card">
           <p>
-            输入名称与游戏版本后搜索真实资源。结果与文件信息以来源接口为准。
+            {busy
+              ? '正在从 Modrinth 加载资源列表…'
+              : '可搜索部分名称或关键词，也可以留空浏览热门资源。结果与文件信息以来源接口为准。'}
           </p>
         </section>
       )}

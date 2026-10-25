@@ -168,6 +168,15 @@
 - 同次回归验证背景/颜色跨不同 PID 重启与重置、本地内容与配置保存，并真实启动 Fabric 0.16.14 / Minecraft 1.21.1 至音频初始化后结束，脚本退出 0。复现：`node scripts/smoke-native.mjs debug --cached --avatar-layout --background --launch-offline --fabric`。只操作 .native/integration 独立夹具；不代表完整世界游玩、真人正版授权或游戏内换肤已经验证。
 - 浏览器首屏回归曾连续因 Vite 开发模块加载等待超时；网络追踪中有未完成的开发依赖/模块请求。端到端改用独立 1421 端口的生产构建预览，避免复用开发服务器并检查实际交付资源。修正对比度测量只识别六位十六进制、无法处理构建压缩后短色值的问题，改用浏览器画布解析有效 CSS 颜色；所有 12 项重跑通过，不放宽对比度阈值或导航等待条件。
 
+## 2026-10-25：资源浏览筛选与官方网页登录
+
+- 修正截图中名称输入、版本标签和搜索按钮错位：独立筛选卡片使用统一标签和 40px 控件，同一行顶部对齐，操作行独立；窄窗口使用单列。进入资源页自动获取真实默认列表，空关键词按下载量浏览，部分名称可按相关程度搜索；提供来源实际分类、四种排序和重置关键词/分类/排序。分类由 Modrinth tag/category 获取并按资源类型过滤，常用项附中文名称；失败时提示且仍可普通搜索。来源没有返回分类时只提供全部分类，不凭空编造。
+- 搜索分页绑定关键词、游戏版本、分类及排序快照；条件修改后提示重新搜索并禁用旧条件分页。Mod 的 Fabric 条件与版本条件继续保留；分类和排序经过原生边界验证。结果新增打开 Modrinth 项目页面入口，后端只接受资源类型和字母数字项目 ID 构造地址，不接收任意网址。本次没有引入 CurseForge 或承诺中文译名自动匹配。
+- 对照工作区 PCL-2.14.0.0 的 MyMsgLogin.xaml.vb（Init/WorkThread）和 HMCL-main 的 OAuth.java（authenticateDevice）：参考设备码展示、打开服务返回的授权网址、轮询和取消方式，未复制它们的应用身份。Easy Craft 取得设备码后自动请求系统浏览器打开微软官方 verification_uri，提供复制设备码、约剩余时间、重开和取消；浏览器打开失败保留设备码与待授权状态。尚无设备码时可打开官方网页，但界面明确“仅在网站登录不会自动授权启动器”。
+- 官方网页登录 URL 在原生与前端状态边界均限定已知 HTTPS 授权入口，拒绝伪造域名、凭据、任意查询或文件 URL。认证服务沿用设备授权及 Xbox/XSTS/Minecraft 链路，不接收密码或 Client Secret。参考：[Microsoft 设备授权文档](https://learn.microsoft.com/en-us/entra/identity-platform/v2-oauth2-device-code)；资源参数参考 [Modrinth 搜索 API](https://docs.modrinth.com/api/operations/searchprojects/)。
+- 本次前端 65 项、Rust 71 项（6 项外部集成默认忽略）、Edge 13 项通过；类型/生产构建、ESLint、Clippy 和调试桌面构建通过。新增覆盖分类/排序传递、默认列表、过期条件、项目官网打开、浏览器失败后设备码保留与重试/取消、官方 URL 白名单，以及 1120×720 和 800×720 下控件对齐/无横向溢出。公网资源集成测试另显式执行通过，验证真实分类与部分名称 Ferrite + optimization 能找到 FerriteCore，并回归其他资源类型元数据。
+- 真实 WebView2 验证默认资源列表、实际分类、部分名称与分类组合、40px 控件及原有搜索/详情/版本/哈希读取；截图 output/playwright/native-resource-browse.png。真实账户 UI 请求系统浏览器打开官方登录页并显示请求状态，随后离线账户、内容导入/启停、世界/音画配置回归通过，宿主正常关闭，脚本退出 0。复现：`node scripts/smoke-native.mjs debug --cached --resources --resource-browse --login-site`，仅使用 .native/integration。打开浏览器不等于官方页面加载或本人授权已验证；真人 Microsoft 登录仍需自有公共 Client ID 和本人在官网操作，不以组件测试设备码替代。
+
 ## 尚需完成的目标（不能由上述通过结果替代）
 
 - 本轮已完成账户头像和共用工具栏/设置按钮行的调整；更多页面与缩放组合继续按第 13 节验收。实例说明编辑、真实复制/导出与可恢复删除仍按计划单独实施，不能沿用演示菜单作为完成证据。

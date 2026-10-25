@@ -19,6 +19,13 @@ export function AccountPanel({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [skinMessage, setSkinMessage] = useState('');
+  const [copyMessage, setCopyMessage] = useState('');
+  const [websiteMessage, setWebsiteMessage] = useState('');
+  async function openOfficialWebsite() {
+    setWebsiteMessage('');
+    await service.openLogin();
+    setWebsiteMessage('已请求系统浏览器打开微软官方授权页。');
+  }
   const locked =
     busy || state?.task.status === 'running' || !!state?.loginPending;
   async function run(operation: () => Promise<void>) {
@@ -43,7 +50,10 @@ export function AccountPanel({
         mode === 'microsoft' ? clientId.trim() : current.settings.clientId,
     });
     if (mode === 'offline' || current.account) onDone();
-    else await service.beginLogin();
+    else {
+      await service.beginLogin();
+      await openOfficialWebsite();
+    }
   }
   return (
     <div className="account-panel">
@@ -106,6 +116,15 @@ export function AccountPanel({
                 {state?.account
                   ? `已授权：${state.account.name}`
                   : '在 Microsoft 官方网页完成授权，密码不会交给启动器。'}
+              </p>
+              <button
+                type="button"
+                onClick={() => void run(openOfficialWebsite)}
+              >
+                打开微软官方登录网站
+              </button>
+              <p className="hint">
+                启动登录后会自动打开系统浏览器，按提示输入设备码并授权；仅在网站登录不会自动授权启动器。
               </p>
               <details open={!clientId}>
                 <summary>Microsoft 登录配置</summary>
@@ -184,15 +203,40 @@ export function AccountPanel({
           </button>
         )}
       </fieldset>
+      {websiteMessage && <p role="status">{websiteMessage}</p>}
       {state?.loginPending && (
         <div className="device-login" role="status">
           {state.loginCode ? (
             <>
               <p>在微软登录网页输入设备码：</p>
               <code className="device-code">{state.loginCode.userCode}</code>
+              <p className="hint">
+                1. 打开官方网页 → 2. 输入设备码并授权 → 3.
+                返回启动器等待账户载入
+              </p>
+              <p className="hint">
+                官方地址：
+                {state.loginCode.verificationUri ??
+                  'https://microsoft.com/link'}{' '}
+                · 设备码剩余约 {Math.ceil(state.loginCode.expiresIn / 60)} 分钟
+              </p>
               <button
                 disabled={busy}
-                onClick={() => void run(service.openLogin)}
+                onClick={() =>
+                  void run(async () => {
+                    await navigator.clipboard.writeText(
+                      state.loginCode!.userCode,
+                    );
+                    setCopyMessage('设备码已复制，请粘贴到微软官方网页。');
+                  })
+                }
+              >
+                复制设备码
+              </button>
+              {copyMessage && <p>{copyMessage}</p>}
+              <button
+                disabled={busy}
+                onClick={() => void run(openOfficialWebsite)}
               >
                 打开 Microsoft 登录网页
               </button>

@@ -116,11 +116,29 @@ fn strings(value: &Value, key: &str) -> Result<Vec<String>> {
         .collect()
 }
 fn search_url(kind: Kind, query: &str, game: &str, offset: u64) -> Result<Url> {
+    filtered_search_url(kind, query, game, offset, "", "relevance")
+}
+fn filtered_search_url(
+    kind: Kind,
+    query: &str,
+    game: &str,
+    offset: u64,
+    category: &str,
+    index: &str,
+) -> Result<Url> {
     if !crate::fabric::valid_version(game) {
         return Err("游戏版本无效".into());
     }
     if query.len() > 256 || query.chars().any(char::is_control) || offset > 10000 {
         return Err("搜索条件超出范围".into());
+    }
+    if category.len() > 64
+        || !category
+            .bytes()
+            .all(|c| c.is_ascii_alphanumeric() || b"-+".contains(&c))
+        || !["relevance", "downloads", "updated", "newest"].contains(&index)
+    {
+        return Err("资源分类或排序无效".into());
     }
     let mut facets = vec![
         vec![format!("project_type:{}", kind.name())],
@@ -129,6 +147,9 @@ fn search_url(kind: Kind, query: &str, game: &str, offset: u64) -> Result<Url> {
     if matches!(kind, Kind::Mod) {
         facets.push(vec!["categories:fabric".into()]);
     }
+    if !category.is_empty() {
+        facets.push(vec![format!("categories:{category}")]);
+    }
     let mut url =
         Url::parse("https://api.modrinth.com/v2/search").map_err(|_| "资源服务地址无效")?;
     url.query_pairs_mut()
@@ -136,7 +157,7 @@ fn search_url(kind: Kind, query: &str, game: &str, offset: u64) -> Result<Url> {
         .append_pair("facets", &json!(facets).to_string())
         .append_pair("limit", "20")
         .append_pair("offset", &offset.to_string())
-        .append_pair("index", "relevance");
+        .append_pair("index", index);
     Ok(url)
 }
 fn parse_search(value: &Value, offset: u64) -> Result<Search> {
@@ -171,6 +192,59 @@ pub async fn search(kind: Kind, query: &str, game: &str, offset: u64) -> Result<
     let value =
         net::resource_json(&net::client()?, url.as_str(), &CancellationToken::new()).await?;
     parse_search(&value, offset)
+}
+pub async fn filtered_search(
+    kind: Kind,
+    query: &str,
+    game: &str,
+    offset: u64,
+    category: &str,
+    index: &str,
+) -> Result<Search> {
+    if category.is_empty() && index == "relevance" {
+        return search(kind, query, game, offset).await;
+    }
+    let url = filtered_search_url(kind, query, game, offset, category, index)?;
+    let value =
+        net::resource_json(&net::client()?, url.as_str(), &CancellationToken::new()).await?;
+    parse_search(&value, offset)
+}
+pub async fn categories(kind: Kind) -> Result<Vec<String>> {
+    let value = net::resource_json(
+        &net::client()?,
+        "https://api.modrinth.com/v2/tag/category",
+        &CancellationToken::new(),
+    )
+    .await?;
+    parse_categories(&value, kind)
+}
+fn parse_categories(value: &Value, kind: Kind) -> Result<Vec<String>> {
+    let rows = value
+        .as_array()
+        .filter(|rows| rows.len() <= 2048)
+        .ok_or("资源分类列表无效")?;
+    let mut result = Vec::new();
+    for row in rows {
+        if row.get("project_type").and_then(Value::as_str) != Some(kind.name()) {
+            continue;
+        }
+        let name = text(row, "name", 64)?;
+        if name.is_empty()
+            || !name
+                .bytes()
+                .all(|c| c.is_ascii_alphanumeric() || b"-+".contains(&c))
+        {
+            return Err("资源分类名称无效".into());
+        }
+        result.push(name);
+    }
+    result.sort();
+    result.dedup();
+    Ok(result)
+}
+pub fn website(kind: Kind, project: &str) -> Result<String> {
+    id(project)?;
+    Ok(format!("https://modrinth.com/{}/{project}", kind.name()))
 }
 pub(crate) fn parse_versions(
     value: &Value,
@@ -333,9 +407,61 @@ mod tests {
         );
         assert!(parse_versions(&json!([row]), "Other123", Kind::Resourcepack, "1.21.1").is_err());
     }
+    #[test]
+    fn category_filters_are_encoded_bounded_and_keep_loader_and_version_constraints() {
+        let url = filtered_search_url(Kind::Mod, "sod", "1.21.1", 20, "optimization", "downloads")
+            .unwrap();
+        let pairs: std::collections::HashMap<_, _> = url.query_pairs().collect();
+        let facets: Value = serde_json::from_str(&pairs["facets"]).unwrap();
+        assert_eq!(
+            facets,
+            json!([
+                ["project_type:mod"],
+                ["versions:1.21.1"],
+                ["categories:fabric"],
+                ["categories:optimization"]
+            ])
+        );
+        assert_eq!(pairs["index"], "downloads");
+        assert_eq!(pairs["query"], "sod");
+        assert!(
+            filtered_search_url(Kind::Mod, "", "1.21.1", 0, "fabric\",\"forge", "downloads")
+                .is_err()
+        );
+        assert!(filtered_search_url(Kind::Mod, "", "1.21.1", 0, "", "anything").is_err());
+        let categories = json!([{"name":"optimization", "project_type":"mod"}, {"name":"16x", "project_type":"resourcepack"}, {"name":"optimization", "project_type":"mod"}]);
+        assert_eq!(
+            parse_categories(&categories, Kind::Mod).unwrap(),
+            vec!["optimization"]
+        );
+        assert!(
+            parse_categories(&json!([{"name":"../bad", "project_type":"mod"}]), Kind::Mod).is_err()
+        );
+        assert_eq!(
+            website(Kind::Mod, "A123").unwrap(),
+            "https://modrinth.com/mod/A123"
+        );
+        assert!(website(Kind::Mod, "../escape").is_err());
+    }
     #[tokio::test]
     #[ignore = "Requires public Modrinth API; queries metadata only"]
     async fn modrinth_metadata_integration() {
+        assert!(categories(Kind::Mod)
+            .await
+            .unwrap()
+            .iter()
+            .any(|name| name == "optimization"));
+        let partial = filtered_search(
+            Kind::Mod,
+            "Ferrite",
+            "1.21.1",
+            0,
+            "optimization",
+            "relevance",
+        )
+        .await
+        .unwrap();
+        assert!(partial.hits.iter().any(|hit| hit.id == "uXXizFIs"));
         let hits = search(Kind::Mod, "FerriteCore", "1.21.1", 0).await.unwrap();
         assert!(hits.hits.iter().any(|hit| hit.id == "uXXizFIs"));
         let result = detail("uXXizFIs", Kind::Mod, "1.21.1").await.unwrap();

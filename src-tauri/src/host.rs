@@ -1070,6 +1070,16 @@ impl Host {
         inner.session = Some(session);
         Ok(result)
     }
+    pub fn login_website(&self) -> Result<String> {
+        let inner = self.inner.lock().map_err(|_| "宿主状态不可用")?;
+        auth::verification_uri(
+            inner
+                .login
+                .as_ref()
+                .map(|pending| pending.verification_uri.as_str())
+                .unwrap_or("https://microsoft.com/link"),
+        )
+    }
     pub async fn begin_login(&self) -> Result<DeviceCode> {
         let (client_id, cancel) = {
             let mut inner = self.inner.lock().map_err(|_| "宿主状态不可用")?;

@@ -86,8 +86,31 @@ async fn native_resource_search(
     query: String,
     game_version: String,
     offset: u64,
+    category: Option<String>,
+    index: Option<String>,
 ) -> Result<resources::Search> {
-    resources::search(kind, &query, &game_version, offset).await
+    resources::filtered_search(
+        kind,
+        &query,
+        &game_version,
+        offset,
+        category.as_deref().unwrap_or(""),
+        index.as_deref().unwrap_or("relevance"),
+    )
+    .await
+}
+#[tauri::command]
+async fn native_resource_categories(kind: resources::Kind) -> Result<Vec<String>> {
+    resources::categories(kind).await
+}
+#[tauri::command]
+fn native_open_resource(kind: resources::Kind, project: String) -> Result<()> {
+    let url = resources::website(kind, &project)?;
+    std::process::Command::new("explorer.exe")
+        .arg(url)
+        .spawn()
+        .map(|_| ())
+        .map_err(|_| "无法打开 Modrinth 项目页面".into())
 }
 #[tauri::command]
 async fn native_resource_detail(
@@ -570,9 +593,10 @@ fn native_sign_out(host: State<'_, Arc<Host>>) -> Result<()> {
     host.sign_out()
 }
 #[tauri::command]
-fn native_open_login() -> Result<()> {
+fn native_open_login(host: State<'_, Arc<Host>>) -> Result<()> {
+    let website = host.login_website()?;
     std::process::Command::new("explorer.exe")
-        .arg("https://microsoft.com/link")
+        .arg(website)
         .spawn()
         .map(|_| ())
         .map_err(|_| "无法打开系统浏览器，请手动访问 https://microsoft.com/link".into())
@@ -628,6 +652,8 @@ fn main() {
             native_pack_install,
             native_pack_online,
             native_resource_search,
+            native_resource_categories,
+            native_open_resource,
             native_resource_detail,
             native_resource_plan,
             native_resource_install,

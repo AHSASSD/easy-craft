@@ -8,6 +8,42 @@
 .resource-browser .card {
   margin: 16px 0;
 }
+.resource-search-form {
+  display: grid;
+  grid-template-columns: minmax(0, 2fr) minmax(0, 1fr);
+  align-items: end;
+  gap: 16px;
+}
+.resource-search-form > label {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+  margin: 0;
+}
+.resource-search-form input,
+.resource-search-form select {
+  box-sizing: border-box;
+  width: 100%;
+  min-width: 0;
+  height: 40px;
+  margin: 0;
+  padding: 8px 12px;
+  line-height: 22px;
+}
+.resource-search-form .resource-search-actions {
+  grid-column: 1 / -1;
+  margin: 0;
+  align-items: center;
+}
+.resource-search-actions .hint {
+  margin: 0;
+}
+@media (max-width: 800px) {
+  .resource-search-form {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
 .resource-browser .resource-install > .notice {
   display: block;
   font-size: 13px;
