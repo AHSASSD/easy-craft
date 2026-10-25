@@ -1478,6 +1478,141 @@ try {
   console.log(
     'PASS: native skin avatar, world rules/difficulty/time/weather, exact backup and options round trip.',
   );
+  if (process.argv.includes('--cache-clear')) {
+    const resourceCache = path.join(testState.dataRoot, 'cache/modrinth');
+    await mkdir(resourceCache, { recursive: true });
+    const payload = Buffer.from(`Cache hardlink fixture ${randomUUID()}`);
+    const cacheFile = path.join(
+      resourceCache,
+      `${createHash('sha512').update(payload).digest('hex')}.bin`,
+    );
+    const linked = path.join(
+      fabricGameDir,
+      `.easycraft-cache-link-${randomUUID()}.bin`,
+    );
+    const { writeFile, link } = await import('node:fs/promises');
+    await writeFile(cacheFile, payload);
+    await link(cacheFile, linked);
+    const stalePayload = Buffer.from(`Cache stale fixture ${randomUUID()}`);
+    const staleFile = path.join(
+      resourceCache,
+      `${createHash('sha512').update(stalePayload).digest('hex')}.bin`,
+    );
+    await writeFile(staleFile, stalePayload);
+    const unknown = path.join(resourceCache, `ec-preserve-${randomUUID()}.txt`);
+    await writeFile(unknown, 'keep unknown');
+    const partial = path.join(
+      testState.dataRoot,
+      'file-inputs',
+      `${randomUUID()}.part`,
+    );
+    await mkdir(path.dirname(partial), { recursive: true });
+    await writeFile(partial, 'uncommitted cache fixture');
+    const protectedFiles = [
+      linked,
+      unknown,
+      path.join(worldDir, 'level.dat'),
+      path.join(gameDir, 'options.txt'),
+      path.join(testState.dataRoot, 'settings.json'),
+      path.join(testState.dataRoot, 'instances.json'),
+      path.join(testState.dataRoot, 'versions/1.21.1/client.jar'),
+    ];
+    for (const name of await readdir(path.join(fabricGameDir, 'mods')))
+      if (/\.jar(?:\.disabled)?$/i.test(name))
+        protectedFiles.push(path.join(fabricGameDir, 'mods', name));
+    const protectedHashes = await Promise.all(
+      protectedFiles.map(async (file) => [
+        file,
+        createHash('sha512')
+          .update(await readFile(file))
+          .digest('hex'),
+      ]),
+    );
+    await page
+      .getByRole('navigation')
+      .getByRole('button', { name: '设置', exact: true })
+      .click();
+    await page.getByRole('button', { name: '下载设置', exact: true }).click();
+    const manager = page.getByLabel('下载缓存管理', { exact: true });
+    await manager.getByLabel('检查资源下载缓存').waitFor();
+    for (const name of [
+      '检查整合包文件缓存',
+      '检查在线整合包归档',
+      '检查整合包检查快照',
+    ])
+      await manager.getByLabel(name).uncheck();
+    await manager
+      .getByRole('button', { name: '检查缓存并预览清理', exact: true })
+      .click();
+    const preview = manager.getByLabel('缓存清理预览', { exact: true });
+    await preview.waitFor({ timeout: 120000 });
+    assert(
+      await preview
+        .getByRole('button', { name: '确认清理所列缓存', exact: true })
+        .isDisabled(),
+    );
+    assert.deepEqual(await readFile(cacheFile), payload);
+    const changed = Buffer.from(stalePayload);
+    changed[0] ^= 1;
+    await writeFile(staleFile, changed);
+    const viewport = await page.evaluate(() => ({
+      width: innerWidth,
+      height: innerHeight,
+    }));
+    await page.setViewportSize({ width: 800, height: 540 });
+    await preview
+      .getByRole('button', { name: '确认清理所列缓存', exact: true })
+      .scrollIntoViewIfNeeded();
+    assert(
+      await manager.evaluate(
+        (element) => element.scrollWidth <= element.clientWidth + 1,
+      ),
+    );
+    assert(
+      await page.evaluate(
+        () => document.documentElement.scrollWidth <= innerWidth + 1,
+      ),
+    );
+    await preview.screenshot({
+      path: path.join(project, 'output/playwright/cache-cleanup-preview.png'),
+    });
+    await page.setViewportSize(viewport);
+    await manager.getByLabel('确认缓存清理清单').check();
+    await manager
+      .getByRole('button', { name: '确认清理所列缓存', exact: true })
+      .click();
+    await manager.getByLabel('缓存清理结果').waitFor({ timeout: 120000 });
+    await manager.getByText('查看保留原因', { exact: true }).click();
+    await manager
+      .getByText('文件自预览后发生变化，已保留', { exact: true })
+      .waitFor();
+    assert.equal(
+      await readFile(cacheFile).then(
+        () => true,
+        () => false,
+      ),
+      false,
+    );
+    assert.equal(
+      await readFile(partial).then(
+        () => true,
+        () => false,
+      ),
+      false,
+    );
+    assert.deepEqual(await readFile(staleFile), changed);
+    for (const [file, digest] of protectedHashes)
+      assert.equal(
+        createHash('sha512')
+          .update(await readFile(file))
+          .digest('hex'),
+        digest,
+        `Protected file changed: ${file}`,
+      );
+    console.log(
+      'PASS: native cache preview and confirmed cleanup remove only cache links; changed/unknown files, installed mod JARs, the linked instance file, world/options/catalog/settings and client remain intact.',
+    );
+  }
   await page
     .getByRole('navigation')
     .getByRole('button', { name: '设置', exact: true })
@@ -1730,6 +1865,22 @@ try {
             ),
           );
         rendered = true;
+        if (process.argv.includes('--cache-clear')) {
+          const refused = await page.evaluate(async () => {
+            try {
+              await window.__TAURI_INTERNALS__.invoke('native_cache_prepare', {
+                groups: ['resources'],
+              });
+              return '';
+            } catch (error) {
+              return String(error);
+            }
+          });
+          assert.match(refused, /请先结束/);
+          console.log(
+            'PASS: the actual cached game starts after cleanup; cache mutation is refused while it runs.',
+          );
+        }
         if (restoreProbe) {
           const refused = await page.evaluate(async (args) => {
             try {

@@ -38,6 +38,7 @@ import { backgroundImage } from './background-image';
 import { instanceSettings } from '../core/instance-settings';
 import { AccountPanel } from './AccountPanel';
 import { MemoryPanel } from './MemoryPanel';
+import { CachePanel } from './CachePanel';
 import { JavaPanel } from './JavaPanel';
 import { NativeWorkspace } from './NativeWorkspace';
 import { WorldSettingsPanel } from './WorldSettingsPanel';
@@ -1008,25 +1009,28 @@ function Shell({ services }: { services: Services }) {
                   </section>
                 )}
                 {nav.settingsCategory === 'downloads' && (
-                  <section className="card">
-                    <h2>下载与缓存</h2>
-                    <p>
-                      当前采用已验证的有限并发、重试、哈希校验、缓存复用与取消。并发和重试次数暂不开放修改。
-                    </p>
-                    {state && (
-                      <p className="data-root">数据目录：{state.dataRoot}</p>
-                    )}
-                    <button
-                      onClick={() =>
-                        change({
-                          section: 'download',
-                          downloadCategory: 'vanilla',
-                        })
-                      }
-                    >
-                      前往原版游戏下载
-                    </button>
-                  </section>
+                  <>
+                    <section className="card">
+                      <h2>下载与缓存</h2>
+                      <p>
+                        当前采用已验证的有限并发、重试、哈希校验、缓存复用与取消。并发和重试次数暂不开放修改。
+                      </p>
+                      {state && (
+                        <p className="data-root">数据目录：{state.dataRoot}</p>
+                      )}
+                      <button
+                        onClick={() =>
+                          change({
+                            section: 'download',
+                            downloadCategory: 'vanilla',
+                          })
+                        }
+                      >
+                        前往原版游戏下载
+                      </button>
+                    </section>
+                    <CachePanel service={services.native} />
+                  </>
                 )}
                 {nav.settingsCategory === 'other' && (
                   <section className="card">

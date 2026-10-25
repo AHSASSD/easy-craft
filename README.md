@@ -39,6 +39,7 @@ npm ci
 - 本地 ZIP/MRPACK 先检查内容；在线整合包可选择 Modrinth 版本与归档，校验下载后进入同一预览。有效的原版/Fabric MRPACK 可预览全部文件与可选项，确认后下载、校验并创建独立实例。处理客户端条件及覆盖层级，完成后才原子加入游戏库；失败或中断有记录可恢复，不覆盖已有实例。当前只下载 Modrinth CDN 内容，其他加载器/来源或不明确兼容条件会拒绝；普通 ZIP/CurseForge 清单仅识别。
 - 基础资源仅允许 Mojang/Minecraft 官方域名，Fabric 依赖仅允许其官方元数据/Maven 域名；禁止重定向到其他来源，逐文件 SHA-1 校验成功才提交缓存。
 - 限制并发、连接超时、有限重试、取消、临时文件续传和已校验缓存复用。损坏缓存会重新下载，实例清单只在安装成功后提交。
+- “设置 → 下载设置”提供缓存位置、数量与内容大小统计，以及检查、清单预览和明确确认后的清理。仅处理五类已识别的下载副本/接收临时文件，不清理游戏共享资源、已安装 Mod、存档或配置备份；变化、占用和未知文件保留，可从任务栏取消并查看部分结果。
 - 每个真实实例使用独立的 game/natives 目录；不删除或覆盖用户存档。
 - 检测所选 Java 的实际主版本与 64 位架构，启动前要求匹配实例元数据。已提供工作区 Java 21 和 Java 25；选择其他可信运行时需填写其 java.exe 完整路径。
 - Microsoft 设备码授权 → Xbox → XSTS → Minecraft 令牌、所有权与档案校验；启动时可刷新账户。
@@ -106,6 +107,7 @@ node scripts/smoke-native.mjs debug --cached --background
 node scripts/smoke-native.mjs debug --cached --instance-settings --launch-offline
 node scripts/smoke-native.mjs debug --cached --restore-config --launch-offline
 node scripts/smoke-native.mjs debug --cached --streamed-drop --public-pack --launch-offline
+node scripts/smoke-native.mjs debug --cached --cache-clear --launch-offline --fabric
 ```
 
 安装集成测试会在 `.native/integration` 下载真实官方 1.21.1 资源、验证缓存修复和参数构造，不启动游戏。`-Integration offline` 将 HTTP 路由到不可用的本地代理，验证完整缓存无需联网即可准备离线参数。桌面检查使用该测试目录与临时 WebView2 调试端口，验证窗口、IPC、Java、官方清单、正版模式登录限制和离线配置；加 `--launch-offline` 才会实际启动游戏，观察初始化后结束进程。测试临时修改并还原测试目录的设置，不修改用户 data 目录，不进行 Microsoft 登录。
@@ -136,6 +138,7 @@ src-tauri/src/resources.rs Modrinth 搜索、项目和兼容版本查询
 src-tauri/src/resource_install.rs 固定依赖计划、JAR 条件校验、SHA-512 与事务恢复
 src-tauri/src/worlds.rs  受限 NBT 原位修改、音画选项、占用锁与有归属的配置备份恢复
 src-tauri/src/file_upload.rs  分块文件接收、固定目标、大小/顺序检查与临时文件生命周期
+src-tauri/src/cache.rs   下载副本与临时文件统计、哈希预览、按已核对句柄清理及保留报告
 src-tauri/src/skins.rs   官方皮肤下载缓存、离线头像 PNG 校验
 scripts/native.ps1      工作区便携工具链入口
 tests/                  前端单元/组件与浏览器流程测试

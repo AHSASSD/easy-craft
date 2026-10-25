@@ -30,6 +30,7 @@ struct Inner {
     pack_plan: Option<crate::modpack::Plan>,
     upload: Option<crate::file_upload::Upload>,
     upload_token: Option<String>,
+    cache_plan: Option<crate::cache::Plan>,
 }
 pub struct Host {
     _lock: fs::File,
@@ -134,6 +135,7 @@ impl Host {
                 pack_plan: None,
                 upload: None,
                 upload_token: None,
+                cache_plan: None,
             }),
         }))
     }
@@ -322,6 +324,8 @@ impl Host {
             result.err().unwrap_or_else(|| {
                 if inner.task.phase == "pack-checked" {
                     "归档检查完成；尚未安装。"
+                } else if inner.task.phase == "cache-planned" {
+                    "缓存检查完成；尚未清理文件。"
                 } else if inner.task.phase == "file-committed" {
                     "文件已导入；是否在游戏中启用需确认。"
                 } else {
@@ -338,6 +342,72 @@ impl Host {
     pub fn background(&self, bytes: Option<Vec<u8>>) -> Result<Option<String>> {
         let _guard = self.inner.lock().map_err(|_| "宿主状态不可用")?;
         crate::appearance::background(&self.root, bytes.as_deref())
+    }
+    pub fn cache_summary(&self) -> Result<crate::cache::Summary> {
+        crate::cache::summary(&self.root)
+    }
+    pub fn prepare_cache(&self, groups: Vec<crate::cache::Group>) -> Result<crate::cache::Plan> {
+        let cancel = self.begin_task("检查可清理的下载缓存")?;
+        let result = crate::cache::prepare(&self.root, &groups, &cancel, |completed, total| {
+            self.progress("cache-check", "检查下载缓存候选文件", completed, total)
+        });
+        let mut inner = self.inner.lock().map_err(|_| "宿主状态不可用")?;
+        if let Ok(plan) = &result {
+            if !cancel.is_cancelled() {
+                inner.cache_plan = Some(plan.clone());
+                inner.task.phase = "cache-planned".into();
+            }
+        }
+        Self::finish_locked(
+            &mut inner,
+            result.as_ref().map(|_| ()).map_err(Clone::clone),
+            &cancel,
+        );
+        if cancel.is_cancelled() {
+            return Err("缓存检查已取消；未清理文件".into());
+        }
+        result
+    }
+    pub fn clear_cache(&self, token: &str) -> Result<crate::cache::Report> {
+        let cancel = self.begin_task("清理已预览的下载缓存")?;
+        let plan = {
+            let mut inner = self.inner.lock().map_err(|_| "宿主状态不可用")?;
+            if !inner
+                .cache_plan
+                .as_ref()
+                .is_some_and(|plan| plan.token == token)
+            {
+                let error = "缓存预览令牌无效或已被替换，请重新检查".to_string();
+                Self::finish_locked(&mut inner, Err(error.clone()), &cancel);
+                return Err(error);
+            }
+            inner.cache_plan.take().ok_or("缓存预览不可用")?
+        };
+        let mut result = crate::cache::clear(&self.root, plan, &cancel, |completed, total| {
+            self.progress("cache-clear", "处理已确认的缓存文件", completed, total)
+        });
+        let mut inner = self.inner.lock().map_err(|_| "宿主状态不可用")?;
+        if let Ok(report) = &mut result {
+            report.cancelled |= cancel.is_cancelled();
+        }
+        Self::finish_locked(
+            &mut inner,
+            result.as_ref().map(|_| ()).map_err(Clone::clone),
+            &cancel,
+        );
+        if let Ok(report) = &result {
+            inner.task.message = format!(
+                "缓存清理{}：移除 {} 项，保留 {} 项",
+                if report.cancelled {
+                    "已取消"
+                } else {
+                    "完成"
+                },
+                report.removed_files,
+                report.kept.len()
+            );
+        }
+        result
     }
     pub fn cancel(&self) {
         let mut inner = self.inner.lock().expect("host state poisoned");

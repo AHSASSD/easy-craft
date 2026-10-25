@@ -2,6 +2,7 @@
 
 mod appearance;
 mod auth;
+mod cache;
 mod content;
 mod fabric;
 mod file_picker;
@@ -277,6 +278,30 @@ async fn native_options_save(
 #[tauri::command]
 async fn native_avatar(host: State<'_, Arc<Host>>) -> Result<Option<String>> {
     skins::avatar(&host).await
+}
+#[tauri::command]
+async fn native_cache_summary(host: State<'_, Arc<Host>>) -> Result<cache::Summary> {
+    let host = host.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || host.cache_summary())
+        .await
+        .map_err(|_| "缓存统计失败".to_string())?
+}
+#[tauri::command]
+async fn native_cache_prepare(
+    host: State<'_, Arc<Host>>,
+    groups: Vec<cache::Group>,
+) -> Result<cache::Plan> {
+    let host = host.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || host.prepare_cache(groups))
+        .await
+        .map_err(|_| "缓存检查失败".to_string())?
+}
+#[tauri::command]
+async fn native_cache_clear(host: State<'_, Arc<Host>>, token: String) -> Result<cache::Report> {
+    let host = host.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || host.clear_cache(&token))
+        .await
+        .map_err(|_| "缓存清理失败".to_string())?
 }
 #[tauri::command]
 async fn native_config_backups(
@@ -560,6 +585,9 @@ fn main() {
             native_config_backup_preview,
             native_config_backup_restore,
             native_avatar,
+            native_cache_summary,
+            native_cache_prepare,
+            native_cache_clear,
             native_avatar_save,
             native_instance_launch_settings,
             native_background,

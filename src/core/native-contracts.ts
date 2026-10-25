@@ -47,6 +47,36 @@ export type NativeSnapshot = {
   avatar: string | null;
 };
 export type WorldEntry = { id: string; name: string };
+export type CacheGroup =
+  'resources' | 'packFiles' | 'packArchives' | 'fileInputs' | 'packInputs';
+export type CacheSummary = {
+  groups: {
+    group: CacheGroup;
+    folder: string;
+    files: number;
+    bytes: number;
+    skipped: number;
+  }[];
+  warnings: string[];
+};
+export type CacheFile = {
+  group: CacheGroup;
+  path: string;
+  bytes: number;
+  integrity: 'verified' | 'corrupt' | 'temporary';
+};
+export type CachePlan = {
+  token: string;
+  files: CacheFile[];
+  bytes: number;
+  warnings: string[];
+};
+export type CacheReport = {
+  removedFiles: number;
+  removedBytes: number;
+  kept: { path: string; reason: string }[];
+  cancelled: boolean;
+};
 export type ConfigBackup = {
   id: string;
   sha1: string;
@@ -184,6 +214,9 @@ export type MemoryInfo = {
   reserveMb: number;
 };
 export interface NativeService extends Observable<NativeSnapshot> {
+  cacheSummary(): Promise<CacheSummary>;
+  prepareCache(groups: CacheGroup[]): Promise<CachePlan>;
+  clearCache(token: string): Promise<CacheReport>;
   datapacks(id: string, worldId: string): Promise<ContentEntry[]>;
   openDatapacks(id: string, worldId: string): Promise<void>;
   planResources(

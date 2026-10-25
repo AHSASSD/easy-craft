@@ -599,6 +599,28 @@
 .world-settings {
   padding: 20px;
 }
+.cache-manager .toggle-row small {
+  display: block;
+  margin-top: 5px;
+  color: var(--muted);
+  line-height: 1.7;
+}
+.cache-files {
+  max-height: 22rem;
+  overflow: auto;
+  padding-left: 20px;
+}
+.cache-files li {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  margin: 12px 0;
+  overflow-wrap: anywhere;
+}
+.cache-files code {
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
 .config-backups {
   margin-top: 18px;
 }

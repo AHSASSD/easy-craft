@@ -16,6 +16,10 @@ import type {
   ResourcePlan,
   ConfigBackup,
   ConfigBackupPreview,
+  CacheGroup,
+  CacheSummary,
+  CachePlan,
+  CacheReport,
 } from '../core/native-contracts';
 import { isRecord } from '../core/services';
 const string = (value: unknown): value is string => typeof value === 'string';
@@ -25,6 +29,31 @@ const resourceId = (value: unknown): value is string =>
   string(value) && /^[A-Za-z0-9]{1,64}$/.test(value);
 const bounded = (value: unknown, max: number): value is string =>
   string(value) && value.length <= max;
+const cacheFolders: Record<CacheGroup, string> = {
+  resources: 'cache/modrinth',
+  packFiles: 'pack-cache',
+  packArchives: 'pack-archives',
+  fileInputs: 'file-inputs',
+  packInputs: 'pack-inputs',
+};
+const cacheGroup = (value: unknown): value is CacheGroup =>
+  string(value) && Object.hasOwn(cacheFolders, value);
+const cacheWarnings = (value: unknown): value is string[] =>
+  Array.isArray(value) &&
+  value.length <= 2010 &&
+  value.every((message: unknown) => bounded(message, 2048));
+function cachePath(group: CacheGroup, path: unknown): boolean {
+  if (!bounded(path, 256) || !path.startsWith(`${cacheFolders[group]}/`))
+    return false;
+  const name = path.slice(cacheFolders[group].length + 1);
+  return (
+    !name.includes('/') &&
+    !name.includes('\\') &&
+    name !== '.' &&
+    name !== '..' &&
+    name.length > 0
+  );
+}
 function validBackup(value: unknown): value is ConfigBackup {
   return (
     isRecord(value) &&
@@ -758,6 +787,98 @@ export function createNativeService(
       return value.map((item: { id: string }) => item.id);
     },
     saveSettings: (settings) => operation('native_settings', { settings }),
+    cacheSummary: async () => {
+      const value = await request('native_cache_summary');
+      if (
+        !isRecord(value) ||
+        !Array.isArray(value.groups) ||
+        value.groups.length > 5 ||
+        !cacheWarnings(value.warnings) ||
+        !value.groups.every(
+          (row: unknown) =>
+            isRecord(row) &&
+            cacheGroup(row.group) &&
+            row.folder === cacheFolders[row.group] &&
+            integer(row.files) &&
+            row.files <= 20000 &&
+            integer(row.bytes) &&
+            row.bytes <= 20000 * 512 * 1024 * 1024 &&
+            integer(row.skipped) &&
+            row.skipped <= 20000,
+        ) ||
+        new Set(value.groups.map((row) => row.group)).size !==
+          value.groups.length
+      )
+        throw new Error('缓存统计响应无效');
+      return value as unknown as CacheSummary;
+    },
+    prepareCache: async (groups) => {
+      try {
+        if (
+          !groups.length ||
+          groups.length > 5 ||
+          !groups.every(cacheGroup) ||
+          new Set(groups).size !== groups.length
+        )
+          throw new Error('请选择有效的缓存分类');
+        const value = await request('native_cache_prepare', { groups });
+        if (
+          !isRecord(value) ||
+          !string(value.token) ||
+          !/^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(value.token) ||
+          !Array.isArray(value.files) ||
+          value.files.length > 2000 ||
+          !integer(value.bytes) ||
+          !cacheWarnings(value.warnings) ||
+          !value.files.every(
+            (file: unknown) =>
+              isRecord(file) &&
+              cacheGroup(file.group) &&
+              groups.includes(file.group) &&
+              cachePath(file.group, file.path) &&
+              integer(file.bytes) &&
+              file.bytes <= 512 * 1024 * 1024 &&
+              ['verified', 'corrupt', 'temporary'].includes(
+                String(file.integrity),
+              ),
+          ) ||
+          new Set(value.files.map((file) => file.path)).size !==
+            value.files.length ||
+          value.files.reduce((sum, file) => sum + file.bytes, 0) !== value.bytes
+        )
+          throw new Error('缓存预览目标或响应无效');
+        return value as unknown as CachePlan;
+      } finally {
+        await refresh(true);
+      }
+    },
+    clearCache: async (token) => {
+      try {
+        const value = await request('native_cache_clear', { token });
+        if (
+          !isRecord(value) ||
+          !integer(value.removedFiles) ||
+          value.removedFiles > 2000 ||
+          !integer(value.removedBytes) ||
+          value.removedBytes > 2000 * 512 * 1024 * 1024 ||
+          typeof value.cancelled !== 'boolean' ||
+          !Array.isArray(value.kept) ||
+          value.kept.length + value.removedFiles > 2000 ||
+          !value.kept.every(
+            (file: unknown) =>
+              isRecord(file) &&
+              Object.keys(cacheFolders).some((group) =>
+                cachePath(group as CacheGroup, file.path),
+              ) &&
+              bounded(file.reason, 2048),
+          )
+        )
+          throw new Error('缓存清理报告响应无效，请重新检查实际状态');
+        return value as unknown as CacheReport;
+      } finally {
+        await refresh(true);
+      }
+    },
     saveInstanceLaunch: (id, expected, launch) => {
       if (!validLaunchOverrides(expected) || !validLaunchOverrides(launch))
         return Promise.reject(new Error('实例启动配置无效'));

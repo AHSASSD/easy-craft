@@ -16,6 +16,7 @@ import { JavaPanel } from '../src/features/JavaPanel';
 import { ContentPanel } from '../src/features/ContentPanel';
 import { ResourceBrowser } from '../src/features/ResourceBrowser';
 import { PackInspector } from '../src/features/PackInspector';
+import { CachePanel } from '../src/features/CachePanel';
 import { instanceSettings } from '../src/core/instance-settings';
 import {
   UnsavedChanges,
@@ -701,6 +702,105 @@ test('content drops need the closed-game acknowledgement before receiving any by
   fireEvent.click(screen.getByLabelText('确认内容修改前游戏已关闭'));
   drop();
   await screen.findByText('文件已导入；在游戏中是否启用仍需确认。');
+  service.stop();
+});
+test('cache cleanup requires a preview and confirmation and sends only its frozen token', async () => {
+  const token = '11111111-1111-4111-8111-111111111111';
+  const path = `cache/modrinth/${'b'.repeat(128)}.bin`;
+  const summary = {
+    groups: [
+      {
+        group: 'resources',
+        folder: 'cache/modrinth',
+        files: 1,
+        bytes: 3,
+        skipped: 1,
+      },
+    ],
+    warnings: [],
+  };
+  const plan = {
+    token,
+    files: [{ group: 'resources', path, bytes: 3, integrity: 'verified' }],
+    bytes: 3,
+    warnings: ['未知内容保留'],
+  };
+  const call = vi.fn(async (command: string) => {
+    if (command === 'native_cache_summary') return summary;
+    if (command === 'native_cache_prepare') return plan;
+    if (command === 'native_cache_clear')
+      return {
+        removedFiles: 0,
+        removedBytes: 0,
+        kept: [{ path, reason: '文件已变化，已保留' }],
+        cancelled: false,
+      };
+    return state();
+  });
+  const service = createNativeService(true, call as typeof invoke);
+  await service.refresh();
+  render(createElement(CachePanel, { service }));
+  await screen.findByLabelText('检查资源下载缓存');
+  expect(
+    call.mock.calls.some(([command]) => command === 'native_cache_clear'),
+  ).toBe(false);
+  fireEvent.click(screen.getByText('检查缓存并预览清理'));
+  await screen.findByLabelText('缓存清理预览');
+  const clear = screen.getByText('确认清理所列缓存') as HTMLButtonElement;
+  expect(clear.disabled).toBe(true);
+  fireEvent.click(screen.getByLabelText('确认缓存清理清单'));
+  fireEvent.click(clear);
+  await screen.findByLabelText('缓存清理结果');
+  await screen.findByText('文件已变化，已保留');
+  expect(screen.getByRole('status').textContent).toContain('已移除 0');
+  expect(call).toHaveBeenCalledWith('native_cache_clear', { token });
+  service.stop();
+});
+test('cache response validation rejects wrong categories, escaped paths and inconsistent sizes', async () => {
+  let response: unknown;
+  const call = vi.fn(async (command: string) =>
+    command === 'native_status' ? state() : response,
+  );
+  const service = createNativeService(true, call as typeof invoke);
+  response = {
+    groups: [
+      {
+        group: 'resources',
+        folder: 'instances',
+        files: 1,
+        bytes: 3,
+        skipped: 0,
+      },
+    ],
+    warnings: [],
+  };
+  await expect(service.cacheSummary()).rejects.toThrow('缓存统计响应无效');
+  const entry = {
+    group: 'resources',
+    path: `cache/modrinth/${'a'.repeat(128)}.bin`,
+    bytes: 3,
+    integrity: 'verified',
+  };
+  const plan = {
+    token: '11111111-1111-4111-8111-111111111111',
+    files: [entry],
+    bytes: 3,
+    warnings: [],
+  };
+  for (const changed of [
+    { ...entry, path: 'instances/world/level.dat' },
+    { ...entry, group: 'packFiles' },
+  ]) {
+    response = { ...plan, files: [changed] };
+    await expect(service.prepareCache(['resources'])).rejects.toThrow(
+      '缓存预览目标',
+    );
+  }
+  response = { ...plan, bytes: 999 };
+  await expect(service.prepareCache(['resources'])).rejects.toThrow(
+    '缓存预览目标',
+  );
+  await expect(service.prepareCache([])).rejects.toThrow('请选择有效');
   service.stop();
 });
 function LeaveEditor({ onLeave }: { onLeave(): void }) {
