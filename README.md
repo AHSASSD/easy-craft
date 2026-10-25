@@ -25,6 +25,7 @@ npm ci
 - “实例 → 存档”读取真实 Java 存档：和平/简单/普通/困难、难度锁定、允许命令、默认游戏模式、时间、天气，以及存档已有的布尔/整数游戏规则。规则支持中英文搜索，其他文本规则只读；不会凭空添加版本不支持的规则。
 - 音画设置独立读写实例的 options.txt：主音量、音乐音量、渲染距离、全屏。默认游戏模式不覆盖现有玩家的独立模式。
 - 保存前校验文件版本与世界占用状态，备份原配置后只修改受支持字段；区块、背包及未知 NBT 字节保持不变。备份位于实例 game/.easycraft-backups/{UUID}/，并显示具体路径；它是配置备份，不是完整世界备份。外部游戏停在主菜单时无法可靠检测，保存前请退出该实例。
+- 世界与音画页面可查看有归属记录的备份、预览变更并确认恢复；恢复前再次备份，只应用已支持字段，保留当前未知数据。过期预览、篡改和跨目标备份拒绝写入；早期无归属备份保留，不自动推断目标。
 - 极限模式世界只读；26.1 更改后的难度布局暂不支持，读取时明确提示且不会覆盖文件。当前按存档目录名称显示列表。
 - 左下角头像直接打开账户弹窗，选择正版登录或离线登录，保存后显示当前真实身份；不必在下载中心寻找账户配置。
 - 头像默认从皮肤头部裁切并叠加帽子层。正版档案返回的官方皮肤会缓存；离线账户可以选择 64×64 或 64×32 PNG。离线图片只改变启动器头像，不会替换游戏内皮肤；没有可用皮肤时显示默认头像。
@@ -103,6 +104,7 @@ node scripts/smoke-native.mjs debug --cached --public-pack --launch-offline
 node scripts/smoke-native.mjs debug --cached --online-pack --launch-offline
 node scripts/smoke-native.mjs debug --cached --background
 node scripts/smoke-native.mjs debug --cached --instance-settings --launch-offline
+node scripts/smoke-native.mjs debug --cached --restore-config --launch-offline
 ```
 
 安装集成测试会在 `.native/integration` 下载真实官方 1.21.1 资源、验证缓存修复和参数构造，不启动游戏。`-Integration offline` 将 HTTP 路由到不可用的本地代理，验证完整缓存无需联网即可准备离线参数。桌面检查使用该测试目录与临时 WebView2 调试端口，验证窗口、IPC、Java、官方清单、正版模式登录限制和离线配置；加 `--launch-offline` 才会实际启动游戏，观察初始化后结束进程。测试临时修改并还原测试目录的设置，不修改用户 data 目录，不进行 Microsoft 登录。
@@ -131,7 +133,7 @@ src-tauri/src/modpack.rs MRPACK 固定计划、客户端文件、覆盖层级与
 src-tauri/src/content.rs 本地内容扫描、启停、导入、截图与目录入口
 src-tauri/src/resources.rs Modrinth 搜索、项目和兼容版本查询
 src-tauri/src/resource_install.rs 固定依赖计划、JAR 条件校验、SHA-512 与事务恢复
-src-tauri/src/worlds.rs  受限 NBT 原位修改、音画选项、占用锁与配置备份
+src-tauri/src/worlds.rs  受限 NBT 原位修改、音画选项、占用锁与有归属的配置备份恢复
 src-tauri/src/skins.rs   官方皮肤下载缓存、离线头像 PNG 校验
 scripts/native.ps1      工作区便携工具链入口
 tests/                  前端单元/组件与浏览器流程测试

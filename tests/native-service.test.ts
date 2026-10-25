@@ -439,6 +439,121 @@ test('instance settings reject authentication overrides and invalid memory at th
     ).toBe(false);
   }
 });
+test('config restoration requires both acknowledgements, preserves errors and rereads committed options', async () => {
+  let options = {
+    revision: 'a'.repeat(40),
+    masterVolume: 0.75,
+    musicVolume: 1,
+    renderDistance: 12,
+    fullscreen: false,
+  };
+  const backup = {
+    id: '11111111-1111-4111-8111-111111111111',
+    sha1: 'b'.repeat(40),
+    bytes: 20,
+    createdMs: 1700000000000,
+  };
+  const preview = {
+    backup,
+    worldId: null,
+    revision: options.revision,
+    changes: [{ key: '主音量（0–1）', before: '0.75', after: '0.42' }],
+  };
+  let fail = true;
+  const call = vi.fn(async (command: string) => {
+    if (command === 'native_worlds') return [];
+    if (command === 'native_options') return structuredClone(options);
+    if (command === 'native_config_backups')
+      return { entries: [backup], warnings: [] };
+    if (command === 'native_config_backup_preview') return preview;
+    if (command === 'native_config_backup_restore') {
+      if (fail) throw '当前配置已变化，请重新预览';
+      options = { ...options, revision: 'c'.repeat(40), masterVolume: 0.42 };
+      return 'controlled-backup/options.txt';
+    }
+    return state();
+  });
+  const service = createNativeService(true, call as typeof invoke);
+  render(
+    createElement(WorldSettingsPanel, {
+      service,
+      id: 'instance',
+      section: 'options',
+      running: false,
+    }),
+  );
+  await screen.findByLabelText('主音量');
+  fireEvent.click(screen.getByText('查看配置备份'));
+  await screen.findByLabelText('选择音画配置备份');
+  fireEvent.click(screen.getByText('预览配置恢复'));
+  await screen.findByLabelText('配置恢复变更预览');
+  const restore = screen.getByText('确认恢复配置') as HTMLButtonElement;
+  expect(restore.disabled).toBe(true);
+  fireEvent.click(screen.getByLabelText('确认配置恢复变更'));
+  expect(restore.disabled).toBe(true);
+  fireEvent.click(screen.getByLabelText('确认游戏已关闭'));
+  expect(restore.disabled).toBe(false);
+  fireEvent.change(screen.getByLabelText('主音量'), {
+    target: { value: '50' },
+  });
+  expect(restore.disabled).toBe(true);
+  fireEvent.change(screen.getByLabelText('主音量'), {
+    target: { value: '75' },
+  });
+  fireEvent.click(restore);
+  await screen.findByRole('alert');
+  expect(screen.getByLabelText('配置恢复变更预览')).toBeTruthy();
+  expect((screen.getByLabelText('主音量') as HTMLInputElement).value).toBe(
+    '75',
+  );
+  fail = false;
+  fireEvent.click(restore);
+  await screen.findByText(/已恢复所选设置，恢复前的配置已备份/);
+  expect((screen.getByLabelText('主音量') as HTMLInputElement).value).toBe(
+    '42',
+  );
+  expect(call).toHaveBeenCalledWith('native_config_backup_restore', {
+    id: 'instance',
+    worldId: null,
+    backupId: backup.id,
+    revision: preview.revision,
+    backupSha1: backup.sha1,
+  });
+  service.stop();
+});
+test('backup responses are bounded and restoration previews cannot change the selected world or backup', async () => {
+  const backup = {
+    id: '11111111-1111-4111-8111-111111111111',
+    sha1: 'b'.repeat(40),
+    bytes: 20,
+    createdMs: 1700000000000,
+  };
+  let response: unknown = { entries: [backup, backup], warnings: [] };
+  const call = vi.fn(async () => response);
+  const service = createNativeService(true, call as typeof invoke);
+  await expect(service.configBackups('instance', 'WorldA')).rejects.toThrow(
+    '列表响应无效',
+  );
+  response = {
+    backup,
+    worldId: 'WorldB',
+    revision: 'a'.repeat(40),
+    changes: [],
+  };
+  await expect(
+    service.previewConfigBackup('instance', backup.id, 'WorldA'),
+  ).rejects.toThrow('预览目标');
+  response = {
+    backup,
+    worldId: 'WorldA',
+    revision: 'a'.repeat(40),
+    changes: [{ key: 'Difficulty', before: '2', after: 3 }],
+  };
+  await expect(
+    service.previewConfigBackup('instance', backup.id, 'WorldA'),
+  ).rejects.toThrow('预览目标');
+  service.stop();
+});
 function LeaveEditor({ onLeave }: { onLeave(): void }) {
   const guard = useNavigationGuard();
   return createElement('button', { onClick: () => guard(onLeave) }, '离开表单');

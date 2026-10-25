@@ -599,6 +599,45 @@
 .world-settings {
   padding: 20px;
 }
+.config-backups {
+  margin-top: 18px;
+}
+.config-backups > label {
+  display: grid;
+  gap: 8px;
+  margin: 12px 0;
+}
+.backup-changes {
+  overflow-x: auto;
+}
+.config-backups .backup-preview {
+  display: block;
+}
+.backup-preview > label {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin-top: 12px;
+}
+.config-backups .backup-preview > .primary {
+  min-height: 36px;
+  padding: 10px 14px;
+  border: 1px solid #338636;
+  background: #338636;
+  color: white;
+}
+.backup-changes table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+.backup-changes th,
+.backup-changes td {
+  padding: 9px;
+  border-bottom: 1px solid var(--border);
+  text-align: left;
+  overflow-wrap: anywhere;
+}
 .world-settings h2 {
   font-size: 19px;
   margin: 0 0 8px;

@@ -47,6 +47,19 @@ export type NativeSnapshot = {
   avatar: string | null;
 };
 export type WorldEntry = { id: string; name: string };
+export type ConfigBackup = {
+  id: string;
+  sha1: string;
+  bytes: number;
+  createdMs: number;
+};
+export type ConfigBackupList = { entries: ConfigBackup[]; warnings: string[] };
+export type ConfigBackupPreview = {
+  backup: ConfigBackup;
+  worldId: string | null;
+  revision: string;
+  changes: { key: string; before: string; after: string }[];
+};
 export type ResourceKind =
   'mod' | 'resourcepack' | 'shader' | 'datapack' | 'modpack';
 export type ResourceHit = {
@@ -219,6 +232,16 @@ export interface NativeService extends Observable<NativeSnapshot> {
   ): Promise<string>;
   options(id: string): Promise<ClientOptions>;
   saveOptions(id: string, options: ClientOptions): Promise<string>;
+  configBackups(id: string, worldId?: string): Promise<ConfigBackupList>;
+  previewConfigBackup(
+    id: string,
+    backupId: string,
+    worldId?: string,
+  ): Promise<ConfigBackupPreview>;
+  restoreConfigBackup(
+    id: string,
+    preview: ConfigBackupPreview,
+  ): Promise<string>;
   avatar(): Promise<string | null>;
   saveAvatar(bytes: number[]): Promise<void>;
   background(bytes?: number[]): Promise<string | null>;

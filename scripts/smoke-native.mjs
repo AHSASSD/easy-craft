@@ -65,6 +65,7 @@ let originalSettings;
 let originalInstanceLaunch;
 let page;
 let installedPack;
+let restoreProbe;
 let launchedGame;
 async function selectNativeFile(button, file) {
   assert.equal(
@@ -1109,6 +1110,87 @@ try {
     await readFile(backup),
     await readFile(path.join(project, '.native/fixtures/world/level.dat')),
   );
+  if (process.argv.includes('--restore-config')) {
+    const panel = page.getByLabel('世界配置备份恢复', { exact: true });
+    const backupId = path.basename(path.dirname(backup));
+    await panel
+      .getByRole('button', { name: '查看配置备份', exact: true })
+      .click();
+    await panel.getByLabel('选择世界配置备份').selectOption(backupId);
+    await panel
+      .getByRole('button', { name: '预览配置恢复', exact: true })
+      .click();
+    await panel.getByLabel('配置恢复变更预览').waitFor();
+    assert(
+      await panel
+        .getByRole('button', { name: '确认恢复配置', exact: true })
+        .isDisabled(),
+    );
+    const preview = await page.evaluate(
+      ({ id, worldId, backupId }) =>
+        window.__TAURI_INTERNALS__.invoke('native_config_backup_preview', {
+          id,
+          worldId,
+          backupId,
+        }),
+      { id: instanceId, worldId, backupId },
+    );
+    restoreProbe = {
+      id: instanceId,
+      worldId,
+      backupId,
+      revision: preview.revision,
+      backupSha1: preview.backup.sha1,
+    };
+    const before = await readFile(path.join(worldDir, 'level.dat'));
+    await panel.getByLabel('确认配置恢复变更').check();
+    await panel
+      .getByRole('button', { name: '确认恢复配置', exact: true })
+      .click();
+    await page
+      .getByRole('status')
+      .filter({ hasText: '已恢复所选设置' })
+      .waitFor();
+    assert.equal(
+      await page.getByLabel('世界难度', { exact: true }).inputValue(),
+      '2',
+    );
+    assert.equal(
+      await page.getByLabel('世界时间', { exact: true }).inputValue(),
+      '9007199254740993',
+    );
+    const undo = (
+      await page
+        .getByRole('status')
+        .filter({ hasText: '已恢复所选设置' })
+        .innerText()
+    ).split('恢复前的配置已备份：')[1];
+    assert.deepEqual(await readFile(undo), before);
+    await panel
+      .getByRole('button', { name: '查看配置备份', exact: true })
+      .click();
+    await panel
+      .getByLabel('选择世界配置备份')
+      .selectOption(path.basename(path.dirname(undo)));
+    await panel
+      .getByRole('button', { name: '预览配置恢复', exact: true })
+      .click();
+    await panel.getByLabel('确认配置恢复变更').check();
+    await panel
+      .getByRole('button', { name: '确认恢复配置', exact: true })
+      .click();
+    await page
+      .getByRole('status')
+      .filter({ hasText: '已恢复所选设置' })
+      .waitFor();
+    assert.equal(
+      await page.getByLabel('世界难度', { exact: true }).inputValue(),
+      '3',
+    );
+    console.log(
+      'PASS: native world backup preview, explicit restore, exact pre-restore backup and undo restoration.',
+    );
+  }
   await page.getByRole('tab', { name: '实例设置', exact: true }).click();
   await page.getByLabel('确认游戏已关闭').check();
   await page.getByLabel('渲染距离', { exact: true }).fill('10');
@@ -1119,6 +1201,121 @@ try {
         .renderDistance === 10,
     instanceId,
   );
+  if (process.argv.includes('--restore-config')) {
+    const panel = page.getByLabel('音画配置备份恢复', { exact: true });
+    const before = await page.evaluate(
+      (id) => window.__TAURI_INTERNALS__.invoke('native_options', { id }),
+      instanceId,
+    );
+    await page
+      .getByLabel('主音量', { exact: true })
+      .fill(before.masterVolume === 0.37 ? '63' : '37');
+    await page
+      .getByRole('button', { name: '保存音画设置', exact: true })
+      .click();
+    await page
+      .getByRole('status')
+      .filter({ hasText: '原文件已备份' })
+      .waitFor();
+    const backupPath = (
+      await page
+        .getByRole('status')
+        .filter({ hasText: '原文件已备份' })
+        .innerText()
+    ).split('原文件已备份：')[1];
+    await panel
+      .getByRole('button', { name: '查看配置备份', exact: true })
+      .click();
+    await panel
+      .getByLabel('选择音画配置备份')
+      .selectOption(path.basename(path.dirname(backupPath)));
+    await panel
+      .getByRole('button', { name: '预览配置恢复', exact: true })
+      .click();
+    await panel.getByLabel('确认配置恢复变更').check();
+    const current = await readFile(path.join(gameDir, 'options.txt'), 'utf8');
+    await writeFile(
+      path.join(gameDir, 'options.txt'),
+      current + '\neasycraftRecoveryFixture:keep\n',
+    );
+    await panel
+      .getByRole('button', { name: '确认恢复配置', exact: true })
+      .click();
+    await panel.getByRole('alert').filter({ hasText: '变化' }).waitFor();
+    await panel
+      .getByRole('button', { name: '预览配置恢复', exact: true })
+      .click();
+    await panel.getByLabel('确认配置恢复变更').check();
+    const preRestore = await readFile(path.join(gameDir, 'options.txt'));
+    const normalViewport = await page.evaluate(() => ({
+      width: innerWidth,
+      height: innerHeight,
+    }));
+    await page.setViewportSize({ width: 800, height: 540 });
+    assert(
+      await panel
+        .getByLabel('配置恢复变更预览')
+        .evaluate((element) => getComputedStyle(element).display === 'block'),
+    );
+    assert(
+      await panel.evaluate(
+        (element) => element.scrollWidth <= element.clientWidth + 1,
+      ),
+    );
+    assert(
+      await page.evaluate(
+        () => document.documentElement.scrollWidth <= innerWidth + 1,
+      ),
+    );
+    assert(
+      await panel
+        .getByRole('button', { name: '确认恢复配置', exact: true })
+        .isEnabled(),
+    );
+    assert(
+      await panel
+        .getByRole('button', { name: '确认恢复配置', exact: true })
+        .evaluate(
+          (element) =>
+            getComputedStyle(element).backgroundColor !== 'rgba(0, 0, 0, 0)' &&
+            element.getBoundingClientRect().height >= 36,
+        ),
+    );
+    await panel.getByLabel('配置恢复变更预览').screenshot({
+      path: path.join(project, 'output/playwright/config-restore-preview.png'),
+    });
+    await page.setViewportSize(normalViewport);
+    await panel
+      .getByRole('button', { name: '确认恢复配置', exact: true })
+      .click();
+    await page
+      .getByRole('status')
+      .filter({ hasText: '已恢复所选设置' })
+      .waitFor();
+    const undo = (
+      await page
+        .getByRole('status')
+        .filter({ hasText: '已恢复所选设置' })
+        .innerText()
+    ).split('恢复前的配置已备份：')[1];
+    assert.deepEqual(await readFile(undo), preRestore);
+    assert.equal(
+      (
+        await page.evaluate(
+          (id) => window.__TAURI_INTERNALS__.invoke('native_options', { id }),
+          instanceId,
+        )
+      ).masterVolume,
+      before.masterVolume,
+    );
+    assert.match(
+      await readFile(path.join(gameDir, 'options.txt'), 'utf8'),
+      /easycraftRecoveryFixture:keep/,
+    );
+    console.log(
+      'PASS: native options restore rejects a stale preview, preserves current unknown lines and verifies its exact pre-restore backup.',
+    );
+  }
   await page.screenshot({
     path: path.join(project, 'output/playwright/world-settings.png'),
   });
@@ -1377,6 +1574,23 @@ try {
             ),
           );
         rendered = true;
+        if (restoreProbe) {
+          const refused = await page.evaluate(async (args) => {
+            try {
+              await window.__TAURI_INTERNALS__.invoke(
+                'native_config_backup_restore',
+                args,
+              );
+              return '';
+            } catch (error) {
+              return String(error);
+            }
+          }, restoreProbe);
+          assert.match(refused, /请先结束/);
+          console.log(
+            'PASS: native backup restoration is refused while the actual game process runs.',
+          );
+        }
         const lockedEdit = await page.evaluate(
           async ({ id, worldId, settings }) => {
             try {

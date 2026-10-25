@@ -2,11 +2,13 @@ import { useEffect, useState } from 'react';
 import { Globe2, Volume2, ShieldCheck, RefreshCw } from 'lucide-react';
 import { useEditor, useNavigationGuard } from './UnsavedChanges';
 import { WorldDatapacks } from './WorldDatapacks';
+import { ConfigBackups } from './ConfigBackups';
 import type {
   ClientOptions,
   NativeService,
   WorldEntry,
   WorldSettings,
+  ConfigBackupPreview,
 } from '../core/native-contracts';
 
 const ruleNames: Record<string, string> = {
@@ -181,6 +183,24 @@ export function WorldSettingsPanel({
     section !== 'options' && !!world && worldBase !== JSON.stringify(world);
   const dirtyOptions =
     section !== 'world' && !!options && optionsBase !== JSON.stringify(options);
+  async function restore(preview: ConfigBackupPreview) {
+    if (!closed || running || dirtyWorld || dirtyOptions)
+      throw new Error('请先关闭游戏并保存或放弃当前修改，再恢复配置');
+    setBusy(true);
+    setError('');
+    setMessage('');
+    try {
+      const backup = await service.restoreConfigBackup(id, preview);
+      await reload();
+      setMessage(
+        backup
+          ? `已恢复所选设置，恢复前的配置已备份：${backup}`
+          : '已恢复所选设置；原配置文件不存在，已创建新配置。',
+      );
+    } finally {
+      setBusy(false);
+    }
+  }
   useEditor({
     dirty: dirtyWorld || dirtyOptions,
     save: async () => {
@@ -592,6 +612,29 @@ export function WorldSettingsPanel({
             保存世界设置与规则
           </button>
         </section>
+      )}
+      {section !== 'options' && worldId && world && (
+        <ConfigBackups
+          key={`${id}:${worldId}`}
+          service={service}
+          id={id}
+          worldId={worldId}
+          locked={locked}
+          closed={closed}
+          dirty={dirtyWorld || dirtyOptions}
+          onRestore={restore}
+        />
+      )}
+      {section !== 'world' && options && (
+        <ConfigBackups
+          key={`${id}:options-backups`}
+          service={service}
+          id={id}
+          locked={locked}
+          closed={closed}
+          dirty={dirtyWorld || dirtyOptions}
+          onRestore={restore}
+        />
       )}
     </div>
   );

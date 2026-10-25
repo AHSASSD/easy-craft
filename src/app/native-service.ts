@@ -14,6 +14,8 @@ import type {
   ResourceSearch,
   ResourceDetail,
   ResourcePlan,
+  ConfigBackup,
+  ConfigBackupPreview,
 } from '../core/native-contracts';
 import { isRecord } from '../core/services';
 const string = (value: unknown): value is string => typeof value === 'string';
@@ -23,6 +25,37 @@ const resourceId = (value: unknown): value is string =>
   string(value) && /^[A-Za-z0-9]{1,64}$/.test(value);
 const bounded = (value: unknown, max: number): value is string =>
   string(value) && value.length <= max;
+function validBackup(value: unknown): value is ConfigBackup {
+  return (
+    isRecord(value) &&
+    string(value.id) &&
+    /^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(value.id) &&
+    string(value.sha1) &&
+    /^[0-9a-f]{40}$/i.test(value.sha1) &&
+    integer(value.bytes) &&
+    value.bytes <= 16 * 1024 * 1024 &&
+    integer(value.createdMs) &&
+    value.createdMs <= 8640000000000000
+  );
+}
+function validBackupPreview(value: unknown): value is ConfigBackupPreview {
+  return (
+    isRecord(value) &&
+    validBackup(value.backup) &&
+    (value.worldId === null || bounded(value.worldId, 255)) &&
+    string(value.revision) &&
+    (value.revision === 'missing' || /^[0-9a-f]{40}$/i.test(value.revision)) &&
+    Array.isArray(value.changes) &&
+    value.changes.length <= 1100 &&
+    value.changes.every(
+      (change: unknown) =>
+        isRecord(change) &&
+        bounded(change.key, 512) &&
+        bounded(change.before, 4096) &&
+        bounded(change.after, 4096),
+    )
+  );
+}
 function packPreview(value: unknown): PackPreview {
   if (
     !isRecord(value) ||
@@ -618,6 +651,50 @@ export function createNativeService(
     },
     saveOptions: (id, options) =>
       saveFile('native_options_save', { id, options }),
+    configBackups: async (id, worldId) => {
+      const value = await request('native_config_backups', {
+        id,
+        worldId: worldId ?? null,
+      });
+      if (
+        !isRecord(value) ||
+        !Array.isArray(value.entries) ||
+        value.entries.length > 2000 ||
+        !value.entries.every(validBackup) ||
+        new Set(value.entries.map((entry) => entry.id)).size !==
+          value.entries.length ||
+        !Array.isArray(value.warnings) ||
+        value.warnings.length > 10 ||
+        !value.warnings.every((warning: unknown) => bounded(warning, 2000))
+      )
+        throw new Error('配置备份列表响应无效');
+      return { entries: value.entries, warnings: value.warnings as string[] };
+    },
+    previewConfigBackup: async (id, backupId, worldId) => {
+      const value = await request('native_config_backup_preview', {
+        id,
+        backupId,
+        worldId: worldId ?? null,
+      });
+      if (
+        !validBackupPreview(value) ||
+        value.backup.id !== backupId ||
+        value.worldId !== (worldId ?? null)
+      )
+        throw new Error('配置恢复预览目标或响应无效');
+      return value;
+    },
+    restoreConfigBackup: (id, preview) => {
+      if (!validBackupPreview(preview))
+        return Promise.reject(new Error('配置恢复预览无效'));
+      return saveFile('native_config_backup_restore', {
+        id,
+        worldId: preview.worldId,
+        backupId: preview.backup.id,
+        revision: preview.revision,
+        backupSha1: preview.backup.sha1,
+      });
+    },
     stop: () => {
       stopped = true;
       if (timer) clearInterval(timer);

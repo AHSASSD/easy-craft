@@ -388,10 +388,40 @@ fn backed_write(
         if read(&model::safe_path(root, &backup)?)? != bytes {
             return Err("备份校验失败，未修改原文件".into());
         }
+        let record = BackupRecord {
+            owner: backup_owner(root)?,
+            target: relative.into(),
+            sha1: hash(bytes),
+            bytes: bytes.len() as u64,
+            created_ms: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_err(|_| "系统时间无效")?
+                .as_millis()
+                .try_into()
+                .map_err(|_| "系统时间无效")?,
+        };
+        model::save_json(
+            root,
+            &format!(
+                "{}/record.json",
+                backup.rsplit_once('/').ok_or("备份路径无效")?.0
+            ),
+            &record,
+        )?;
     } else if path.exists() {
         return Err("配置文件刚被创建，请重新读取后保存".into());
     }
+    if let Some(bytes) = original {
+        if read(&path)? != bytes {
+            return Err("配置在备份期间发生变化，原文件未覆盖".into());
+        }
+    } else if path.exists() {
+        return Err("配置文件刚被创建，未覆盖".into());
+    }
     model::write_file(root, relative, replacement)?;
+    if read(&path)? != replacement {
+        return Err("配置写入后回读不一致；原配置备份保留，请重新读取检查".into());
+    }
     Ok(if original.is_some() {
         model::safe_path(root, &backup)?.to_string_lossy().into()
     } else {
@@ -406,10 +436,14 @@ pub fn save_world(root: &Path, id: &str, settings: WorldSettings) -> Result<Stri
     let _lock = session_lock(&dir)?;
     let relative = format!("saves/{id}/level.dat");
     let original = read(&model::safe_path(root, &relative)?)?;
-    if hash(&original) != settings.revision {
+    let replacement = world_replacement(&original, settings)?;
+    backed_write(root, &relative, Some(&original), &replacement)
+}
+fn world_replacement(original: &[u8], settings: WorldSettings) -> Result<Vec<u8>> {
+    if hash(original) != settings.revision {
         return Err("世界配置已变化，请重新读取后保存".into());
     }
-    let current = world_settings(&original)?;
+    let current = world_settings(original)?;
     if current.difficulty_locked
         && settings.difficulty_locked
         && current.difficulty != settings.difficulty
@@ -425,7 +459,7 @@ pub fn save_world(root: &Path, id: &str, settings: WorldSettings) -> Result<Stri
     {
         return Err("世界设置无效或包含不支持的字段".into());
     }
-    let (mut raw, fields) = decode(&original)?;
+    let (mut raw, fields) = decode(original)?;
     raw[fields["Difficulty"].1] = settings.difficulty;
     if let Some((_, offset)) = fields.get("DifficultyLocked") {
         raw[*offset] = u8::from(settings.difficulty_locked);
@@ -513,7 +547,7 @@ pub fn save_world(root: &Path, id: &str, settings: WorldSettings) -> Result<Stri
     encoder.write_all(&raw).map_err(|_| "无法编码存档")?;
     let replacement = encoder.finish().map_err(|_| "存档压缩失败")?;
     world_settings(&replacement)?;
-    backed_write(root, &relative, Some(&original), &replacement)
+    Ok(replacement)
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -576,6 +610,12 @@ pub fn load_options(root: &Path) -> Result<ClientOptions> {
     parse_options(options_bytes(root)?.as_deref())
 }
 pub fn save_options(root: &Path, options: ClientOptions) -> Result<String> {
+    let _locks = lock_worlds(root)?;
+    let original = options_bytes(root)?;
+    let result = options_replacement(original.as_deref(), options)?;
+    backed_write(root, "options.txt", original.as_deref(), &result)
+}
+fn options_replacement(original: Option<&[u8]>, options: ClientOptions) -> Result<Vec<u8>> {
     if !options.master_volume.is_finite()
         || !options.music_volume.is_finite()
         || !(0.0..=1.0).contains(&options.master_volume)
@@ -584,14 +624,10 @@ pub fn save_options(root: &Path, options: ClientOptions) -> Result<String> {
     {
         return Err("游戏音量或视距无效".into());
     }
-    let original = options_bytes(root)?;
-    if parse_options(original.as_deref())?.revision != options.revision {
+    if parse_options(original)?.revision != options.revision {
         return Err("游戏选项已变化，请重新读取后保存".into());
     }
-    // Existing world locks also catch games launched outside Easy Craft while a world is open.
-    let _locks = lock_worlds(root)?;
-    let text =
-        std::str::from_utf8(original.as_deref().unwrap_or_default()).map_err(|_| "配置编码无效")?;
+    let text = std::str::from_utf8(original.unwrap_or_default()).map_err(|_| "配置编码无效")?;
     let newline = if text.contains("\r\n") { "\r\n" } else { "\n" };
     let replacements = [
         ("soundCategory_master", options.master_volume.to_string()),
@@ -612,7 +648,331 @@ pub fn save_options(root: &Path, options: ClientOptions) -> Result<String> {
         lines.push(format!("{key}:{value}"));
     }
     let result = format!("{}{newline}", lines.join(newline));
-    backed_write(root, "options.txt", original.as_deref(), result.as_bytes())
+    Ok(result.into_bytes())
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct BackupRecord {
+    owner: String,
+    target: String,
+    sha1: String,
+    bytes: u64,
+    created_ms: u64,
+}
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BackupEntry {
+    pub id: String,
+    pub sha1: String,
+    pub bytes: u64,
+    pub created_ms: u64,
+}
+#[derive(Serialize)]
+pub struct BackupList {
+    pub entries: Vec<BackupEntry>,
+    pub warnings: Vec<String>,
+}
+#[derive(Serialize)]
+pub struct ConfigChange {
+    key: String,
+    before: String,
+    after: String,
+}
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BackupPreview {
+    pub backup: BackupEntry,
+    pub world_id: Option<String>,
+    pub revision: String,
+    pub changes: Vec<ConfigChange>,
+}
+
+fn backup_owner(root: &Path) -> Result<String> {
+    let owner = if root.file_name().is_some_and(|name| name == "game") {
+        root.parent().ok_or("实例路径无效")?
+    } else {
+        root
+    };
+    owner
+        .file_name()
+        .and_then(|name| name.to_str())
+        .map(str::to_owned)
+        .ok_or_else(|| "实例归属无效".into())
+}
+fn backup_record(root: &Path, id: &str) -> Result<BackupRecord> {
+    if uuid::Uuid::parse_str(id).is_err() {
+        return Err("备份编号无效".into());
+    }
+    let path = model::safe_path(root, &format!(".easycraft-backups/{id}/record.json"))?;
+    let file = fs::File::open(path).map_err(|_| "备份缺少归属记录")?;
+    let mut bytes = vec![];
+    file.take(4097)
+        .read_to_end(&mut bytes)
+        .map_err(|_| "备份记录读取失败")?;
+    if bytes.len() > 4096 {
+        return Err("备份记录过大".into());
+    }
+    let record: BackupRecord = serde_json::from_slice(&bytes).map_err(|_| "备份记录损坏")?;
+    if record.owner != backup_owner(root)?
+        || !model::valid_sha1(&record.sha1)
+        || record.bytes > MAX_FILE
+        || record.created_ms > 8_640_000_000_000_000
+    {
+        return Err("备份归属或记录无效".into());
+    }
+    Ok(record)
+}
+fn backup_target(root: &Path, world_id: Option<&str>) -> Result<String> {
+    if let Some(id) = world_id {
+        selected_world(root, id)?;
+        Ok(format!("saves/{id}/level.dat"))
+    } else {
+        Ok("options.txt".into())
+    }
+}
+fn backup_entry(root: &Path, id: &str, target: &str) -> Result<BackupEntry> {
+    let record = backup_record(root, id)?;
+    if record.target != target {
+        return Err("备份不属于所选世界或配置类型".into());
+    }
+    let filename = if target == "options.txt" {
+        "options.txt"
+    } else {
+        "level.dat"
+    };
+    let metadata = fs::metadata(model::safe_path(
+        root,
+        &format!(".easycraft-backups/{id}/{filename}"),
+    )?)
+    .map_err(|_| "备份文件不存在")?;
+    if !metadata.is_file() || metadata.len() != record.bytes {
+        return Err("备份文件类型或大小不一致".into());
+    }
+    Ok(BackupEntry {
+        id: id.into(),
+        sha1: record.sha1,
+        bytes: record.bytes,
+        created_ms: record.created_ms,
+    })
+}
+fn checked_backup(root: &Path, id: &str, target: &str) -> Result<(BackupEntry, Vec<u8>)> {
+    let entry = backup_entry(root, id, target)?;
+    let filename = if target == "options.txt" {
+        "options.txt"
+    } else {
+        "level.dat"
+    };
+    let bytes = read(&model::safe_path(
+        root,
+        &format!(".easycraft-backups/{id}/{filename}"),
+    )?)?;
+    if bytes.len() as u64 != entry.bytes || hash(&bytes) != entry.sha1 {
+        return Err("备份大小或哈希不一致，未恢复".into());
+    }
+    Ok((entry, bytes))
+}
+pub fn backups(root: &Path, world_id: Option<&str>) -> Result<BackupList> {
+    let target = backup_target(root, world_id)?;
+    let path = model::safe_path(root, ".easycraft-backups")?;
+    let mut result = BackupList {
+        entries: vec![],
+        warnings: vec![],
+    };
+    if !path.exists() {
+        return Ok(result);
+    }
+    let mut skipped = 0;
+    for (index, entry) in fs::read_dir(path)
+        .map_err(|_| "备份目录读取失败")?
+        .enumerate()
+    {
+        if index >= 2000 {
+            return Err("备份目录超过 2000 条，请先手动归档；现有文件未修改".into());
+        }
+        let entry = entry.map_err(|_| "备份条目读取失败")?;
+        let Some(id) = entry.file_name().to_str().map(str::to_owned) else {
+            skipped += 1;
+            continue;
+        };
+        if uuid::Uuid::parse_str(&id).is_err() {
+            skipped += 1;
+            continue;
+        }
+        match backup_record(root, &id) {
+            Ok(record) if record.target != target => continue,
+            Ok(_) => match backup_entry(root, &id, &target) {
+                Ok(entry) => result.entries.push(entry),
+                Err(_) => skipped += 1,
+            },
+            Err(_) => skipped += 1,
+        }
+    }
+    result.entries.sort_by(|a, b| {
+        b.created_ms
+            .cmp(&a.created_ms)
+            .then_with(|| a.id.cmp(&b.id))
+    });
+    if skipped > 0 {
+        result.warnings.push(format!(
+            "已保留并跳过 {skipped} 个缺少归属、损坏或不支持的备份条目；未自动推断其目标。"
+        ));
+    }
+    Ok(result)
+}
+fn change(changes: &mut Vec<ConfigChange>, key: &str, before: impl ToString, after: impl ToString) {
+    let before = before.to_string();
+    let after = after.to_string();
+    if before != after {
+        changes.push(ConfigChange {
+            key: key.into(),
+            before,
+            after,
+        });
+    }
+}
+fn restore_plan(
+    root: &Path,
+    world_id: Option<&str>,
+    id: &str,
+) -> Result<(BackupPreview, Option<Vec<u8>>, Vec<u8>)> {
+    let target = backup_target(root, world_id)?;
+    let (backup, saved) = checked_backup(root, id, &target)?;
+    let original = if world_id.is_some() {
+        Some(read(&model::safe_path(root, &target)?)?)
+    } else {
+        options_bytes(root)?
+    };
+    let revision = original
+        .as_deref()
+        .map(hash)
+        .unwrap_or_else(|| "missing".into());
+    let mut changes = vec![];
+    let replacement = if world_id.is_some() {
+        let bytes = original.as_deref().ok_or("世界配置不存在")?;
+        let current = world_settings(bytes)?;
+        let mut saved = world_settings(&saved)?;
+        saved.revision.clone_from(&revision);
+        let replacement = world_replacement(bytes, saved.clone())?;
+        let difficulty = |value: u8| {
+            ["和平", "简单", "普通", "困难"]
+                .get(value as usize)
+                .copied()
+                .unwrap_or("未知")
+        };
+        change(
+            &mut changes,
+            "难度",
+            difficulty(current.difficulty),
+            difficulty(saved.difficulty),
+        );
+        change(
+            &mut changes,
+            "锁定难度",
+            current.difficulty_locked,
+            saved.difficulty_locked,
+        );
+        change(
+            &mut changes,
+            "允许命令",
+            current
+                .allow_commands
+                .map(|v| v.to_string())
+                .unwrap_or_default(),
+            saved
+                .allow_commands
+                .map(|v| v.to_string())
+                .unwrap_or_default(),
+        );
+        change(
+            &mut changes,
+            "游戏模式",
+            current.game_mode.map(|v| v.to_string()).unwrap_or_default(),
+            saved.game_mode.map(|v| v.to_string()).unwrap_or_default(),
+        );
+        change(
+            &mut changes,
+            "世界时间（刻）",
+            current.day_time.unwrap_or_default(),
+            saved.day_time.unwrap_or_default(),
+        );
+        change(
+            &mut changes,
+            "天气",
+            current.weather.unwrap_or_default(),
+            saved.weather.unwrap_or_default(),
+        );
+        for rule in &current.game_rules {
+            if let Some(old) = saved.game_rules.iter().find(|old| old.key == rule.key) {
+                change(
+                    &mut changes,
+                    &format!("游戏规则：{}", rule.key),
+                    &rule.value,
+                    &old.value,
+                );
+            }
+        }
+        replacement
+    } else {
+        let current = parse_options(original.as_deref())?;
+        let mut saved = parse_options(Some(&saved))?;
+        saved.revision.clone_from(&revision);
+        change(
+            &mut changes,
+            "主音量（0–1）",
+            current.master_volume,
+            saved.master_volume,
+        );
+        change(
+            &mut changes,
+            "音乐音量（0–1）",
+            current.music_volume,
+            saved.music_volume,
+        );
+        change(
+            &mut changes,
+            "渲染距离",
+            current.render_distance,
+            saved.render_distance,
+        );
+        change(&mut changes, "全屏", current.fullscreen, saved.fullscreen);
+        options_replacement(original.as_deref(), saved)?
+    };
+    Ok((
+        BackupPreview {
+            backup,
+            world_id: world_id.map(str::to_owned),
+            revision,
+            changes,
+        },
+        original,
+        replacement,
+    ))
+}
+pub fn preview_backup(root: &Path, world_id: Option<&str>, id: &str) -> Result<BackupPreview> {
+    restore_plan(root, world_id, id).map(|(preview, _, _)| preview)
+}
+pub fn restore_backup(
+    root: &Path,
+    world_id: Option<&str>,
+    id: &str,
+    revision: &str,
+    backup_sha1: &str,
+) -> Result<String> {
+    let _locks = if let Some(world) = world_id {
+        vec![session_lock(&selected_world(root, world)?)?]
+    } else {
+        lock_worlds(root)?
+    };
+    let (preview, original, replacement) = restore_plan(root, world_id, id)?;
+    if preview.revision != revision || preview.backup.sha1 != backup_sha1 {
+        return Err("当前配置或备份已变化，请重新预览；未恢复".into());
+    }
+    if preview.changes.is_empty() {
+        return Err("所选配置与当前一致，无需恢复".into());
+    }
+    let target = backup_target(root, world_id)?;
+    backed_write(root, &target, original.as_deref(), &replacement)
 }
 
 #[cfg(test)]
@@ -727,6 +1087,133 @@ mod tests {
         assert_eq!(fs::read(backup).unwrap(), original);
         expected[fields["Difficulty"].1] = 3;
         assert_eq!(decode(&fs::read(path).unwrap()).unwrap().0, expected);
+    }
+    #[test]
+    fn backup_restore_is_owned_revision_checked_and_keeps_current_unknown_world_data() {
+        let root = root();
+        let world = "世界 A";
+        let path = root.join("saves/世界 A/level.dat");
+        let mut settings = load_world(&root, world).unwrap();
+        settings.difficulty = 3;
+        let old = save_world(&root, world, settings).unwrap();
+        let listed = backups(&root, Some(world)).unwrap();
+        assert_eq!(listed.entries.len(), 1);
+        let id = &listed.entries[0].id;
+        let (mut current, fields) = decode(&fs::read(&path).unwrap()).unwrap();
+        let unknown = current
+            .windows(4)
+            .position(|bytes| bytes == [0, 255, 77, 99])
+            .unwrap();
+        current[unknown + 1] = 254;
+        let before = gzip(&current);
+        fs::write(&path, &before).unwrap();
+        let preview = preview_backup(&root, Some(world), id).unwrap();
+        assert_eq!(preview.changes.len(), 1);
+        assert_eq!(preview.changes[0].key, "难度");
+        assert_eq!(fs::read(&path).unwrap(), before);
+        fs::create_dir_all(root.join("saves/世界 B")).unwrap();
+        fs::write(root.join("saves/世界 B/level.dat"), &before).unwrap();
+        assert!(preview_backup(&root, Some("世界 B"), id).is_err());
+        assert!(preview_backup(&root, None, id).is_err());
+        assert!(preview_backup(&root, Some(world), "../escape").is_err());
+        let occupied = session_lock(&world_dir(&root, world).unwrap()).unwrap();
+        assert!(restore_backup(
+            &root,
+            Some(world),
+            id,
+            &preview.revision,
+            &preview.backup.sha1
+        )
+        .is_err());
+        drop(occupied);
+        let undo = restore_backup(
+            &root,
+            Some(world),
+            id,
+            &preview.revision,
+            &preview.backup.sha1,
+        )
+        .unwrap();
+        assert_eq!(fs::read(undo).unwrap(), before);
+        current[fields["Difficulty"].1] = 2;
+        assert_eq!(decode(&fs::read(&path).unwrap()).unwrap().0, current);
+        assert!(preview_backup(&root, Some(world), id)
+            .unwrap()
+            .changes
+            .is_empty());
+        let unchanged = fs::read(&path).unwrap();
+        assert!(restore_backup(
+            &root,
+            Some(world),
+            id,
+            &preview.revision,
+            &preview.backup.sha1
+        )
+        .is_err());
+        assert_eq!(fs::read(&path).unwrap(), unchanged);
+        let foreign = self::root();
+        let destination = foreign.join(format!(".easycraft-backups/{id}"));
+        fs::create_dir_all(&destination).unwrap();
+        fs::copy(&old, destination.join("level.dat")).unwrap();
+        fs::copy(
+            Path::new(&old).parent().unwrap().join("record.json"),
+            destination.join("record.json"),
+        )
+        .unwrap();
+        assert!(preview_backup(&foreign, Some(world), id).is_err());
+        let legacy = root.join(format!(".easycraft-backups/{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&legacy).unwrap();
+        fs::write(legacy.join("level.dat"), b"old unowned data").unwrap();
+        assert!(!backups(&root, Some(world)).unwrap().warnings.is_empty());
+        assert!(legacy.join("level.dat").exists());
+        fs::write(&old, b"tampered").unwrap();
+        assert!(preview_backup(&root, Some(world), id).is_err());
+        assert_eq!(fs::read(path).unwrap(), unchanged);
+        fs::remove_dir_all(root).unwrap();
+        fs::remove_dir_all(foreign).unwrap();
+    }
+    #[test]
+    fn options_restore_merges_supported_fields_preserves_new_unknown_lines_and_handles_missing_files(
+    ) {
+        let root = root();
+        let path = root.join("options.txt");
+        fs::write(
+            &path,
+            b"soundCategory_master:0.42\r\ncustomMod:original\r\n",
+        )
+        .unwrap();
+        let mut settings = load_options(&root).unwrap();
+        settings.master_volume = 0.75;
+        save_options(&root, settings).unwrap();
+        let list = backups(&root, None).unwrap();
+        let id = &list.entries[0].id;
+        let current = fs::read_to_string(&path)
+            .unwrap()
+            .replace("customMod:original", "customMod:latest");
+        fs::write(&path, &current).unwrap();
+        let preview = preview_backup(&root, None, id).unwrap();
+        fs::write(&path, format!("{current}extraMod:keep\r\n")).unwrap();
+        assert!(restore_backup(&root, None, id, &preview.revision, &preview.backup.sha1).is_err());
+        let preview = preview_backup(&root, None, id).unwrap();
+        let before = fs::read(&path).unwrap();
+        let undo =
+            restore_backup(&root, None, id, &preview.revision, &preview.backup.sha1).unwrap();
+        assert_eq!(fs::read(undo).unwrap(), before);
+        let restored = fs::read_to_string(&path).unwrap();
+        assert!(
+            restored.contains("customMod:latest\r\n") && restored.contains("extraMod:keep\r\n")
+        );
+        assert!(!restored.contains("customMod:original"));
+        assert_eq!(load_options(&root).unwrap().master_volume, 0.42);
+        fs::remove_file(&path).unwrap();
+        let preview = preview_backup(&root, None, id).unwrap();
+        assert_eq!(preview.revision, "missing");
+        assert_eq!(
+            restore_backup(&root, None, id, &preview.revision, &preview.backup.sha1).unwrap(),
+            ""
+        );
+        assert_eq!(load_options(&root).unwrap().master_volume, 0.42);
+        fs::remove_dir_all(root).unwrap();
     }
     #[test]
     fn rules_weather_time_and_default_mode_roundtrip_without_touching_unknown_data() {

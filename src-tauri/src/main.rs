@@ -278,6 +278,59 @@ async fn native_avatar(host: State<'_, Arc<Host>>) -> Result<Option<String>> {
     skins::avatar(&host).await
 }
 #[tauri::command]
+async fn native_config_backups(
+    host: State<'_, Arc<Host>>,
+    id: String,
+    world_id: Option<String>,
+) -> Result<worlds::BackupList> {
+    let host = host.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        host.instance_files(&id, |root| worlds::backups(root, world_id.as_deref()))
+    })
+    .await
+    .map_err(|_| "配置备份读取失败".to_string())?
+}
+#[tauri::command]
+async fn native_config_backup_preview(
+    host: State<'_, Arc<Host>>,
+    id: String,
+    world_id: Option<String>,
+    backup_id: String,
+) -> Result<worlds::BackupPreview> {
+    let host = host.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        host.instance_files(&id, |root| {
+            worlds::preview_backup(root, world_id.as_deref(), &backup_id)
+        })
+    })
+    .await
+    .map_err(|_| "恢复预览失败".to_string())?
+}
+#[tauri::command]
+async fn native_config_backup_restore(
+    host: State<'_, Arc<Host>>,
+    id: String,
+    world_id: Option<String>,
+    backup_id: String,
+    revision: String,
+    backup_sha1: String,
+) -> Result<String> {
+    let host = host.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        host.instance_files(&id, |root| {
+            worlds::restore_backup(
+                root,
+                world_id.as_deref(),
+                &backup_id,
+                &revision,
+                &backup_sha1,
+            )
+        })
+    })
+    .await
+    .map_err(|_| "配置恢复失败".to_string())?
+}
+#[tauri::command]
 async fn native_instance_launch_settings(
     host: State<'_, Arc<Host>>,
     id: String,
@@ -464,6 +517,9 @@ fn main() {
             native_world_save,
             native_options,
             native_options_save,
+            native_config_backups,
+            native_config_backup_preview,
+            native_config_backup_restore,
             native_avatar,
             native_avatar_save,
             native_instance_launch_settings,
