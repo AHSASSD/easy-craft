@@ -42,8 +42,8 @@
 .resource-install .notice > button {
   padding: 10px 14px;
   min-height: 36px;
-  border: 1px solid #338636;
-  background: #338636;
+  border: 1px solid var(--action);
+  background: var(--action);
   color: white;
   border-radius: 7px;
 }
@@ -154,6 +154,17 @@
 .native-library.rail-layout {
   --rail-width: 76px;
 }
+.native-library .accent-setting input[type='color'] {
+  width: 76px;
+  height: 40px;
+  padding: 4px;
+}
+.native-library[data-custom-accent='true'] .primary,
+.native-library[data-custom-accent='true'] .primary:hover:not(:disabled) {
+  background: var(--action);
+  border-color: var(--action);
+  color: #ffffff;
+}
 .appearance-background-preview {
   display: flex;
   flex-direction: column;
@@ -233,7 +244,11 @@
 .native-library .global-rail button.active,
 .native-library .global-rail button.active:hover {
   color: white;
-  background: linear-gradient(150deg, #377d2d, #338636);
+  background: linear-gradient(
+    150deg,
+    var(--action-top),
+    var(--nav-action-bottom)
+  );
 }
 .global-rail button.active::before {
   content: '';

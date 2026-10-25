@@ -479,6 +479,22 @@ try {
     );
     try {
       await page.getByRole('button', { name: '个性化', exact: true }).click();
+      await page.getByRole('button', { name: /草方块亮色/ }).click();
+      await page.getByLabel('自定义强调色', { exact: true }).fill('#1488ee');
+      const savedAccent = await page
+        .locator('.native-library')
+        .evaluate((element) =>
+          Object.fromEntries(
+            [
+              '--accent',
+              '--accent-dark',
+              '--action',
+              '--action-top',
+              '--action-bottom',
+            ].map((key) => [key, element.style.getPropertyValue(key)]),
+          ),
+        );
+      assert.match(savedAccent['--accent'], /^#[0-9a-f]{6}$/);
       await page.getByLabel('背景遮罩强度', { exact: true }).fill('65');
       await page.getByLabel('减少动态效果', { exact: true }).check();
       const savedMask = await page
@@ -549,6 +565,67 @@ try {
           ),
         savedMask,
       );
+      assert.equal(
+        await page.getByLabel('自定义强调色', { exact: true }).inputValue(),
+        '#1488ee',
+      );
+      assert.deepEqual(
+        await page
+          .locator('.native-library')
+          .evaluate((element) =>
+            Object.fromEntries(
+              [
+                '--accent',
+                '--accent-dark',
+                '--action',
+                '--action-top',
+                '--action-bottom',
+              ].map((key) => [key, element.style.getPropertyValue(key)]),
+            ),
+          ),
+        savedAccent,
+      );
+      const colorCapture = await page.context().newCDPSession(page);
+      const colorImage = await colorCapture.send('Page.captureScreenshot', {
+        format: 'png',
+        fromSurface: true,
+        captureBeyondViewport: false,
+      });
+      await (
+        await import('node:fs/promises')
+      ).writeFile(
+        path.join(project, 'output/playwright/native-accent-light.png'),
+        Buffer.from(colorImage.data, 'base64'),
+      );
+      await colorCapture.detach();
+      await page
+        .getByRole('navigation')
+        .getByRole('button', { name: '设置', exact: true })
+        .click();
+      await page.getByRole('button', { name: '启动', exact: true }).click();
+      const primary = page.getByRole('button', {
+        name: '保存内存设置',
+        exact: true,
+      });
+      await page.waitForFunction(
+        () => !document.querySelector('.memory-panel fieldset')?.disabled,
+      );
+      assert(await primary.isEnabled());
+      await primary.hover();
+      const colors = await primary.evaluate((element) => ({
+        background: getComputedStyle(element).backgroundColor,
+        foreground: getComputedStyle(element).color,
+      }));
+      assert.equal(colors.foreground, 'rgb(255, 255, 255)');
+      assert.equal(
+        colors.background,
+        `rgb(${[1, 3, 5].map((offset) => parseInt(savedAccent['--action'].slice(offset, offset + 2), 16)).join(', ')})`,
+      );
+      await page
+        .getByRole('navigation')
+        .getByRole('button', { name: '设置', exact: true })
+        .click();
+      await page.getByRole('button', { name: '个性化', exact: true }).click();
       await page
         .getByRole('navigation')
         .getByRole('button', { name: '游戏库', exact: true })
@@ -606,8 +683,26 @@ try {
         ),
         null,
       );
+      await page
+        .getByRole('button', { name: '恢复默认强调色', exact: true })
+        .click();
+      assert.equal(
+        await page
+          .locator('.native-library')
+          .evaluate((element) => element.style.getPropertyValue('--accent')),
+        '',
+      );
+      assert.equal(
+        await page.evaluate(() =>
+          Object.hasOwn(
+            JSON.parse(localStorage.getItem('easycraft.preferences.v1')),
+            'accentColor',
+          ),
+        ),
+        false,
+      );
       console.log(
-        'PASS: PNG/JPEG/WebP background converted and persisted; a newly started desktop process restores the actual hero background, mask strength and reduced motion; reset persists.',
+        'PASS: PNG/JPEG/WebP background, mask, reduced motion and custom accent survive a new desktop PID; the enabled primary button keeps its accent on hover and reset removes custom colors.',
       );
     } finally {
       await page.evaluate(

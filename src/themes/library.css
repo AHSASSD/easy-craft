@@ -8,6 +8,11 @@
   --muted: #9fb7a8;
   --accent: #8ed18a;
   --accent-dark: #25452e;
+  --action: #338636;
+  --action-top: #377d2d;
+  --action-bottom: #2d742b;
+  --nav-action-bottom: #338636;
+  --action-border: #80c66f;
   background:
     radial-gradient(ellipse at 20% 0, #37533f 0, transparent 55%), var(--bg);
 }
@@ -417,8 +422,8 @@
 }
 .native-library .library-launch,
 .native-library .library-launch:hover:not(:disabled) {
-  border: 1px solid #80c66f;
-  background: linear-gradient(#377d2d, #2d742b);
+  border: 1px solid var(--action-border);
+  background: linear-gradient(var(--action-top), var(--action-bottom));
   color: white;
   display: flex;
   gap: 10px;
@@ -645,8 +650,8 @@
 .config-backups .backup-preview > .primary {
   min-height: 36px;
   padding: 10px 14px;
-  border: 1px solid #338636;
-  background: #338636;
+  border: 1px solid var(--action);
+  background: var(--action);
   color: white;
 }
 .backup-retention {

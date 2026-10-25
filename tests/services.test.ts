@@ -111,6 +111,31 @@ test('native UI scale migrates old preferences and persists only supported facto
   preferences.update({ uiScale: 100 });
   expect(createPreferences(storage).snapshot().uiScale).toBe(100);
 });
+test('custom accent migrates old preferences and reset removes its persisted field', () => {
+  const storage = memory();
+  const preferences = createPreferences(storage);
+  preferences.update({ theme: 'grass', sidebarWidth: 340 });
+  expect(preferences.snapshot().accentColor).toBeUndefined();
+  preferences.update({ accentColor: '#1488ee' });
+  expect(createPreferences(storage).snapshot()).toMatchObject({
+    theme: 'grass',
+    sidebarWidth: 340,
+    accentColor: '#1488ee',
+  });
+  expect(() => preferences.update({ accentColor: 'transparent' })).toThrow();
+  expect(createPreferences(storage).snapshot().accentColor).toBe('#1488ee');
+  preferences.update({ accentColor: undefined });
+  expect(
+    Object.hasOwn(
+      JSON.parse(storage.getItem('easycraft.preferences.v1')!),
+      'accentColor',
+    ),
+  ).toBe(false);
+  expect(createPreferences(storage).snapshot()).toMatchObject({
+    theme: 'grass',
+    sidebarWidth: 340,
+  });
+});
 
 test('preferences and instance edits persist across reload; duplicate versions have unique ids', async () => {
   const storage = memory();

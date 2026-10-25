@@ -9,6 +9,7 @@ import {
 } from './contracts';
 import { createStore, type StorageAdapter } from './persistence/store';
 import { validNavigation } from './navigation';
+import { validAccent } from '../themes/accent';
 const ids = [
   '9aca7640-cc42-43bd-88ba-03601d0e6631',
   '9aca7640-cc42-43bd-88ba-03601d0e6632',
@@ -72,6 +73,7 @@ export function validPreferences(value: unknown): value is Preferences {
       typeof value.reduceMotion === 'boolean') &&
     (value.uiScale === undefined ||
       uiScales.some((scale) => scale === value.uiScale)) &&
+    (value.accentColor === undefined || validAccent(value.accentColor)) &&
     (value.navigation === undefined || validNavigation(value.navigation))
   );
 }

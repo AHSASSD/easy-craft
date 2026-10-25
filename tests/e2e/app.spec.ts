@@ -163,59 +163,161 @@ test('rail labels, selected categories and secondary text meet contrast targets 
   await page.getByRole('button', { name: '个性化', exact: true }).click();
   for (const name of ['草方块亮色', '深板岩夜色']) {
     await page.getByRole('button', { name: new RegExp(name) }).click();
-    await page.locator('.native-library').evaluate(async (element) => {
-      await Promise.all(
-        element
-          .getAnimations({ subtree: true })
-          .map((animation) => animation.finished.catch(() => {})),
-      );
-    });
-    const results = await page.evaluate(() => {
-      const style = (selector: string) =>
-        getComputedStyle(document.querySelector(selector)!);
-      const luminance = (color: string) => {
-        const components = color
-          .match(/[\d.]+/g)!
-          .slice(0, 3)
-          .map((value) => {
-            const channel = Number(value) / 255;
+    for (const color of [
+      undefined,
+      '#1488ee',
+      '#ffffff',
+      '#000000',
+      '#ffff00',
+    ]) {
+      if (color)
+        await page.getByLabel('自定义强调色', { exact: true }).fill(color);
+      else if (
+        await page
+          .getByRole('button', { name: '恢复默认强调色', exact: true })
+          .isEnabled()
+      )
+        await page
+          .getByRole('button', { name: '恢复默认强调色', exact: true })
+          .click();
+      await page.locator('.native-library').evaluate(async (element) => {
+        await Promise.all(
+          element
+            .getAnimations({ subtree: true })
+            .map((animation) => animation.finished.catch(() => {})),
+        );
+      });
+      const results = await page.evaluate(() => {
+        const style = (selector: string) =>
+          getComputedStyle(document.querySelector(selector)!);
+        const luminance = (color: string) => {
+          const values = color.trim().startsWith('#')
+            ? color
+                .trim()
+                .slice(1)
+                .match(/../g)!
+                .map((hex) => parseInt(hex, 16))
+            : color
+                .match(/[\d.]+/g)!
+                .slice(0, 3)
+                .map(Number);
+          const components = values.map((value) => {
+            const channel = value / 255;
             return channel <= 0.04045
               ? channel / 12.92
               : ((channel + 0.055) / 1.055) ** 2.4;
           });
-        return (
-          components[0] * 0.2126 +
-          components[1] * 0.7152 +
-          components[2] * 0.0722
-        );
-      };
-      const contrast = (a: string, b: string) => {
-        const first = luminance(a),
-          second = luminance(b);
-        return (
-          (Math.max(first, second) + 0.05) / (Math.min(first, second) + 0.05)
-        );
-      };
-      const active = style('.global-rail .active');
-      const category = style('.context-category-list .selected');
-      const breadcrumb = style('.workspace-breadcrumb');
-      const navigation = style('.global-rail');
-      const inactive = style('.global-rail button:not(.active)');
-      return [
-        ...active.backgroundImage
-          .match(/rgba?\([^)]+\)/g)!
-          .map((color) => contrast(active.color, color)),
-        contrast(category.color, category.backgroundColor),
-        contrast(breadcrumb.color, breadcrumb.backgroundColor),
-        contrast(inactive.color, navigation.backgroundColor),
-      ];
-    });
-    for (const [index, ratio] of results.entries())
-      expect(
-        ratio,
-        `${name}, color pair ${index}: ${results.join(', ')}`,
-      ).toBeGreaterThanOrEqual(4.5);
+          return (
+            components[0] * 0.2126 +
+            components[1] * 0.7152 +
+            components[2] * 0.0722
+          );
+        };
+        const contrast = (a: string, b: string) => {
+          const first = luminance(a),
+            second = luminance(b);
+          return (
+            (Math.max(first, second) + 0.05) / (Math.min(first, second) + 0.05)
+          );
+        };
+        const active = style('.global-rail .active');
+        const category = style('.context-category-list .selected');
+        const breadcrumb = style('.workspace-breadcrumb');
+        const navigation = style('.global-rail');
+        const inactive = style('.global-rail button:not(.active)');
+        const root = style('.native-library');
+        return [
+          ...['--bg', '--surface', '--panel', '--hover', '--accent-dark'].map(
+            (name) =>
+              contrast(
+                root.getPropertyValue('--accent'),
+                root.getPropertyValue(name),
+              ),
+          ),
+          ...active.backgroundImage
+            .match(/rgba?\([^)]+\)/g)!
+            .map((color) => contrast(active.color, color)),
+          contrast(category.color, category.backgroundColor),
+          contrast(breadcrumb.color, breadcrumb.backgroundColor),
+          contrast(inactive.color, navigation.backgroundColor),
+        ];
+      });
+      for (const [index, ratio] of results.entries())
+        expect(
+          ratio,
+          `${name} ${color ?? 'default'}, color pair ${index}: ${results.join(', ')}`,
+        ).toBeGreaterThanOrEqual(4.5);
+    }
   }
+});
+
+test('custom accent previews, persists across themes and reset removes all inline overrides', async ({
+  page,
+}) => {
+  await page.goto('/');
+  await page
+    .getByRole('navigation')
+    .getByRole('button', { name: '设置', exact: true })
+    .click();
+  await page.getByRole('button', { name: '个性化', exact: true }).click();
+  await page.getByRole('button', { name: /草方块亮色/ }).click();
+  const root = page.locator('.native-library');
+  const gradient = await page
+    .locator('.global-rail .active')
+    .evaluate((element) => getComputedStyle(element).backgroundImage);
+  await expect(
+    page.getByRole('button', { name: '恢复默认强调色', exact: true }),
+  ).toBeDisabled();
+  await page.getByLabel('自定义强调色', { exact: true }).fill('#1488ee');
+  await expect(root).toHaveAttribute('data-custom-accent', 'true');
+  await expect(page.locator('.global-rail .active')).not.toHaveCSS(
+    'background-image',
+    gradient,
+  );
+  const light = await root.evaluate((element) =>
+    element.style.getPropertyValue('--accent'),
+  );
+  await page.reload();
+  await expect(page.getByLabel('自定义强调色', { exact: true })).toHaveValue(
+    '#1488ee',
+  );
+  await page.screenshot({ path: 'output/playwright/accent-light.png' });
+  await page.getByRole('button', { name: /深板岩夜色/ }).click();
+  expect(
+    await root.evaluate((element) =>
+      element.style.getPropertyValue('--accent'),
+    ),
+  ).not.toBe(light);
+  await expect(page.getByLabel('自定义强调色', { exact: true })).toHaveValue(
+    '#1488ee',
+  );
+  await page
+    .getByRole('button', { name: '恢复默认强调色', exact: true })
+    .click();
+  await expect(root).not.toHaveAttribute('data-custom-accent');
+  expect(
+    await root.evaluate((element) =>
+      element.style.getPropertyValue('--accent'),
+    ),
+  ).toBe('');
+  expect(
+    await root.evaluate((element) =>
+      element.style.getPropertyValue('--action'),
+    ),
+  ).toBe('');
+  expect(
+    await page.evaluate(() =>
+      Object.hasOwn(
+        JSON.parse(localStorage.getItem('easycraft.preferences.v1')!),
+        'accentColor',
+      ),
+    ),
+  ).toBe(false);
+  await page.reload();
+  await expect(
+    page.getByRole('button', { name: '恢复默认强调色', exact: true }),
+  ).toBeDisabled();
+  await expect(root).toHaveAttribute('data-theme', 'slate');
 });
 
 test('compact context overlay keeps navigation, categories, account and focus usable without changing saved width', async ({

@@ -50,6 +50,7 @@ import { UnsavedChanges, useNavigationGuard } from './UnsavedChanges';
 import landscape from '../assets/landscape.svg';
 import '../themes/library.css';
 import '../themes/rail.css';
+import { accentStyle } from '../themes/accent';
 
 const mainItems = [
   { id: 'library', name: '游戏库', icon: Box },
@@ -392,8 +393,12 @@ function Shell({ services }: { services: Services }) {
       className="app native-library rail-layout"
       data-theme={preferences.theme}
       data-reduce-motion={preferences.reduceMotion ? 'true' : undefined}
+      data-custom-accent={preferences.accentColor ? 'true' : undefined}
       style={
-        { '--sidebar-width': `${preferences.sidebarWidth}px` } as CSSProperties
+        {
+          '--sidebar-width': `${preferences.sidebarWidth}px`,
+          ...accentStyle(preferences.accentColor, preferences.theme),
+        } as CSSProperties
       }
     >
       <Titlebar realMode report={setNotice} onClose={requestClose} />
@@ -1089,6 +1094,30 @@ function Shell({ services }: { services: Services }) {
                         </button>
                       ))}
                     </div>
+                    <label className="native-label accent-setting">
+                      自定义强调色
+                      <input
+                        aria-label="自定义强调色"
+                        type="color"
+                        value={preferences.accentColor ?? '#3d913d'}
+                        onChange={(event) =>
+                          services.preferences.update({
+                            accentColor: event.target.value,
+                          })
+                        }
+                      />
+                    </label>
+                    <button
+                      disabled={!preferences.accentColor}
+                      onClick={() =>
+                        services.preferences.update({ accentColor: undefined })
+                      }
+                    >
+                      恢复默认强调色
+                    </button>
+                    <p className="hint">
+                      立即预览并保存。文字和按钮会调整明暗，保持清晰；背景图片与错误、警告的含义保持独立。
+                    </p>
                     <label className="file-setting">
                       实例页背景{available ? '（保存到本机）' : '（本地预览）'}
                       <input

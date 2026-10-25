@@ -23,6 +23,7 @@ export type Preferences = {
   backgroundShade?: number;
   reduceMotion?: boolean;
   uiScale?: (typeof uiScales)[number];
+  accentColor?: string;
   navigation?: Navigation;
 };
 export type ThemeDefinition = {
