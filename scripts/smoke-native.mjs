@@ -132,6 +132,44 @@ async function selectNativeFile(button, file) {
     });
   });
 }
+async function resizeNativeWindow(width, height) {
+  return new Promise((resolve, reject) => {
+    execFile(
+      'powershell.exe',
+      [
+        '-NoProfile',
+        '-ExecutionPolicy',
+        'Bypass',
+        '-File',
+        path.join(project, 'scripts/resize-native-test-window.ps1'),
+        '-AppProcessId',
+        String(child.pid),
+        '-Width',
+        String(width),
+        '-Height',
+        String(height),
+        '-BuildProfile',
+        profile,
+      ],
+      { windowsHide: true, timeout: 15000 },
+      (error, stdout, stderr) => {
+        if (error)
+          reject(
+            new Error(
+              `Native window resize failed: ${stderr || error.message}`,
+            ),
+          );
+        else {
+          try {
+            resolve(JSON.parse(stdout.trim()));
+          } catch (error) {
+            reject(error);
+          }
+        }
+      },
+    );
+  });
+}
 try {
   browser = await connectDesktop();
   const context = browser.contexts()[0];
@@ -154,6 +192,284 @@ try {
     .getByRole('button', { name: '设置', exact: true })
     .click();
   await page.getByRole('button', { name: '启动', exact: true }).click();
+  if (process.argv.includes('--ui-scale')) {
+    const originalPreferences = await page.evaluate(() =>
+      localStorage.getItem('easycraft.preferences.v1'),
+    );
+    const originalScale = originalPreferences
+      ? (JSON.parse(originalPreferences).uiScale ?? 100)
+      : 100;
+    let originalSize;
+    try {
+      await page
+        .getByRole('navigation')
+        .getByRole('button', { name: '设置', exact: true })
+        .click();
+      await page.getByRole('button', { name: '个性化', exact: true }).click();
+      let scaleViewportWidth;
+      async function scaleTo(scale) {
+        const selector = page.getByLabel('界面缩放', { exact: true });
+        await selector.waitFor();
+        await page.waitForFunction(
+          () =>
+            !document.querySelector('select[aria-label="界面缩放"]')?.disabled,
+        );
+        await selector.scrollIntoViewIfNeeded();
+        await selector.selectOption(String(scale));
+        await page.waitForFunction(
+          ({ scale, expectedWidth }) => {
+            const select = document.querySelector(
+              'select[aria-label="界面缩放"]',
+            );
+            return (
+              select?.value === String(scale) &&
+              !select.disabled &&
+              (expectedWidth === null ||
+                Math.abs(innerWidth - expectedWidth) <= 2) &&
+              !!document.querySelector('.compact-context') === innerWidth < 800
+            );
+          },
+          {
+            scale,
+            expectedWidth: scaleViewportWidth
+              ? (scaleViewportWidth * 100) / scale
+              : null,
+          },
+        );
+      }
+      await scaleTo(100);
+      originalSize = await page.evaluate(() => ({
+        width: innerWidth,
+        height: innerHeight,
+        dpr: devicePixelRatio,
+      }));
+      const windowSize = await resizeNativeWindow(800, 540);
+      await page.waitForFunction(
+        () =>
+          Math.abs(innerWidth - 800) <= 1 && Math.abs(innerHeight - 540) <= 1,
+      );
+      const base = await page.evaluate(() => ({
+        width: innerWidth,
+        height: innerHeight,
+        dpr: devicePixelRatio,
+      }));
+      assert(Math.abs(base.dpr - windowSize.dpi / 96) < 0.02);
+      scaleViewportWidth = base.width;
+      for (const scale of [80, 90, 100, 110, 125, 150]) {
+        await scaleTo(scale);
+        const actual = await page.evaluate(() => ({
+          width: innerWidth,
+          height: innerHeight,
+          dpr: devicePixelRatio,
+          overflow: document.documentElement.scrollWidth > innerWidth + 1,
+        }));
+        assert(
+          Math.abs(actual.width - (base.width * 100) / scale) <= 2,
+          `Actual WebView viewport did not scale to ${scale}%`,
+        );
+        assert(
+          Math.abs(actual.dpr / base.dpr - scale / 100) < 0.03,
+          `Actual WebView pixel scale did not change to ${scale}%`,
+        );
+        assert.equal(actual.overflow, false);
+        for (const name of ['游戏库', '设置', '下载'])
+          assert(
+            await page
+              .getByRole('navigation')
+              .getByRole('button', { name, exact: true })
+              .evaluate((element) => {
+                const bounds = element.getBoundingClientRect();
+                return (
+                  bounds.x >= 0 &&
+                  bounds.y >= 0 &&
+                  bounds.right <= innerWidth + 1 &&
+                  bounds.bottom <= innerHeight + 1
+                );
+              }),
+            `Navigation ${name} is outside the actual scaled viewport.`,
+          );
+        await page
+          .getByRole('button', { name: '管理游戏账户', exact: true })
+          .click();
+        const dialog = page.getByRole('dialog');
+        await dialog.waitFor();
+        const bounds = await dialog.boundingBox();
+        assert(
+          bounds.x >= -1 &&
+            bounds.y >= -1 &&
+            bounds.x + bounds.width <= actual.width + 1 &&
+            bounds.y + bounds.height <= actual.height + 1,
+        );
+        await page.keyboard.press('Escape');
+        await dialog.waitFor({ state: 'hidden' });
+        if (actual.width < 800) {
+          await page
+            .getByRole('button', { name: '展开或折叠实例栏', exact: true })
+            .click();
+          const panel = page.getByLabel('实例与分类栏', { exact: true });
+          await panel.waitFor();
+          const account = await panel
+            .getByRole('button', { name: '管理游戏账户', exact: true })
+            .boundingBox();
+          assert(
+            account.y >= 0 && account.y + account.height <= actual.height + 1,
+          );
+          await page
+            .getByRole('button', { name: '个性化', exact: true })
+            .click();
+          await panel.waitFor({ state: 'hidden' });
+        }
+        if (scale === 150) {
+          await page
+            .getByRole('navigation')
+            .getByRole('button', { name: '游戏库', exact: true })
+            .click();
+          const instances = page.locator('.library-instance');
+          assert(
+            (await instances.count()) > 0,
+            'Scale test requires a real cached instance.',
+          );
+          await instances.first().click({ button: 'right' });
+          const menu = page.locator('.instance-context-menu');
+          await menu.waitFor();
+          const menuBounds = await menu.boundingBox();
+          assert(
+            menuBounds.x >= 0 &&
+              menuBounds.y >= 0 &&
+              menuBounds.x + menuBounds.width <= actual.width + 1 &&
+              menuBounds.y + menuBounds.height <= actual.height + 1,
+          );
+          await page.keyboard.press('Escape');
+          await menu.waitFor({ state: 'hidden' });
+          await page.getByLabel('实例与分类栏', { exact: true }).waitFor();
+          await instances.first().click();
+          await page
+            .getByLabel('实例与分类栏', { exact: true })
+            .waitFor({ state: 'hidden' });
+          await page
+            .getByRole('navigation')
+            .getByRole('button', { name: '设置', exact: true })
+            .click();
+          await page
+            .getByRole('button', { name: '个性化', exact: true })
+            .click();
+          const session = await page.context().newCDPSession(page);
+          const capture = await session.send('Page.captureScreenshot', {
+            format: 'png',
+            fromSurface: true,
+            captureBeyondViewport: false,
+          });
+          const bytes = Buffer.from(capture.data, 'base64');
+          await (
+            await import('node:fs/promises')
+          ).writeFile(
+            path.join(project, 'output/playwright/native-ui-scale-150.png'),
+            bytes,
+          );
+          assert.equal(bytes.readUInt32BE(16), windowSize.clientWidth);
+          assert.equal(bytes.readUInt32BE(20), windowSize.clientHeight);
+          await session.detach();
+        }
+      }
+      await scaleTo(125);
+      const oldPid = child.pid;
+      const exiting = new Promise((resolve) => child.once('exit', resolve));
+      await page
+        .getByRole('button', { name: '关闭窗口', exact: true })
+        .click()
+        .catch(() => {});
+      await Promise.race([
+        exiting,
+        new Promise((_, reject) =>
+          setTimeout(
+            () => reject(new Error('Scale-test desktop did not close')),
+            5000,
+          ),
+        ),
+      ]);
+      await browser.close();
+      child = launchDesktop();
+      assert.notEqual(child.pid, oldPid);
+      browser = await connectDesktop();
+      const reopened = browser.contexts()[0];
+      page = reopened.pages()[0] ?? (await reopened.waitForEvent('page'));
+      page.on('pageerror', (error) => errors.push(error.message));
+      await page.getByLabel('界面缩放', { exact: true }).waitFor();
+      await page.waitForFunction(
+        () =>
+          document.querySelector('select[aria-label="界面缩放"]')?.value ===
+            '125' &&
+          !document.querySelector('select[aria-label="界面缩放"]').disabled,
+      );
+      const restarted = await page.evaluate(() => ({
+        width: innerWidth,
+        dpr: devicePixelRatio,
+      }));
+      assert(Math.abs(restarted.width - originalSize.width / 1.25) <= 2);
+      assert(Math.abs(restarted.dpr / originalSize.dpr - 1.25) < 0.03);
+      scaleViewportWidth = originalSize.width;
+      await page.evaluate(() => {
+        const setItem = Storage.prototype.setItem;
+        window.__easycraftScaleStorageSet = setItem;
+        Storage.prototype.setItem = function (key, value) {
+          if (key === 'easycraft.preferences.v1')
+            throw new DOMException(
+              'Fixture storage full',
+              'QuotaExceededError',
+            );
+          return setItem.call(this, key, value);
+        };
+      });
+      await scaleTo(150);
+      await page
+        .getByRole('alert')
+        .filter({ hasText: '本次更改仅在当前窗口有效' })
+        .waitFor();
+      assert.equal(
+        await page.evaluate(
+          () =>
+            JSON.parse(localStorage.getItem('easycraft.preferences.v1'))
+              .uiScale,
+        ),
+        125,
+      );
+      await page.reload();
+      await page.waitForFunction(
+        () =>
+          document.querySelector('select[aria-label="界面缩放"]')?.value ===
+            '125' &&
+          !document.querySelector('select[aria-label="界面缩放"]').disabled,
+      );
+      console.log(
+        `PASS: actual WebView zoom 80/90/100/110/125/150% at an 800x540 native client (${windowSize.dpi} DPI); compact navigation, account dialogs, a new desktop PID restore and storage-failure recovery verified.`,
+      );
+    } finally {
+      await page.evaluate(
+        async ({ raw, scale }) => {
+          if (window.__easycraftScaleStorageSet) {
+            Storage.prototype.setItem = window.__easycraftScaleStorageSet;
+            delete window.__easycraftScaleStorageSet;
+          }
+          if (raw === null) localStorage.removeItem('easycraft.preferences.v1');
+          else localStorage.setItem('easycraft.preferences.v1', raw);
+          await window.__TAURI_INTERNALS__.invoke(
+            'plugin:webview|set_webview_zoom',
+            { label: 'main', value: scale / 100 },
+          );
+        },
+        { raw: originalPreferences, scale: originalScale },
+      );
+      if (originalSize)
+        await resizeNativeWindow(originalSize.width, originalSize.height);
+      await page.reload();
+      await page.locator('.library-shell').waitFor();
+    }
+    await page
+      .getByRole('navigation')
+      .getByRole('button', { name: '设置', exact: true })
+      .click();
+    await page.getByRole('button', { name: '启动', exact: true }).click();
+  }
   if (process.argv.includes('--background')) {
     const originalPreferences = await page.evaluate(() =>
       localStorage.getItem('easycraft.preferences.v1'),

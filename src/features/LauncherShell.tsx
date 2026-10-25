@@ -9,6 +9,7 @@ import {
 } from 'react';
 import { isTauri } from '@tauri-apps/api/core';
 import { getCurrentWindow } from '@tauri-apps/api/window';
+import { getCurrentWebview } from '@tauri-apps/api/webview';
 import {
   Box,
   Download,
@@ -29,7 +30,7 @@ import {
   Image,
   FileCode,
 } from 'lucide-react';
-import type { Services } from '../core/contracts';
+import { uiScales, type Services } from '../core/contracts';
 import { warnings } from '../app/bootstrap';
 import { defaultNavigation, type Navigation } from '../core/navigation';
 import { Titlebar } from '../components/Titlebar';
@@ -116,6 +117,80 @@ function Shell({ services }: { services: Services }) {
     return () => window.removeEventListener('easycraft-warning', warning);
   }, []);
   const [collapsed, setCollapsed] = useState(false);
+  const [compact, setCompact] = useState(window.innerWidth < 800);
+  const [contextOpen, setContextOpen] = useState(false);
+  const expanded = compact ? contextOpen : !collapsed;
+  const contextToggle = useRef<HTMLButtonElement>(null);
+  const contextPanel = useRef<HTMLElement>(null);
+  const initialScale = useRef(preferences.uiScale ?? 100);
+  const [uiScale, setUiScale] = useState<number | null>(isTauri() ? null : 100);
+  const [scaleBusy, setScaleBusy] = useState(isTauri());
+  useEffect(() => {
+    if (!isTauri()) return;
+    let disposed = false;
+    void getCurrentWebview()
+      .setZoom(initialScale.current / 100)
+      .then(() => {
+        if (!disposed) setUiScale(initialScale.current);
+      })
+      .catch(() => {
+        if (!disposed) setNotice('恢复界面缩放失败，请在个性化中重新选择。');
+      })
+      .finally(() => {
+        if (!disposed) setScaleBusy(false);
+      });
+    return () => {
+      disposed = true;
+    };
+  }, []);
+  useEffect(() => {
+    let previous = window.innerWidth < 800;
+    const resize = () => {
+      const next = window.innerWidth < 800;
+      setCompact(next);
+      if (next !== previous) setContextOpen(false);
+      previous = next;
+    };
+    window.addEventListener('resize', resize);
+    return () => window.removeEventListener('resize', resize);
+  }, []);
+  useEffect(() => {
+    if (!compact || !contextOpen) return;
+    const toggle = contextToggle.current;
+    contextPanel.current
+      ?.querySelector<HTMLButtonElement>('button:not(:disabled)')
+      ?.focus();
+    const close = (event: KeyboardEvent) => {
+      if (
+        event.key === 'Escape' &&
+        !event.defaultPrevented &&
+        !document.querySelector('dialog[open], .instance-context-menu')
+      ) {
+        event.preventDefault();
+        setContextOpen(false);
+      }
+    };
+    window.addEventListener('keydown', close);
+    return () => {
+      window.removeEventListener('keydown', close);
+      requestAnimationFrame(() => {
+        if (toggle?.isConnected) toggle.focus();
+      });
+    };
+  }, [compact, contextOpen]);
+  async function changeScale(next: NonNullable<typeof preferences.uiScale>) {
+    if (!isTauri()) return;
+    setScaleBusy(true);
+    try {
+      await getCurrentWebview().setZoom(next / 100);
+      setUiScale(next);
+      services.preferences.update({ uiScale: next });
+    } catch {
+      setNotice('界面缩放未能应用，请重试；没有保存新的缩放比例。');
+    } finally {
+      setScaleBusy(false);
+    }
+  }
   const [background, setBackground] = useState('');
   const [droppedPack, setDroppedPack] = useState<File | null>(null);
   const consumeDroppedPack = useCallback(() => setDroppedPack(null), []);
@@ -185,6 +260,7 @@ function Shell({ services }: { services: Services }) {
           ),
         },
       });
+      setContextOpen(false);
       onChanged?.();
     });
   }
@@ -321,21 +397,31 @@ function Shell({ services }: { services: Services }) {
       }
     >
       <Titlebar realMode report={setNotice} onClose={requestClose} />
-      <div className={`library-shell ${collapsed ? 'library-collapsed' : ''}`}>
+      <div
+        className={`library-shell ${!expanded ? 'library-collapsed' : ''} ${compact ? 'compact-context' : ''}`}
+      >
         <nav className="library-navigation global-rail" aria-label="主功能">
           {mainItems.map(({ id, name, icon: Icon }) => (
             <button
               key={id}
               aria-pressed={view === id}
               className={view === id ? 'active' : ''}
-              onClick={() => change({ section: id })}
+              onClick={() =>
+                change({ section: id }, undefined, () =>
+                  setContextOpen(compact),
+                )
+              }
             >
               <Icon size={25} />
               <span>{name}</span>
             </button>
           ))}
         </nav>
-        <aside className="library-sidebar" aria-label="实例与分类栏">
+        <aside
+          className="library-sidebar"
+          aria-label="实例与分类栏"
+          ref={contextPanel}
+        >
           {view === 'library' ? (
             <>
               <div className="library-list-heading">
@@ -555,6 +641,13 @@ function Shell({ services }: { services: Services }) {
             <ChevronRight size={17} />
           </button>
         </aside>
+        {compact && contextOpen && (
+          <button
+            className="context-scrim"
+            aria-label="关闭实例与分类栏"
+            onClick={() => setContextOpen(false)}
+          />
+        )}
         <div
           className="divider library-divider"
           role="separator"
@@ -590,12 +683,17 @@ function Shell({ services }: { services: Services }) {
         >
           <span>⋮</span>
         </div>
-        <main className="library-main">
+        <main className="library-main" inert={compact && contextOpen}>
           <div className="workspace-breadcrumb">
             <button
               aria-label="展开或折叠实例栏"
-              aria-expanded={!collapsed}
-              onClick={() => setCollapsed(!collapsed)}
+              aria-expanded={expanded}
+              ref={contextToggle}
+              onClick={() =>
+                compact
+                  ? setContextOpen(!contextOpen)
+                  : setCollapsed(!collapsed)
+              }
             >
               <Menu size={17} />
             </button>
@@ -605,7 +703,7 @@ function Shell({ services }: { services: Services }) {
                 {view === 'library' ? (selected?.name ?? '尚无实例') : category}
               </strong>
             </span>
-            {collapsed && (
+            {!expanded && (
               <button
                 aria-label="管理游戏账户"
                 onClick={() => setAccount(true)}
@@ -1057,6 +1155,42 @@ function Shell({ services }: { services: Services }) {
                     <p className="hint">
                       外观调整立即生效，偏好写入本机存储，保存失败时上方会提示。减少动态效果关闭时，仍遵循系统的减少动画偏好。
                     </p>
+                    <label className="native-label">
+                      界面缩放
+                      <select
+                        aria-label="界面缩放"
+                        value={uiScale ?? preferences.uiScale ?? 100}
+                        disabled={!isTauri() || scaleBusy}
+                        onChange={(event) => {
+                          const scale = uiScales.find(
+                            (scale) => scale === Number(event.target.value),
+                          );
+                          if (scale) void changeScale(scale);
+                        }}
+                      >
+                        {uiScales.map((scale) => (
+                          <option key={scale} value={scale}>
+                            {scale}%{scale === 100 ? '（默认）' : ''}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                    <button
+                      disabled={!isTauri() || scaleBusy || uiScale === 100}
+                      onClick={() => void changeScale(100)}
+                    >
+                      恢复 100% 缩放
+                    </button>
+                    <p className="hint">
+                      {isTauri()
+                        ? scaleBusy
+                          ? '正在应用界面缩放…'
+                          : uiScale === null
+                            ? '未能确认当前缩放，请重新选择或恢复 100%。'
+                            : `当前界面缩放 ${uiScale}%。偏好保存失败时只在当前窗口生效。`
+                        : '界面缩放需要桌面版；浏览器预览不会模拟原生缩放。'}
+                      放大后空间不足时，可从内容区顶部展开实例与分类栏。
+                    </p>
                   </section>
                 )}
                 {nav.settingsCategory === 'downloads' && (
@@ -1241,6 +1375,8 @@ function Shell({ services }: { services: Services }) {
             onMouseDown={(event) => event.stopPropagation()}
             onKeyDown={(event) => {
               if (event.key === 'Escape') {
+                event.preventDefault();
+                event.stopPropagation();
                 setMenu(null);
               } else if (
                 ['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)

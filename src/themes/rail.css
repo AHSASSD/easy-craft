@@ -405,6 +405,35 @@
     grid-template-columns: 1fr;
   }
 }
+.rail-layout .library-shell.compact-context {
+  position: relative;
+  grid-template-columns: var(--rail-width) 0 0 minmax(0, 1fr);
+}
+.rail-layout .compact-context .library-sidebar {
+  position: absolute;
+  grid-column: auto;
+  grid-row: auto;
+  top: 0;
+  bottom: 0;
+  left: var(--rail-width);
+  width: min(280px, calc(100% - var(--rail-width)));
+  z-index: 32;
+  box-shadow: 12px 0 24px #0004;
+}
+.rail-layout .compact-context .library-divider {
+  display: none;
+}
+.native-library .context-scrim,
+.native-library .context-scrim:hover {
+  position: absolute;
+  inset: 0 0 0 var(--rail-width);
+  z-index: 31;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: #0006;
+  transform: none;
+}
 .rail-layout .screenshot-thumbnail {
   flex: 0 0 120px;
   width: 120px;

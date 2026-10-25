@@ -218,6 +218,88 @@ test('rail labels, selected categories and secondary text meet contrast targets 
   }
 });
 
+test('compact context overlay keeps navigation, categories, account and focus usable without changing saved width', async ({
+  page,
+}) => {
+  await page.goto('/');
+  const divider = page.getByRole('separator', { name: '调整实例栏宽度' });
+  await divider.focus();
+  await page.keyboard.press('ArrowRight');
+  const savedWidth = await divider.getAttribute('aria-valuenow');
+  for (const viewport of [
+    { width: 640, height: 432 },
+    { width: 533, height: 360 },
+  ]) {
+    await page.setViewportSize(viewport);
+    await expect(page.locator('.library-shell')).toHaveClass(/compact-context/);
+    await expect(page.getByLabel('实例与分类栏', { exact: true })).toBeHidden();
+    await page
+      .getByRole('navigation')
+      .getByRole('button', { name: '设置', exact: true })
+      .click();
+    await expect(page.locator('.context-category-list button')).toHaveCount(4);
+    await expect(
+      page.getByLabel('实例与分类栏', { exact: true }),
+    ).toBeVisible();
+    expect(
+      await page
+        .locator('.library-main')
+        .evaluate((element) => element.hasAttribute('inert')),
+    ).toBe(true);
+    await page.getByRole('button', { name: '个性化', exact: true }).click();
+    await expect(page.getByLabel('实例与分类栏', { exact: true })).toBeHidden();
+    await expect(page.getByLabel('界面缩放', { exact: true })).toBeDisabled();
+    await expect(
+      page.getByRole('heading', { name: '个性化设置', exact: true }),
+    ).toBeVisible();
+    expect(
+      (await page.locator('.library-main').boundingBox())!.width,
+    ).toBeGreaterThan(viewport.width - 80);
+    await page
+      .getByRole('button', { name: '展开或折叠实例栏', exact: true })
+      .click();
+    await page
+      .getByRole('button', { name: '管理游戏账户', exact: true })
+      .click();
+    await expect(page.getByRole('dialog')).toBeVisible();
+    await page.keyboard.press('Escape');
+    await expect(page.getByRole('dialog')).toHaveCount(0);
+    await expect(
+      page.getByLabel('实例与分类栏', { exact: true }),
+    ).toBeVisible();
+    await page.keyboard.press('Escape');
+    await expect(page.getByLabel('实例与分类栏', { exact: true })).toBeHidden();
+    await expect(
+      page.getByRole('button', { name: '展开或折叠实例栏', exact: true }),
+    ).toBeFocused();
+    await expect(
+      page.getByRole('button', { name: '管理游戏账户', exact: true }),
+    ).toBeVisible();
+    await page
+      .getByRole('navigation')
+      .getByRole('button', { name: '下载', exact: true })
+      .click();
+    await expect(page.locator('.context-category-list button')).toHaveCount(6);
+    await page.getByRole('button', { name: '数据包', exact: true }).click();
+    await expect(page.getByLabel('实例与分类栏', { exact: true })).toBeHidden();
+    expect(
+      await page.evaluate(
+        () => document.documentElement.scrollWidth <= innerWidth + 1,
+      ),
+    ).toBe(true);
+    for (const label of ['游戏库', '设置', '下载'])
+      await expect(
+        page
+          .getByRole('navigation')
+          .getByRole('button', { name: label, exact: true }),
+      ).toBeVisible();
+  }
+  await page.screenshot({ path: 'output/playwright/compact-context.png' });
+  await page.setViewportSize({ width: 1120, height: 720 });
+  await expect(page.getByLabel('实例与分类栏', { exact: true })).toBeVisible();
+  await expect(divider).toHaveAttribute('aria-valuenow', savedWidth!);
+});
+
 test('real features are explicitly unavailable in browser and never simulated', async ({
   page,
 }) => {

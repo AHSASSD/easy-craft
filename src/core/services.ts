@@ -1,5 +1,6 @@
 import {
   loaders,
+  uiScales,
   type GameInstance,
   type InstanceService,
   type Preferences,
@@ -69,6 +70,8 @@ export function validPreferences(value: unknown): value is Preferences {
         value.backgroundShade <= 80)) &&
     (value.reduceMotion === undefined ||
       typeof value.reduceMotion === 'boolean') &&
+    (value.uiScale === undefined ||
+      uiScales.some((scale) => scale === value.uiScale)) &&
     (value.navigation === undefined || validNavigation(value.navigation))
   );
 }

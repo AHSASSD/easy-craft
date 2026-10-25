@@ -40,7 +40,7 @@ npm ci
 - 基础资源仅允许 Mojang/Minecraft 官方域名，Fabric 依赖仅允许其官方元数据/Maven 域名；禁止重定向到其他来源，逐文件 SHA-1 校验成功才提交缓存。
 - 限制并发、连接超时、有限重试、取消、临时文件续传和已校验缓存复用。损坏缓存会重新下载，实例清单只在安装成功后提交。
 - “设置 → 下载设置”提供缓存位置、数量与内容大小统计，以及检查、清单预览和明确确认后的清理。仅处理五类已识别的下载副本/接收临时文件，不清理游戏共享资源、已安装 Mod、存档或配置备份；变化、占用和未知文件保留，可从任务栏取消并查看部分结果。
-- “设置 → 个性化”支持背景图保存、遮罩强度即时预览与减少动态效果；遮罩和动画偏好跨重启保留，仍遵循系统减少动画设置。自定义强调色及界面缩放尚待实现。
+- “设置 → 个性化”支持背景图保存、遮罩强度、减少动态效果，以及桌面原生 80%–150% 六档界面缩放；偏好跨重启保留。空间不足时，中间栏变为可展开浮层，主导航和账户入口仍可操作。减少动态效果仍遵循系统偏好；自定义强调色尚待实现。
 - 世界/音画配置的备份面板提供旧备份保留管理：选择保留最近几份 → 校验并预览 → 明确确认后清理。至少保留一份可校验备份；未知、损坏、占用或含额外内容的备份保留，当前配置和其他目标不清理。可取消并报告部分结果，不自动删除备份。
 - 每个真实实例使用独立的 game/natives 目录；不删除或覆盖用户存档。
 - 检测所选 Java 的实际主版本与 64 位架构，启动前要求匹配实例元数据。已提供工作区 Java 21 和 Java 25；选择其他可信运行时需填写其 java.exe 完整路径。
@@ -111,6 +111,7 @@ node scripts/smoke-native.mjs debug --cached --restore-config --launch-offline
 node scripts/smoke-native.mjs debug --cached --streamed-drop --public-pack --launch-offline
 node scripts/smoke-native.mjs debug --cached --cache-clear --launch-offline --fabric
 node scripts/smoke-native.mjs debug --cached --backup-retention --restore-config --cache-clear --launch-offline --fabric
+node scripts/smoke-native.mjs debug --cached --ui-scale --launch-offline --fabric
 ```
 
 安装集成测试会在 `.native/integration` 下载真实官方 1.21.1 资源、验证缓存修复和参数构造，不启动游戏。`-Integration offline` 将 HTTP 路由到不可用的本地代理，验证完整缓存无需联网即可准备离线参数。桌面检查使用该测试目录与临时 WebView2 调试端口，验证窗口、IPC、Java、官方清单、正版模式登录限制和离线配置；加 `--launch-offline` 才会实际启动游戏，观察初始化后结束进程。测试临时修改并还原测试目录的设置，不修改用户 data 目录，不进行 Microsoft 登录。

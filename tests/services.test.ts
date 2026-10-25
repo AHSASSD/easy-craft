@@ -93,6 +93,25 @@ test('appearance preferences preserve old profiles and reject invalid persisted 
   ).toBe(false);
 });
 
+test('native UI scale migrates old preferences and persists only supported factors', () => {
+  const storage = memory();
+  const preferences = createPreferences(storage);
+  preferences.update({ theme: 'grass', sidebarWidth: 340 });
+  expect(createPreferences(storage).snapshot().uiScale).toBeUndefined();
+  preferences.update({ uiScale: 125 });
+  expect(createPreferences(storage).snapshot()).toMatchObject({
+    theme: 'grass',
+    sidebarWidth: 340,
+    uiScale: 125,
+  });
+  for (const factor of [0, 1.25, 79, 101, 200, NaN, Infinity, '125', null])
+    expect(
+      validPreferences({ ...preferences.snapshot(), uiScale: factor }),
+    ).toBe(false);
+  preferences.update({ uiScale: 100 });
+  expect(createPreferences(storage).snapshot().uiScale).toBe(100);
+});
+
 test('preferences and instance edits persist across reload; duplicate versions have unique ids', async () => {
   const storage = memory();
   const prefs = createPreferences(storage);

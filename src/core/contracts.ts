@@ -1,6 +1,7 @@
 import type { NativeService } from './native-contracts';
 import type { Navigation } from './navigation';
 export type LoaderKind = 'vanilla' | 'fabric' | 'forge' | 'neoforge' | 'quilt';
+export const uiScales = [80, 90, 100, 110, 125, 150] as const;
 export type GameInstance = {
   id: string;
   name: string;
@@ -21,6 +22,7 @@ export type Preferences = {
   sort: 'name' | 'recent';
   backgroundShade?: number;
   reduceMotion?: boolean;
+  uiScale?: (typeof uiScales)[number];
   navigation?: Navigation;
 };
 export type ThemeDefinition = {
