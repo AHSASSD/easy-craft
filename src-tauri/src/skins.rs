@@ -18,6 +18,26 @@ pub fn validate(bytes: &[u8]) -> Result<()> {
     if width != 64 || ![32, 64].contains(&height) {
         return Err("皮肤尺寸须为 64×64 或 64×32".into());
     }
+    let mut decoder = png::Decoder::new_with_limits(
+        std::io::Cursor::new(bytes),
+        png::Limits {
+            bytes: 4 * 1024 * 1024,
+        },
+    );
+    decoder.set_ignore_text_chunk(true);
+    let mut reader = decoder.read_info().map_err(|_| "皮肤 PNG 损坏或无法解码")?;
+    if reader.info().animation_control.is_some() {
+        return Err("皮肤须为静态 PNG".into());
+    }
+    let size = reader
+        .output_buffer_size()
+        .filter(|size| *size <= 64 * 64 * 8)
+        .ok_or("皮肤解码大小超限")?;
+    let mut buffer = vec![0; size];
+    reader
+        .next_frame(&mut buffer)
+        .map_err(|_| "皮肤 PNG 内容损坏")?;
+    reader.finish().map_err(|_| "皮肤 PNG 不完整")?;
     Ok(())
 }
 fn key(host: &Host) -> Result<(String, String)> {
@@ -110,6 +130,18 @@ pub fn save(host: &Host, bytes: &[u8]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn sample() -> Vec<u8> {
+        let mut bytes = vec![];
+        {
+            let mut encoder = png::Encoder::new(&mut bytes, 64, 64);
+            encoder.set_color(png::ColorType::Rgba);
+            encoder.set_depth(png::BitDepth::Eight);
+            let mut writer = encoder.write_header().unwrap();
+            writer.write_image_data(&vec![200; 64 * 64 * 4]).unwrap();
+            writer.finish().unwrap();
+        }
+        bytes
+    }
     #[test]
     fn skin_validation_rejects_other_origins_formats_and_sizes() {
         assert!(texture_url("http://textures.minecraft.net/texture/example")
@@ -130,8 +162,45 @@ mod tests {
         png[12..16].copy_from_slice(b"IHDR");
         png[16..20].copy_from_slice(&64u32.to_be_bytes());
         png[20..24].copy_from_slice(&64u32.to_be_bytes());
-        assert!(validate(&png).is_ok());
+        assert!(validate(&png).is_err());
         png[16..20].copy_from_slice(&128u32.to_be_bytes());
         assert!(validate(&png).is_err());
+        let valid = sample();
+        assert!(validate(&valid).is_ok());
+        assert!(validate(&valid[..valid.len() - 4]).is_err());
+        let mut broken = valid.clone();
+        let last = broken.len() - 1;
+        broken[last] ^= 1;
+        assert!(validate(&broken).is_err());
+    }
+    #[tokio::test]
+    async fn invalid_skin_preserves_saved_image_and_corrupt_cache_falls_back() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../.native/skin-tests")
+            .join(uuid::Uuid::new_v4().to_string());
+        std::fs::create_dir_all(&root).unwrap();
+        model::save_json(
+            &root,
+            "settings.json",
+            &model::Settings {
+                launch_mode: LaunchMode::Offline,
+                offline_name: "SkinTest".into(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let host = Host::new(root.clone()).unwrap();
+        let valid = sample();
+        save(&host, &valid).unwrap();
+        let path = model::safe_path(&root, &key(&host).unwrap().0).unwrap();
+        assert!(save(&host, b"invalid").is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), valid);
+        assert!(avatar(&host).await.unwrap().is_some());
+        std::fs::write(&path, &valid[..33]).unwrap();
+        assert!(avatar(&host).await.unwrap().is_none());
+        std::fs::write(&path, &valid).unwrap();
+        assert!(avatar(&host).await.unwrap().is_some());
+        drop(host);
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

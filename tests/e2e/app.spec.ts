@@ -190,17 +190,17 @@ test('rail labels, selected categories and secondary text meet contrast targets 
       const results = await page.evaluate(() => {
         const style = (selector: string) =>
           getComputedStyle(document.querySelector(selector)!);
+        const canvas = document.createElement('canvas');
+        canvas.width = canvas.height = 1;
+        const context = canvas.getContext('2d')!;
         const luminance = (color: string) => {
-          const values = color.trim().startsWith('#')
-            ? color
-                .trim()
-                .slice(1)
-                .match(/../g)!
-                .map((hex) => parseInt(hex, 16))
-            : color
-                .match(/[\d.]+/g)!
-                .slice(0, 3)
-                .map(Number);
+          if (!CSS.supports('color', color.trim()))
+            throw new Error(`Invalid measured color: ${color}`);
+          context.fillStyle = color.trim();
+          context.fillRect(0, 0, 1, 1);
+          const values = Array.from(
+            context.getImageData(0, 0, 1, 1).data,
+          ).slice(0, 3);
           const components = values.map((value) => {
             const channel = value / 255;
             return channel <= 0.04045
@@ -548,7 +548,7 @@ test('failure demo and file drop preview do not navigate away', async ({
   await expect(dialog.getByText('MRPACK · 4 字节')).toBeVisible();
   await page.keyboard.press('Escape');
   await expect(dialog).toHaveCount(0);
-  await expect(page).toHaveURL('http://127.0.0.1:1420/?demo=1');
+  await expect(page).toHaveURL(/\/\?demo=1$/);
 });
 test('instance operations, resize and theme survive refresh', async ({
   page,

@@ -18,6 +18,7 @@ export function AccountPanel({
   const [clientId, setClientId] = useState(state?.settings.clientId ?? '');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
+  const [skinMessage, setSkinMessage] = useState('');
   const locked =
     busy || state?.task.status === 'running' || !!state?.loginPending;
   async function run(operation: () => Promise<void>) {
@@ -162,6 +163,21 @@ export function AccountPanel({
             </small>
           </label>
         )}
+        <button
+          onClick={() =>
+            void run(async () => {
+              const skin = await service.avatar();
+              setSkinMessage(
+                skin
+                  ? '已重新读取当前账户皮肤头像。'
+                  : '当前账户没有可用皮肤，显示默认头像。',
+              );
+            })
+          }
+        >
+          刷新皮肤头像
+        </button>
+        {skinMessage && <p role="status">{skinMessage}</p>}
         {state?.account && (
           <button onClick={() => void run(service.signOut)}>
             退出正版账户

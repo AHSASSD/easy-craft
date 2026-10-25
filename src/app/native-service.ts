@@ -465,6 +465,7 @@ export function createNativeService(
   const listeners = new Set<() => void>();
   let stopped = false;
   let refreshing: Promise<void> | null = null;
+  let avatarSequence = 0;
   const identity = (state: NativeState | null) =>
     JSON.stringify([
       state?.settings.launchMode,
@@ -536,6 +537,7 @@ export function createNativeService(
     await refresh(true);
   };
   const avatar = async () => {
+    const sequence = ++avatarSequence;
     const requestedIdentity = identity(snapshot.state);
     const value = await request('native_avatar');
     if (
@@ -545,7 +547,10 @@ export function createNativeService(
         !/^data:image\/png;base64,[A-Za-z0-9+/=]+$/.test(value))
     )
       throw new Error('皮肤头像响应无效');
-    if (requestedIdentity === identity(snapshot.state))
+    if (
+      sequence === avatarSequence &&
+      requestedIdentity === identity(snapshot.state)
+    )
       update({ ...snapshot, avatar: value as string | null });
     return value as string | null;
   };

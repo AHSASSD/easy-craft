@@ -266,16 +266,25 @@
 .native-library .library-account {
   border-top: 1px solid var(--border);
   border-radius: 0;
-  padding: 16px;
+  padding: 15px 16px 16px;
   margin: 0;
-  min-height: 84px;
+  min-height: 80px;
   gap: 12px;
   background: var(--panel);
+  flex-shrink: 0;
+  align-items: center;
+}
+.library-account > span:nth-child(2) {
+  min-width: 0;
+}
+.library-account strong,
+.library-account small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .library-account small {
-  display: flex;
-  align-items: center;
-  gap: 5px;
+  display: block;
 }
 .library-account i {
   width: 6px;
@@ -284,37 +293,51 @@
   background: var(--accent);
 }
 .skin-avatar {
-  --avatar-size: 44px;
+  --avatar-size: 48px;
   position: relative;
-  display: inline-block;
+  display: inline-flex;
   width: var(--avatar-size);
   height: var(--avatar-size);
   overflow: hidden;
-  border-radius: 7px;
+  border-radius: 6px;
   box-shadow: 0 2px 5px #00000020;
   flex-shrink: 0;
   image-rendering: pixelated;
+  align-self: center;
+  line-height: 0;
 }
-.skin-avatar svg {
+.skin-avatar svg,
+.skin-avatar img {
   width: 100%;
   height: 100%;
   display: block;
-}
-.skin-face,
-.skin-hat {
-  position: absolute;
-  inset: 0;
-  background-size: calc(var(--avatar-size) * 8) auto;
-  background-repeat: no-repeat;
   image-rendering: pixelated;
 }
-.skin-face {
-  background-position: calc(var(--avatar-size) * -1)
-    calc(var(--avatar-size) * -1);
+.native-library button > svg {
+  flex-shrink: 0;
 }
-.skin-hat {
-  background-position: calc(var(--avatar-size) * -5)
-    calc(var(--avatar-size) * -1);
+.native-library .button-row {
+  align-items: center;
+}
+.native-library .button-row > button,
+.native-library .content-toolbar > button,
+.native-library .primary {
+  min-height: 38px;
+  line-height: 20px;
+}
+.native-library .button-row > button,
+.native-library .content-toolbar > button {
+  margin: 0;
+  padding: 8px 12px;
+}
+.native-library .primary {
+  padding: 8px 12px;
+}
+.native-library .content-toolbar > input,
+.native-library .content-toolbar > select {
+  height: 38px;
+  line-height: 20px;
+  padding: 8px 12px;
 }
 .library-divider {
   width: 8px;

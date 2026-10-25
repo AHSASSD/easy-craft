@@ -1467,6 +1467,29 @@ test('a delayed avatar response cannot replace the newly selected identity', asy
   expect(service.snapshot().avatar).toBeNull();
   service.stop();
 });
+test('an older same-account skin read cannot replace a newer uploaded skin', async () => {
+  let resolveOld!: (value: string) => void;
+  let count = 0;
+  const call = vi.fn(async (command: string) => {
+    if (command === 'native_avatar') {
+      if (++count === 1)
+        return new Promise<string>((resolve) => {
+          resolveOld = resolve;
+        });
+      return 'data:image/png;base64,TkVX';
+    }
+    return state();
+  });
+  const service = createNativeService(true, call as typeof invoke);
+  await service.refresh();
+  const old = service.avatar();
+  await service.saveAvatar([1, 2, 3]);
+  expect(service.snapshot().avatar).toBe('data:image/png;base64,TkVX');
+  resolveOld('data:image/png;base64,T0xE');
+  await old;
+  expect(service.snapshot().avatar).toBe('data:image/png;base64,TkVX');
+  service.stop();
+});
 test('system memory trimming is optional and requires its explicit confirmation', async () => {
   const current = state();
   const memory = {

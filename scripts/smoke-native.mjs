@@ -1,7 +1,14 @@
 import assert from 'node:assert/strict';
 import { spawn, execFile } from 'node:child_process';
 import { createServer } from 'node:net';
-import { mkdir, copyFile, readFile, readdir, rm } from 'node:fs/promises';
+import {
+  mkdir,
+  copyFile,
+  readFile,
+  readdir,
+  rm,
+  writeFile as writeFixtureFile,
+} from 'node:fs/promises';
 import { createHash, randomUUID } from 'node:crypto';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -169,6 +176,39 @@ async function resizeNativeWindow(width, height) {
       },
     );
   });
+}
+async function checkAlignedControls(selector) {
+  const groups = await page.locator(selector).evaluateAll((rows) =>
+    rows.map((row) =>
+      Array.from(
+        row.querySelectorAll(
+          ':scope > button, :scope > input:not([type="file"]), :scope > select',
+        ),
+      )
+        .map((control) => {
+          const box = control.getBoundingClientRect();
+          return { x: box.x, y: box.y, height: box.height, width: box.width };
+        })
+        .filter((box) => box.width > 0 && box.height > 0),
+    ),
+  );
+  let checked = 0;
+  for (const controls of groups)
+    for (let index = 1; index < controls.length; index++) {
+      const a = controls[index - 1],
+        b = controls[index];
+      if (Math.abs(a.y - b.y) > 10) continue;
+      assert(
+        Math.abs(a.y + a.height / 2 - (b.y + b.height / 2)) <= 1,
+        `${selector} controls are vertically misaligned.`,
+      );
+      assert(
+        a.height >= 38 && b.height >= 38,
+        `${selector} controls are too short.`,
+      );
+      checked++;
+    }
+  assert(checked > 0, `No adjacent ${selector} controls were checked.`);
 }
 try {
   browser = await connectDesktop();
@@ -1401,6 +1441,119 @@ try {
   const testState = await page.evaluate(() =>
     window.__TAURI_INTERNALS__.invoke('native_status'),
   );
+  let avatarHeadAfterChange;
+  let avatarBoundsBeforeTabs;
+  if (process.argv.includes('--avatar-layout')) {
+    const avatar = page.locator('.library-account .skin-avatar');
+    await page.waitForFunction(
+      () =>
+        document.querySelector('.library-account .skin-avatar img')
+          ?.naturalWidth === 8,
+    );
+    const originalHead = await avatar.locator('img').getAttribute('src');
+    const nextSkin = await page.evaluate(() => {
+      const canvas = document.createElement('canvas');
+      canvas.width = canvas.height = 64;
+      const context = canvas.getContext('2d');
+      context.fillStyle = 'rgb(40,160,90)';
+      context.fillRect(8, 8, 8, 8);
+      context.fillStyle = 'rgb(220,30,60)';
+      context.fillRect(40, 8, 1, 1);
+      return canvas.toDataURL('image/png').split(',')[1];
+    });
+    await page
+      .getByRole('button', { name: '管理游戏账户', exact: true })
+      .click();
+    await page.getByLabel('选择皮肤头像').setInputFiles({
+      name: 'updated-skin.png',
+      mimeType: 'image/png',
+      buffer: Buffer.from(nextSkin, 'base64'),
+    });
+    await page.waitForFunction((previous) => {
+      const image = document.querySelector('.library-account .skin-avatar img');
+      return (
+        image?.complete &&
+        image.naturalWidth === 8 &&
+        image.getAttribute('src') !== previous
+      );
+    }, originalHead);
+    avatarHeadAfterChange = await avatar.locator('img').getAttribute('src');
+    const pixels = await avatar.locator('img').evaluate((image) => {
+      const canvas = document.createElement('canvas');
+      canvas.width = canvas.height = 8;
+      const context = canvas.getContext('2d');
+      context.drawImage(image, 0, 0);
+      return Array.from(context.getImageData(0, 0, 2, 1).data);
+    });
+    assert.deepEqual(pixels, [220, 30, 60, 255, 40, 160, 90, 255]);
+    await page
+      .getByRole('button', { name: '刷新皮肤头像', exact: true })
+      .click();
+    await page
+      .getByRole('status')
+      .filter({ hasText: '已重新读取当前账户皮肤头像' })
+      .waitFor();
+    assert.equal(
+      await avatar.locator('img').getAttribute('src'),
+      avatarHeadAfterChange,
+    );
+    await page.getByRole('button', { name: '关闭弹窗', exact: true }).click();
+    const uuid = createHash('md5')
+      .update(`OfflinePlayer:${testState.settings.offlineName}`)
+      .digest();
+    uuid[6] = (uuid[6] & 15) | 48;
+    uuid[8] = (uuid[8] & 63) | 128;
+    const skinCache = path.join(
+      testState.dataRoot,
+      'skins',
+      `offline-${uuid.toString('hex')}.png`,
+    );
+    const cacheBytes = await readFile(skinCache);
+    assert.deepEqual(cacheBytes, Buffer.from(nextSkin, 'base64'));
+    try {
+      await writeFixtureFile(skinCache, cacheBytes.subarray(0, 33));
+      await page
+        .getByRole('button', { name: '管理游戏账户', exact: true })
+        .click();
+      await page
+        .getByRole('button', { name: '刷新皮肤头像', exact: true })
+        .click();
+      await page.waitForFunction(
+        () =>
+          document
+            .querySelector('.library-account .skin-avatar')
+            ?.getAttribute('aria-label') === '默认玩家头像',
+      );
+      await writeFixtureFile(skinCache, cacheBytes);
+      await page
+        .getByRole('button', { name: '刷新皮肤头像', exact: true })
+        .click();
+      await page.waitForFunction(
+        () =>
+          document.querySelector('.library-account .skin-avatar img')
+            ?.naturalWidth === 8,
+      );
+      await page.getByRole('button', { name: '关闭弹窗', exact: true }).click();
+    } finally {
+      await writeFixtureFile(skinCache, cacheBytes);
+    }
+    assert.equal(
+      await avatar.locator('img').getAttribute('src'),
+      avatarHeadAfterChange,
+    );
+    avatarBoundsBeforeTabs = await avatar.boundingBox();
+    assert.equal(avatarBoundsBeforeTabs.width, 48);
+    assert.equal(avatarBoundsBeforeTabs.height, 48);
+    assert.equal(
+      await avatar
+        .locator('img')
+        .evaluate((image) => getComputedStyle(image).imageRendering),
+      'pixelated',
+    );
+    console.log(
+      'PASS: actual uploaded skin replaces the avatar face and hat pixels; refresh preserves the current skin, corrupt cache falls back and recovery restores the real head.',
+    );
+  }
   const fabricInstance = testState.instances.find(
     (item) => item.fabricVersion === '0.16.14',
   );
@@ -1658,6 +1811,10 @@ try {
   console.log(
     'PASS: native local mod import/disable, resources/shaders, screenshot preview and persisted instance rename.',
   );
+  if (process.argv.includes('--avatar-layout')) {
+    await page.getByRole('tab', { name: '模组', exact: true }).click();
+    await checkAlignedControls('.content-toolbar');
+  }
   const instanceId = testState.instances[0].id;
   const worldId = `EasyCraft_UI_${randomUUID()}`;
   const gameDir = path.join(
@@ -1711,6 +1868,50 @@ try {
   assert.equal(savedWorld.difficulty, 3);
   assert.equal(savedWorld.dayTime, '13000');
   assert.equal(savedWorld.weather, 'rain');
+  if (process.argv.includes('--avatar-layout')) {
+    const avatar = page.locator('.library-account .skin-avatar');
+    const worldBounds = await avatar.boundingBox();
+    for (const key of ['x', 'y', 'width', 'height'])
+      assert(
+        Math.abs(worldBounds[key] - avatarBoundsBeforeTabs[key]) <= 1,
+        `World-page avatar ${key} changed.`,
+      );
+    assert.equal(
+      await avatar.locator('img').getAttribute('src'),
+      avatarHeadAfterChange,
+    );
+    const centered = await page
+      .locator('.library-account')
+      .evaluate((button) => {
+        const items = [
+          button.querySelector('.skin-avatar'),
+          button.querySelector(':scope > span:nth-child(2)'),
+          button.querySelector(':scope > svg'),
+        ].map((item) => item.getBoundingClientRect());
+        return (
+          Math.max(...items.map((box) => box.y + box.height / 2)) -
+          Math.min(...items.map((box) => box.y + box.height / 2))
+        );
+      });
+    assert(
+      centered <= 1,
+      'Avatar, player name and arrow are not centered together.',
+    );
+    const session = await page.context().newCDPSession(page);
+    const capture = await session.send('Page.captureScreenshot', {
+      format: 'png',
+      fromSurface: true,
+      captureBeyondViewport: false,
+    });
+    await writeFixtureFile(
+      path.join(project, 'output/playwright/world-avatar-alignment.png'),
+      Buffer.from(capture.data, 'base64'),
+    );
+    await session.detach();
+    console.log(
+      'PASS: selecting and editing a real test world preserves the exact avatar pixels and stable, centered footer geometry.',
+    );
+  }
   assert.equal(
     savedWorld.gameRules.find((rule) => rule.key === 'keepInventory').value,
     'true',
@@ -2268,6 +2469,12 @@ try {
   assert.equal(memorySettings.memoryMb, 3072);
   assert.equal(memorySettings.memoryMode, 'manual');
   assert.equal(memorySettings.optimizeMemory, true);
+  if (process.argv.includes('--avatar-layout')) {
+    await checkAlignedControls('.button-row');
+    console.log(
+      'PASS: content toolbars and settings action rows share aligned centers and minimum 38px control heights.',
+    );
+  }
   await page.getByRole('button', { name: '仅整理启动器', exact: true }).click();
   await page
     .getByText('已请求 Windows 整理启动器工作集，当前可用内存已刷新。', {

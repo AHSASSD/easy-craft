@@ -4,14 +4,14 @@ export default defineConfig({
   fullyParallel: false,
   workers: 1,
   use: {
-    baseURL: 'http://127.0.0.1:1420',
+    baseURL: 'http://127.0.0.1:1421',
     channel: 'msedge',
     viewport: { width: 1120, height: 720 },
     trace: 'retain-on-failure',
   },
   webServer: {
-    command: 'npm run dev',
-    url: 'http://127.0.0.1:1420',
-    reuseExistingServer: !process.env.CI,
+    command: 'npm run build && npm run preview -- --port 1421 --strictPort',
+    url: 'http://127.0.0.1:1421',
+    reuseExistingServer: false,
   },
 });

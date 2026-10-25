@@ -634,7 +634,9 @@ function Shell({ services }: { services: Services }) {
           >
             <SkinAvatar service={services.native} />
             <span>
-              <strong>{identity || '选择游戏账户'}</strong>
+              <strong title={identity || '选择游戏账户'}>
+                {identity || '选择游戏账户'}
+              </strong>
               <small>
                 {identity
                   ? state?.settings.launchMode === 'offline'
