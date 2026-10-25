@@ -15,6 +15,7 @@ import { WorldSettingsPanel } from '../src/features/WorldSettingsPanel';
 import { JavaPanel } from '../src/features/JavaPanel';
 import { ContentPanel } from '../src/features/ContentPanel';
 import { ResourceBrowser } from '../src/features/ResourceBrowser';
+import { NativeWorkspace } from '../src/features/NativeWorkspace';
 import { PackInspector } from '../src/features/PackInspector';
 import { CachePanel } from '../src/features/CachePanel';
 import { BackupRetention } from '../src/features/BackupRetention';
@@ -360,6 +361,7 @@ test('resource browse loads real-service results by default and forwards categor
     }),
   );
   await screen.findByText('查看 Search fixture');
+  fireEvent.click(screen.getByLabelText('在线资源分类'));
   await screen.findByRole('option', { name: '性能优化 · optimization' });
   expect(call).toHaveBeenCalledWith('native_resource_search', {
     kind: 'mod',
@@ -369,14 +371,12 @@ test('resource browse loads real-service results by default and forwards categor
     category: '',
     index: 'relevance',
   });
-  fireEvent.change(screen.getByLabelText('在线资源分类'), {
-    target: { value: 'optimization' },
-  });
-  fireEvent.change(screen.getByLabelText('在线资源排序'), {
-    target: { value: 'updated' },
-  });
+  fireEvent.click(
+    screen.getByRole('option', { name: '性能优化 · optimization' }),
+  );
+  fireEvent.click(screen.getByLabelText('在线资源排序'));
+  fireEvent.click(screen.getByRole('option', { name: '最近更新' }));
   expect(screen.getByText(/筛选已修改/)).toBeTruthy();
-  fireEvent.click(screen.getByText('搜索资源'));
   await waitFor(() =>
     expect(call).toHaveBeenCalledWith('native_resource_search', {
       kind: 'mod',
@@ -397,9 +397,7 @@ test('resource browse loads real-service results by default and forwards categor
   );
   fireEvent.click(screen.getByText('重置条件'));
   expect(onFilter).toHaveBeenCalledWith('', '1.21.1');
-  expect(
-    (screen.getByLabelText('在线资源分类') as HTMLSelectElement).value,
-  ).toBe('');
+  expect(screen.getByLabelText('在线资源分类').textContent).toBe('全部分类');
   service.stop();
 });
 
@@ -452,6 +450,67 @@ test('Microsoft login opens the official browser after a device code and allows 
   ).toHaveLength(2);
   fireEvent.click(screen.getByRole('button', { name: '取消本次登录' }));
   await waitFor(() => expect(screen.queryByText('TEST-CODE')).toBeNull());
+  service.stop();
+});
+
+test('official version rows load automatically and selection does not start installation', async () => {
+  const call = vi.fn(async (command: string) =>
+    command === 'native_versions'
+      ? [
+          { id: '1.21.1', releaseTime: '2024-08-08T12:00:00Z' },
+          { id: '1.20.1', releaseTime: '2023-06-12T12:00:00Z' },
+        ]
+      : state(),
+  );
+  const service = createNativeService(true, call as typeof invoke);
+  await service.refresh();
+  render(
+    createElement(NativeWorkspace, {
+      service,
+      onAccount: vi.fn(),
+      compact: true,
+    }),
+  );
+  fireEvent.click(
+    await screen.findByRole('button', { name: /1\.20\.1.*选择安装/ }),
+  );
+  expect(screen.getByRole('combobox', { name: '原版版本' }).textContent).toBe(
+    '1.20.1',
+  );
+  expect(
+    call.mock.calls.some(([command]) => command === 'native_install'),
+  ).toBe(false);
+  service.stop();
+});
+
+test('catalog and project images reject invalid metadata without accepting other image origins', async () => {
+  let value: unknown = [{ id: '../bad' }];
+  const service = createNativeService(
+    true,
+    vi.fn(async () => value) as typeof invoke,
+  );
+  await expect(service.versionCatalog()).rejects.toThrow('版本清单格式无效');
+  value = {
+    hits: [
+      {
+        id: 'Proj1234',
+        title: 'Test',
+        description: '',
+        author: 'Test',
+        iconUrl: 'https://evil.test/icon.png',
+      },
+    ],
+    total: 1,
+    offset: 0,
+  };
+  await expect(service.searchResources('mod', '', '1.21.1', 0)).rejects.toThrow(
+    '资源搜索响应无效',
+  );
+  (value as { hits: { iconUrl: string }[] }).hits[0].iconUrl =
+    'https://cdn.modrinth.com/data/Proj1234/icon.png';
+  expect(
+    (await service.searchResources('mod', '', '1.21.1', 0)).hits[0].iconUrl,
+  ).toContain('cdn.modrinth.com');
   service.stop();
 });
 

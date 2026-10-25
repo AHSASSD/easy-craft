@@ -985,6 +985,7 @@ impl Host {
                 instance.manifest_sha1, instance.version
             ),
             kind: "release".into(),
+            release_time: String::new(),
         };
         let mut prepared = minecraft::prepare(self, &entry, cancel).await?;
         if !instance.fabric_version.is_empty() {

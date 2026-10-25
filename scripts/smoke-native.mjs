@@ -71,6 +71,13 @@ let browser;
 let originalSettings;
 let originalInstanceLaunch;
 let page;
+async function pickDown(label, filter, option) {
+  await page.getByRole('combobox', { name: label, exact: true }).click();
+  await page
+    .getByRole('searchbox', { name: `筛选${label}`, exact: true })
+    .fill(filter);
+  await page.getByRole('option', { name: option, exact: true }).click();
+}
 let installedPack;
 let restoreProbe;
 let launchedGame;
@@ -787,10 +794,58 @@ try {
     .click();
   await page.getByRole('button', { name: '原版游戏', exact: true }).click();
   await page.getByRole('heading', { name: '原版游戏', exact: true }).waitFor();
+  if (process.argv.includes('--version-list')) {
+    await page
+      .getByRole('button', { name: '刷新官方版本', exact: true })
+      .click();
+    await page
+      .locator('.official-version-list > button')
+      .first()
+      .waitFor({ timeout: 60000 });
+    assert.equal(
+      await page.locator('.official-version-list > button').count(),
+      20,
+    );
+    await page
+      .getByRole('button', { name: '显示更多正式版', exact: true })
+      .click();
+    assert.equal(
+      await page.locator('.official-version-list > button').count(),
+      40,
+    );
+    await page.getByLabel('筛选官方版本列表').fill('1.21.1');
+    await page
+      .locator('.official-version-list > button')
+      .filter({ has: page.locator('strong').filter({ hasText: /^1\.21\.1$/ }) })
+      .first()
+      .click();
+    assert.equal(
+      await page.getByLabel('原版版本', { exact: true }).textContent(),
+      '1.21.1',
+    );
+    await page.getByLabel('筛选官方版本列表').fill('');
+    await page.locator('.official-version-catalog').scrollIntoViewIfNeeded();
+    const session = await page.context().newCDPSession(page);
+    const capture = await session.send('Page.captureScreenshot', {
+      format: 'png',
+      fromSurface: true,
+      captureBeyondViewport: false,
+    });
+    await writeFixtureFile(
+      path.join(project, 'output/playwright/native-version-list.png'),
+      Buffer.from(capture.data, 'base64'),
+    );
+    await session.detach();
+    console.log(
+      'PASS: real official version catalog loads automatically, shows publication dates and 20/40 rows, and row selection updates the install target without installing.',
+    );
+  }
   if (!process.argv.includes('--cached')) {
     await page.getByRole('button', { name: '刷新官方版本' }).click();
     await page.getByText('已读取官方正式版本清单。', { exact: true }).waitFor();
-    assert((await page.locator('#official-versions option').count()) > 50);
+    assert(
+      (await page.locator('.official-version-list > button').count()) > 10,
+    );
     await page
       .getByRole('combobox', { name: '真实实例加载器' })
       .selectOption('fabric');
@@ -913,10 +968,28 @@ try {
     if (process.argv.includes('--resource-browse')) {
       await page.locator('.resource-hit').first().waitFor({ timeout: 60000 });
       assert((await page.locator('.resource-hit').count()) > 0);
+      await page.getByLabel('在线资源分类').click();
       await page
-        .getByLabel('在线资源分类')
-        .locator('option[value="optimization"]')
-        .waitFor({ state: 'attached', timeout: 60000 });
+        .getByRole('option', { name: '性能优化 · optimization', exact: true })
+        .waitFor({ timeout: 60000 });
+      const trigger = await page
+        .getByRole('combobox', { name: '在线资源分类', exact: true })
+        .boundingBox();
+      const menu = await page.locator('.down-select-popup').boundingBox();
+      assert(menu.y >= trigger.y + trigger.height);
+      assert(
+        await page
+          .getByRole('listbox')
+          .evaluate((node) => node.scrollHeight > node.clientHeight),
+      );
+      await page.getByRole('listbox').evaluate((node) => {
+        node.scrollTop = 100;
+      });
+      assert(
+        (await page.getByRole('listbox').evaluate((node) => node.scrollTop)) >
+          0,
+      );
+      await page.keyboard.press('Escape');
       const boxes = await Promise.all(
         [
           '搜索在线资源',
@@ -929,9 +1002,8 @@ try {
       assert.equal(boxes[0].y, boxes[1].y);
       assert.equal(boxes[2].y, boxes[3].y);
       await page.getByLabel('搜索在线资源').fill('Ferrite');
-      await page.getByLabel('在线资源分类').selectOption('optimization');
-      await page.getByLabel('在线资源排序').selectOption('relevance');
-      await page.getByRole('button', { name: '搜索资源', exact: true }).click();
+      await pickDown('在线资源分类', 'optimization', '性能优化 · optimization');
+      await pickDown('在线资源排序', '相关', '相关程度');
       await page
         .getByRole('button', { name: '查看 FerriteCore', exact: true })
         .waitFor({ timeout: 60000 });
@@ -940,6 +1012,12 @@ try {
         .getByRole('button', { name: '搜索资源', exact: true })
         .waitFor();
       await page.locator('.resource-hit').first().scrollIntoViewIfNeeded();
+      await page.waitForFunction(() => {
+        const image = document.querySelector(
+          '.resource-hit .resource-project-icon img',
+        );
+        return image?.complete && image.naturalWidth > 0;
+      });
       const session = await page.context().newCDPSession(page);
       const capture = await session.send('Page.captureScreenshot', {
         format: 'png',
@@ -951,13 +1029,13 @@ try {
         Buffer.from(capture.data, 'base64'),
       );
       await session.detach();
-      await page.getByLabel('在线资源分类').selectOption('');
+      await pickDown('在线资源分类', '全部', '全部分类');
       console.log(
         'PASS: real Modrinth default browse, live categories and partial-name filtered search; labeled controls share aligned 40px heights.',
       );
     }
     await page.getByLabel('搜索在线资源').fill('FerriteCore');
-    await page.getByLabel('在线资源游戏版本').fill('1.21.1');
+    await pickDown('在线资源游戏版本', '1.21.1', '1.21.1');
     await page.getByRole('button', { name: '搜索资源', exact: true }).click();
     await page
       .getByRole('button', { name: '查看 FerriteCore', exact: true })
@@ -1003,7 +1081,7 @@ try {
     if (process.argv.includes('--install-resources')) {
       await page.getByRole('button', { name: '资源包', exact: true }).click();
       await page.getByLabel('搜索在线资源').fill('Default Dark Mode');
-      await page.getByLabel('在线资源游戏版本').fill('1.21.1');
+      await pickDown('在线资源游戏版本', '1.21.1', '1.21.1');
       await page.getByRole('button', { name: '搜索资源', exact: true }).click();
       await page
         .getByRole('button', { name: '查看 Default Dark Mode', exact: true })
@@ -1028,7 +1106,7 @@ try {
       assert(process.argv.includes('--install-resources'));
       await page.getByRole('button', { name: '模组', exact: true }).click();
       await page.getByLabel('搜索在线资源').fill('Mod Menu');
-      await page.getByLabel('在线资源游戏版本').fill('1.21.1');
+      await pickDown('在线资源游戏版本', '1.21.1', '1.21.1');
       await page.getByRole('button', { name: '搜索资源', exact: true }).click();
       await page
         .getByRole('button', { name: '查看 Mod Menu', exact: true })
@@ -1052,7 +1130,7 @@ try {
       assert(process.argv.includes('--install-resources'));
       await page.getByRole('button', { name: '光影包', exact: true }).click();
       await page.getByLabel('搜索在线资源').fill('MakeUp');
-      await page.getByLabel('在线资源游戏版本').fill('1.21.1');
+      await pickDown('在线资源游戏版本', '1.21.1', '1.21.1');
       await page.getByRole('button', { name: '搜索资源', exact: true }).click();
       const result = page.getByRole('button', { name: /查看 MakeUp/ }).first();
       await result.waitFor({ timeout: 100000 });
@@ -1118,7 +1196,7 @@ try {
         .getByRole('button', { name: '获取世界数据包', exact: true })
         .click();
       await page.getByLabel('搜索在线资源').fill('Veinminer');
-      await page.getByLabel('在线资源游戏版本').fill('1.21.1');
+      await pickDown('在线资源游戏版本', '1.21.1', '1.21.1');
       await page.getByRole('button', { name: '搜索资源', exact: true }).click();
       const result = page
         .getByRole('button', { name: /^查看 Veinminer$/i })
@@ -1195,7 +1273,7 @@ try {
     );
     if (process.argv.includes('--online-pack')) {
       await page.getByLabel('搜索在线资源').fill('Adrenaline');
-      await page.getByLabel('在线资源游戏版本').fill('1.21.1');
+      await pickDown('在线资源游戏版本', '1.21.1', '1.21.1');
       await page.getByRole('button', { name: '搜索资源', exact: true }).click();
       await page
         .getByRole('button', { name: '查看 Adrenaline', exact: true })

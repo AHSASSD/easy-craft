@@ -687,7 +687,12 @@ export function createNativeService(
             resourceId(hit.id) &&
             bounded(hit.title, 512) &&
             bounded(hit.description, 4096) &&
-            bounded(hit.author, 128),
+            bounded(hit.author, 128) &&
+            (hit.iconUrl == null ||
+              (bounded(hit.iconUrl, 2048) &&
+                /^https:\/\/cdn\.modrinth\.com\/data\/[A-Za-z0-9/_.%+-]+(?:\?[^\s]*)?$/.test(
+                  hit.iconUrl,
+                ))),
         )
       )
         throw new Error('资源搜索响应无效');
@@ -899,6 +904,25 @@ export function createNativeService(
       stopped = true;
       if (timer) clearInterval(timer);
       listeners.clear();
+    },
+    versionCatalog: async () => {
+      const value = await request('native_versions');
+      if (
+        !Array.isArray(value) ||
+        value.length > 5000 ||
+        !value.every(
+          (item: unknown) =>
+            isRecord(item) &&
+            bounded(item.id, 100) &&
+            /^[A-Za-z0-9._-]+$/.test(item.id) &&
+            (item.releaseTime === undefined || bounded(item.releaseTime, 64)),
+        )
+      )
+        throw new Error('版本清单格式无效');
+      return value.map((item: { id: string; releaseTime?: string }) => ({
+        id: item.id,
+        releaseTime: item.releaseTime ?? '',
+      }));
     },
     versions: async () => {
       const value = await request('native_versions');

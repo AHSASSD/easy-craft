@@ -618,6 +618,7 @@ async fn official_install_integration() {
             instance.manifest_sha1, instance.version
         ),
         kind: "release".into(),
+        release_time: String::new(),
     };
     let index: serde_json::Value =
         serde_json::from_slice(&fs::read(host.root.join("assets/indexes/17.json")).unwrap())
@@ -692,6 +693,7 @@ async fn cached_offline_preparation_integration() {
             instance.manifest_sha1, instance.version
         ),
         kind: "release".into(),
+        release_time: String::new(),
     };
     let prepared = minecraft::prepare(&host, &entry, &tokio_util::sync::CancellationToken::new())
         .await
@@ -738,6 +740,7 @@ async fn official_fabric_install_integration() {
             instance.manifest_sha1, instance.version
         ),
         kind: "release".into(),
+        release_time: String::new(),
     };
     let cancel = tokio_util::sync::CancellationToken::new();
     let mut prepared = minecraft::prepare(&host, &entry, &cancel).await.unwrap();

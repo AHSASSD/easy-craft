@@ -14,6 +14,8 @@ import type {
   WorldEntry,
 } from '../core/native-contracts';
 import { PackInspector } from './PackInspector';
+import { DownSelect } from '../components/DownSelect';
+import { Package } from 'lucide-react';
 
 const dependencyNames: Record<string, string> = {
   required: '必需',
@@ -125,14 +127,36 @@ export function ResourceBrowser({
   const [index, setIndex] = useState(query ? 'relevance' : 'downloads');
   const [categories, setCategories] = useState<string[]>([]);
   const [categoryError, setCategoryError] = useState('');
+  const [gameVersions, setGameVersions] = useState<string[]>([]);
+  const [versionsError, setVersionsError] = useState('');
   const request = useRef(0);
+  const searchTimer = useRef<number | undefined>(undefined);
   const initialSearch = useEffectEvent(() => {
     if (gameVersion) void search();
   });
+  const filterSignature = JSON.stringify([query, gameVersion, category, index]);
+  const previousFilters = useRef(filterSignature);
+  useEffect(() => {
+    if (previousFilters.current === filterSignature) return;
+    previousFilters.current = filterSignature;
+    if (!native.available || !gameVersion) return;
+    searchTimer.current = window.setTimeout(() => initialSearch(), 450);
+    const timeout = searchTimer.current;
+    return () => window.clearTimeout(timeout);
+  }, [filterSignature, native.available, gameVersion]);
   useEffect(() => {
     if (!native.available) return;
     initialSearch();
     let disposed = false;
+    void service
+      .versions()
+      .then((values) => {
+        if (!disposed) setGameVersions(values);
+      })
+      .catch(() => {
+        if (!disposed)
+          setVersionsError('游戏版本清单加载失败，仍可在下拉框输入版本。');
+      });
     void service
       .resourceCategories(kind)
       .then((value) => {
@@ -174,6 +198,7 @@ export function ResourceBrowser({
     [],
   );
   async function search(offset = 0) {
+    window.clearTimeout(searchTimer.current);
     const ticket = ++request.current;
     setBusy(true);
     setError('');
@@ -307,42 +332,44 @@ export function ResourceBrowser({
         </label>
         <label>
           游戏版本{' '}
-          <input
-            aria-label="在线资源游戏版本"
-            maxLength={100}
+          <DownSelect
+            label="在线资源游戏版本"
             value={gameVersion}
-            onChange={(event) => onFilter(query, event.target.value)}
+            options={gameVersions.map((value) => ({ value, label: value }))}
+            onChange={(value) => onFilter(query, value)}
+            allowCustom
           />
         </label>
         <label>
           分类
-          <select
-            aria-label="在线资源分类"
+          <DownSelect
+            label="在线资源分类"
             value={category}
-            onChange={(event) => setCategory(event.target.value)}
-          >
-            <option value="">全部分类</option>
-            {categories.map((item) => (
-              <option key={item} value={item}>
-                {categoryLabels[item]
-                  ? `${categoryLabels[item]} · ${item}`
-                  : item}
-              </option>
-            ))}
-          </select>
+            onChange={setCategory}
+            options={[
+              { value: '', label: '全部分类' },
+              ...categories.map((value) => ({
+                value,
+                label: categoryLabels[value]
+                  ? `${categoryLabels[value]} · ${value}`
+                  : value,
+              })),
+            ]}
+          />
         </label>
         <label>
           排序
-          <select
-            aria-label="在线资源排序"
+          <DownSelect
+            label="在线资源排序"
             value={index}
-            onChange={(event) => setIndex(event.target.value)}
-          >
-            <option value="relevance">相关程度</option>
-            <option value="downloads">下载最多</option>
-            <option value="updated">最近更新</option>
-            <option value="newest">最新发布</option>
-          </select>
+            onChange={setIndex}
+            options={[
+              { value: 'relevance', label: '相关程度' },
+              { value: 'downloads', label: '下载最多' },
+              { value: 'updated', label: '最近更新' },
+              { value: 'newest', label: '最新发布' },
+            ]}
+          />
         </label>
         <div className="button-row resource-search-actions">
           <button
@@ -362,14 +389,17 @@ export function ResourceBrowser({
           >
             重置条件
           </button>
-          <span className="hint">
-            来源：Modrinth · 支持关键词相关搜索，无需完整名称
-          </span>
+          <span className="hint">修改条件后自动搜索 · 支持部分名称</span>
         </div>
       </form>
       {categoryError && (
         <p className="hint" role="status">
           {categoryError}
+        </p>
+      )}
+      {versionsError && (
+        <p className="hint" role="status">
+          {versionsError}
         </p>
       )}
       {error && (
@@ -651,29 +681,45 @@ export function ResourceBrowser({
           {result.value.hits.length ? (
             result.value.hits.map((hit) => (
               <article className="card resource-hit" key={hit.id}>
-                <h2>{hit.title}</h2>
-                <p>{hit.description}</p>
-                <div className="content-toolbar">
-                  <span>作者：{hit.author}</span>
-                  <button disabled={busy} onClick={() => void open(hit.id)}>
-                    查看 {hit.title}
-                  </button>
-                  <button
-                    disabled={busy}
-                    onClick={() =>
-                      void service
-                        .openResource(kind, hit.id)
-                        .catch((error: unknown) =>
-                          setError(
-                            error instanceof Error
-                              ? error.message
-                              : '无法打开项目页面',
-                          ),
-                        )
-                    }
-                  >
-                    在 Modrinth 查看 ↗
-                  </button>
+                <span className="resource-project-icon">
+                  <Package size={32} />
+                  {hit.iconUrl && (
+                    <img
+                      src={hit.iconUrl}
+                      alt=""
+                      loading="lazy"
+                      decoding="async"
+                      onError={(event) => {
+                        event.currentTarget.style.display = 'none';
+                      }}
+                    />
+                  )}
+                </span>
+                <div className="resource-hit-info">
+                  <h2>{hit.title}</h2>
+                  <p>{hit.description}</p>
+                  <div className="content-toolbar">
+                    <span>作者：{hit.author}</span>
+                    <button disabled={busy} onClick={() => void open(hit.id)}>
+                      查看 {hit.title}
+                    </button>
+                    <button
+                      disabled={busy}
+                      onClick={() =>
+                        void service
+                          .openResource(kind, hit.id)
+                          .catch((error: unknown) =>
+                            setError(
+                              error instanceof Error
+                                ? error.message
+                                : '无法打开项目页面',
+                            ),
+                          )
+                      }
+                    >
+                      在 Modrinth 查看 ↗
+                    </button>
+                  </div>
                 </div>
               </article>
             ))

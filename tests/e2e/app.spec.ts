@@ -28,12 +28,43 @@ test('resource filters align as labeled fields and wrap without overflow', async
     if (width === 1120) {
       expect(boxes[0]!.y).toBe(boxes[1]!.y);
       expect(boxes[2]!.y).toBe(boxes[3]!.y);
+      const labels = await page
+        .locator('.resource-search-form > label')
+        .evaluateAll((nodes) =>
+          nodes.map((node) => node.getBoundingClientRect().y),
+        );
+      expect(labels[0]).toBe(labels[1]);
+      expect(labels[2]).toBe(labels[3]);
     }
     expect(
       await page.evaluate(
         () => document.documentElement.scrollWidth <= innerWidth,
       ),
     ).toBe(true);
+    await page
+      .getByRole('combobox', { name: '在线资源排序', exact: true })
+      .click();
+    await expect(page.locator('.down-select-popup')).toBeVisible();
+    const trigger = await page
+      .getByLabel('在线资源排序', { exact: true })
+      .boundingBox();
+    const menu = await page.locator('.down-select-popup').boundingBox();
+    expect(menu!.y).toBeGreaterThanOrEqual(trigger!.y + trigger!.height);
+    expect(menu!.y + menu!.height).toBeLessThanOrEqual(720);
+    await page.getByRole('option', { name: '最近更新', exact: true }).click();
+    await expect(page.getByLabel('在线资源排序', { exact: true })).toHaveText(
+      '最近更新',
+    );
+    await page.getByLabel('在线资源游戏版本', { exact: true }).click();
+    await page
+      .getByRole('searchbox', { name: '筛选在线资源游戏版本' })
+      .fill('1.20.1');
+    await page
+      .getByRole('option', { name: '使用版本 1.20.1', exact: true })
+      .click();
+    await expect(
+      page.getByLabel('在线资源游戏版本', { exact: true }),
+    ).toHaveText('1.20.1');
   }
   await page.screenshot({
     path: 'output/playwright/resource-filters-minimum.png',

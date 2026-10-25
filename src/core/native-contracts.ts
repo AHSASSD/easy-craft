@@ -108,6 +108,7 @@ export type ConfigBackupPreview = {
 export type ResourceKind =
   'mod' | 'resourcepack' | 'shader' | 'datapack' | 'modpack';
 export type ResourceHit = {
+  iconUrl?: string | null;
   id: string;
   title: string;
   description: string;
@@ -305,6 +306,7 @@ export interface NativeService extends Observable<NativeSnapshot> {
   saveAvatar(bytes: number[]): Promise<void>;
   background(bytes?: number[]): Promise<string | null>;
   versions(): Promise<string[]>;
+  versionCatalog(): Promise<{ id: string; releaseTime: string }[]>;
   previewPack(bytes: number[]): Promise<PackPreview>;
   previewPackFile(file: File): Promise<PackPreview>;
   pickPack(): Promise<PackPreview | null>;

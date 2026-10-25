@@ -5,9 +5,10 @@ import {
   useSyncExternalStore,
   type FormEvent,
 } from 'react';
-import { Download, Play, ShieldCheck } from 'lucide-react';
+import { Box, Download, Play, ShieldCheck } from 'lucide-react';
 import type { NativeService, NativeSettings } from '../core/native-contracts';
 import { PackInspector } from './PackInspector';
+import { DownSelect } from '../components/DownSelect';
 
 export function NativeWorkspace({
   service,
@@ -20,7 +21,12 @@ export function NativeWorkspace({
 }) {
   const snapshot = useSyncExternalStore(service.subscribe, service.snapshot);
   const [draft, setDraft] = useState<NativeSettings | null>(null);
-  const [versions, setVersions] = useState<string[]>([]);
+  const [versions, setVersions] = useState<
+    { id: string; releaseTime: string }[]
+  >([]);
+  const [versionQuery, setVersionQuery] = useState('');
+  const [visibleVersions, setVisibleVersions] = useState(20);
+  const [catalogError, setCatalogError] = useState('');
   const [version, setVersion] = useState('1.21.1');
   const [loader, setLoader] = useState('vanilla');
   const [fabricVersion, setFabricVersion] = useState('0.16.14');
@@ -30,6 +36,26 @@ export function NativeWorkspace({
   const [feedback, setFeedback] = useState('');
   const [error, setError] = useState('');
   const state = snapshot.state;
+  const catalogRequest = useRef(0);
+  useEffect(() => {
+    if (!snapshot.available) return;
+    let disposed = false;
+    const ticket = ++catalogRequest.current;
+    void service
+      .versionCatalog()
+      .then((values) => {
+        if (!disposed && ticket === catalogRequest.current) setVersions(values);
+      })
+      .catch((error: unknown) => {
+        if (!disposed && ticket === catalogRequest.current)
+          setCatalogError(
+            error instanceof Error ? error.message : '官方版本列表读取失败',
+          );
+      });
+    return () => {
+      disposed = true;
+    };
+  }, [service, snapshot.available]);
   const settings = draft ??
     state?.settings ?? {
       clientId: '',
@@ -159,8 +185,12 @@ export function NativeWorkspace({
               disabled={locked}
               onClick={() =>
                 void run(async () => {
-                  const values = await service.versions();
-                  setVersions(values);
+                  const ticket = ++catalogRequest.current;
+                  const values = await service.versionCatalog();
+                  if (ticket === catalogRequest.current) {
+                    setVersions(values);
+                    setCatalogError('');
+                  }
                 }, '已读取官方正式版本清单。')
               }
             >
@@ -171,19 +201,80 @@ export function NativeWorkspace({
             下载只来自官方资源域名，逐文件校验 SHA-1。V0.3 支持现代原版与
             Fabric；旧式参数和其他加载器暂不支持。
           </p>
+          <div className="official-version-catalog">
+            <div className="section-heading">
+              <h3>正式版本</h3>
+              <input
+                aria-label="筛选官方版本列表"
+                placeholder="输入版本号，或直接选择下方版本"
+                value={versionQuery}
+                onChange={(event) => {
+                  setVersionQuery(event.target.value);
+                  setVisibleVersions(20);
+                }}
+              />
+            </div>
+            {catalogError && <p role="alert">{catalogError}</p>}
+            {!versions.length && !catalogError && (
+              <p className="hint">
+                {snapshot.available
+                  ? '正在读取官方版本清单，可点击刷新重试。'
+                  : '桌面版从官方清单加载版本，不显示模拟版本。'}
+              </p>
+            )}
+            <div
+              className="official-version-list"
+              aria-label="官方正式版本列表"
+            >
+              {versions
+                .filter((entry) => entry.id.includes(versionQuery.trim()))
+                .slice(0, visibleVersions)
+                .map((entry, index) => (
+                  <button
+                    type="button"
+                    key={entry.id}
+                    aria-pressed={version === entry.id}
+                    onClick={() => setVersion(entry.id)}
+                  >
+                    <span className="version-block-icon">
+                      <Box size={24} />
+                    </span>
+                    <span>
+                      <strong>{entry.id}</strong>
+                      <small>
+                        {entry.releaseTime
+                          ? new Date(entry.releaseTime).toLocaleString()
+                          : '官方正式版'}
+                        {index === 0 && !versionQuery ? ' · 最新正式版' : ''}
+                      </small>
+                    </span>
+                    <span>{version === entry.id ? '已选择' : '选择安装'}</span>
+                  </button>
+                ))}
+            </div>
+            {versions.filter((entry) => entry.id.includes(versionQuery.trim()))
+              .length > visibleVersions && (
+              <button
+                type="button"
+                onClick={() => setVisibleVersions((count) => count + 20)}
+              >
+                显示更多正式版
+              </button>
+            )}
+          </div>
           <label className="native-label">
             正式版本
-            <input
-              aria-label="原版版本"
-              list="official-versions"
+            <DownSelect
+              label="原版版本"
               value={version}
-              onChange={(event) => setVersion(event.target.value)}
+              options={versions.map((entry) => ({
+                value: entry.id,
+                label: entry.id,
+              }))}
+              onChange={setVersion}
+              allowCustom
+              disabled={locked}
             />
-            <datalist id="official-versions">
-              {versions.map((entry) => (
-                <option key={entry} value={entry} />
-              ))}
-            </datalist>
           </label>
           <label className="native-label">
             加载器

@@ -160,6 +160,8 @@ pub struct Version {
     pub sha1: String,
     #[serde(rename = "type")]
     pub kind: String,
+    #[serde(default, rename = "releaseTime")]
+    pub release_time: String,
 }
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]

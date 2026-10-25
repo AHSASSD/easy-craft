@@ -43,6 +43,18 @@ pub struct Hit {
     title: String,
     description: String,
     author: String,
+    icon_url: Option<String>,
+}
+fn icon_url(value: &Value) -> Option<String> {
+    let raw = value.as_str().filter(|value| value.len() <= 2048)?;
+    let url = Url::parse(raw).ok()?;
+    (url.scheme() == "https"
+        && url.host_str() == Some("cdn.modrinth.com")
+        && url.username().is_empty()
+        && url.password().is_none()
+        && url.port().is_none()
+        && url.path().starts_with("/data/"))
+    .then(|| raw.to_string())
 }
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -175,6 +187,7 @@ fn parse_search(value: &Value, offset: u64) -> Result<Search> {
             title: text(row, "title", 512)?,
             description: text(row, "description", 4096)?,
             author: text(row, "author", 128)?,
+            icon_url: icon_url(&row["icon_url"]),
         });
     }
     Ok(Search {
@@ -409,6 +422,15 @@ mod tests {
     }
     #[test]
     fn category_filters_are_encoded_bounded_and_keep_loader_and_version_constraints() {
+        assert!(icon_url(&json!("https://cdn.modrinth.com/data/Test1234/icon.png")).is_some());
+        for value in [
+            "https://cdn.modrinth.com.evil.test/data/icon.png",
+            "http://cdn.modrinth.com/data/icon.png",
+            "https://user@cdn.modrinth.com/data/icon.png",
+            "https://cdn.modrinth.com/elsewhere/icon.png",
+        ] {
+            assert!(icon_url(&json!(value)).is_none());
+        }
         let url = filtered_search_url(Kind::Mod, "sod", "1.21.1", 20, "optimization", "downloads")
             .unwrap();
         let pairs: std::collections::HashMap<_, _> = url.query_pairs().collect();
