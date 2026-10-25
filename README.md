@@ -21,7 +21,7 @@ npm ci
 ## 功能与边界
 
 - 最左侧为游戏库、设置、下载三个入口，中间栏目随入口切换；支持真实实例搜索、重命名、打开目录、右键菜单、调整/折叠栏目与导航记忆。主题偏好持久化，本地背景目前只预览，跨重启保存待完成。演示资料与模拟启动保留于 `/?demo=1`，也可从设置进入。
-- 实例的模组、资源与光影、截图页读取真实文件；Fabric Mod 可启停，ZIP/JAR 可受限导入，截图提供缩略图及查看。系统选择器支持最大 512 MiB 的流式导入，小文件/拖放入口仍限 16 MiB；未知文件保留，运行与占用时拒绝修改。
+- 实例的模组、资源与光影、截图页读取真实文件；Fabric Mod 可启停，ZIP/JAR 可受限导入，截图提供缩略图及查看。系统选择器与拖放/文件输入均支持最多 512 MiB；拖放按 1 MiB 分块接收，进度与取消在底部任务栏。未知文件保留，运行与占用时拒绝修改，重名不覆盖。
 - “实例 → 存档”读取真实 Java 存档：和平/简单/普通/困难、难度锁定、允许命令、默认游戏模式、时间、天气，以及存档已有的布尔/整数游戏规则。规则支持中英文搜索，其他文本规则只读；不会凭空添加版本不支持的规则。
 - 音画设置独立读写实例的 options.txt：主音量、音乐音量、渲染距离、全屏。默认游戏模式不覆盖现有玩家的独立模式。
 - 保存前校验文件版本与世界占用状态，备份原配置后只修改受支持字段；区块、背包及未知 NBT 字节保持不变。备份位于实例 game/.easycraft-backups/{UUID}/，并显示具体路径；它是配置备份，不是完整世界备份。外部游戏停在主菜单时无法可靠检测，保存前请退出该实例。
@@ -105,6 +105,7 @@ node scripts/smoke-native.mjs debug --cached --online-pack --launch-offline
 node scripts/smoke-native.mjs debug --cached --background
 node scripts/smoke-native.mjs debug --cached --instance-settings --launch-offline
 node scripts/smoke-native.mjs debug --cached --restore-config --launch-offline
+node scripts/smoke-native.mjs debug --cached --streamed-drop --public-pack --launch-offline
 ```
 
 安装集成测试会在 `.native/integration` 下载真实官方 1.21.1 资源、验证缓存修复和参数构造，不启动游戏。`-Integration offline` 将 HTTP 路由到不可用的本地代理，验证完整缓存无需联网即可准备离线参数。桌面检查使用该测试目录与临时 WebView2 调试端口，验证窗口、IPC、Java、官方清单、正版模式登录限制和离线配置；加 `--launch-offline` 才会实际启动游戏，观察初始化后结束进程。测试临时修改并还原测试目录的设置，不修改用户 data 目录，不进行 Microsoft 登录。
@@ -134,6 +135,7 @@ src-tauri/src/content.rs 本地内容扫描、启停、导入、截图与目录�
 src-tauri/src/resources.rs Modrinth 搜索、项目和兼容版本查询
 src-tauri/src/resource_install.rs 固定依赖计划、JAR 条件校验、SHA-512 与事务恢复
 src-tauri/src/worlds.rs  受限 NBT 原位修改、音画选项、占用锁与有归属的配置备份恢复
+src-tauri/src/file_upload.rs  分块文件接收、固定目标、大小/顺序检查与临时文件生命周期
 src-tauri/src/skins.rs   官方皮肤下载缓存、离线头像 PNG 校验
 scripts/native.ps1      工作区便携工具链入口
 tests/                  前端单元/组件与浏览器流程测试

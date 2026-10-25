@@ -28,6 +28,8 @@ struct Inner {
     auth_busy: bool,
     resource_plan: Option<crate::resource_install::Plan>,
     pack_plan: Option<crate::modpack::Plan>,
+    upload: Option<crate::file_upload::Upload>,
+    upload_token: Option<String>,
 }
 pub struct Host {
     _lock: fs::File,
@@ -130,6 +132,8 @@ impl Host {
                 auth_busy: false,
                 resource_plan: None,
                 pack_plan: None,
+                upload: None,
+                upload_token: None,
             }),
         }))
     }
@@ -292,7 +296,14 @@ impl Host {
     }
     fn finish(&self, result: Result<()>, cancel: &CancellationToken) {
         let mut inner = self.inner.lock().expect("host state poisoned");
-        inner.task.status = if cancel.is_cancelled() {
+        Self::finish_locked(&mut inner, result, cancel);
+    }
+    fn finish_locked(inner: &mut Inner, result: Result<()>, cancel: &CancellationToken) {
+        let committed = result.is_ok()
+            && ["file-committed", "resources-committed", "pack-committed"]
+                .contains(&inner.task.phase.as_str());
+        let cancelled = cancel.is_cancelled() && !committed;
+        inner.task.status = if cancelled {
             "cancelled"
         } else if result.is_ok() {
             "succeeded"
@@ -300,12 +311,19 @@ impl Host {
             "failed"
         }
         .into();
-        inner.task.message = if cancel.is_cancelled() {
-            "任务已取消，已校验缓存保留".into()
+        inner.task.message = if cancelled {
+            if inner.task.phase.starts_with("file-") {
+                "文件接收或检查已取消，未提交目标文件。"
+            } else {
+                "任务已取消，已校验缓存保留"
+            }
+            .into()
         } else {
             result.err().unwrap_or_else(|| {
                 if inner.task.phase == "pack-checked" {
                     "归档检查完成；尚未安装。"
+                } else if inner.task.phase == "file-committed" {
+                    "文件已导入；是否在游戏中启用需确认。"
                 } else {
                     "任务完成"
                 }
@@ -314,19 +332,144 @@ impl Host {
         };
         inner.task.pid = None;
         inner.cancel = None;
+        inner.upload = None;
+        inner.upload_token = None;
     }
     pub fn background(&self, bytes: Option<Vec<u8>>) -> Result<Option<String>> {
         let _guard = self.inner.lock().map_err(|_| "宿主状态不可用")?;
         crate::appearance::background(&self.root, bytes.as_deref())
     }
     pub fn cancel(&self) {
-        let inner = self.inner.lock().expect("host state poisoned");
-        if ["resources-committed", "pack-committed"].contains(&inner.task.phase.as_str()) {
+        let mut inner = self.inner.lock().expect("host state poisoned");
+        if ["resources-committed", "pack-committed", "file-committed"]
+            .contains(&inner.task.phase.as_str())
+        {
             return;
         }
         if let Some(cancel) = &inner.cancel {
             cancel.cancel();
+            if inner.upload.is_some() {
+                let cancel = cancel.clone();
+                Self::finish_locked(&mut inner, Err("文件接收已取消".into()), &cancel);
+            }
         }
+    }
+    pub fn begin_upload(
+        &self,
+        name: String,
+        size: u64,
+        target: crate::file_upload::Target,
+    ) -> Result<String> {
+        if let crate::file_upload::Target::Content { id, content_kind } = &target {
+            let state = self.status();
+            if *content_kind == crate::content::Kind::Mods
+                && !state
+                    .instances
+                    .iter()
+                    .any(|item| &item.id == id && !item.fabric_version.is_empty())
+            {
+                return Err("本轮本地模组导入需要 Fabric 实例".into());
+            }
+            self.instance_files(id, |_| Ok(()))?;
+        }
+        let cancel = self.begin_task("接收拖入或选择的本地文件")?;
+        let upload =
+            match crate::file_upload::Upload::new(&self.root, name, size, target, cancel.clone()) {
+                Ok(upload) => upload,
+                Err(error) => {
+                    self.finish(Err(error.clone()), &cancel);
+                    return Err(error);
+                }
+            };
+        let mut inner = self.inner.lock().map_err(|_| "宿主状态不可用")?;
+        if cancel.is_cancelled() {
+            Self::finish_locked(&mut inner, Err("文件接收已取消".into()), &cancel);
+            return Err("文件接收已取消".into());
+        }
+        let token = upload.token.clone();
+        inner.task.phase = "file-receive".into();
+        inner.task.total = size as usize;
+        inner.upload_token = Some(token.clone());
+        inner.upload = Some(upload);
+        Ok(token)
+    }
+    pub fn append_upload(&self, token: &str, offset: u64, bytes: &[u8]) -> Result<()> {
+        let mut inner = self.inner.lock().map_err(|_| "宿主状态不可用")?;
+        let upload = inner
+            .upload
+            .as_mut()
+            .filter(|upload| upload.token == token)
+            .ok_or("文件接收令牌无效或已取消")?;
+        let cancel = upload.cancel.clone();
+        let result = upload.append(offset, bytes);
+        if let Err(error) = &result {
+            Self::finish_locked(&mut inner, Err(error.clone()), &cancel);
+        } else {
+            inner.task.completed = (offset + bytes.len() as u64) as usize;
+        }
+        result
+    }
+    pub fn abort_upload(&self, token: &str) {
+        let mut inner = self.inner.lock().expect("host state poisoned");
+        if inner.upload_token.as_deref() == Some(token) {
+            if let Some(cancel) = &inner.cancel {
+                let cancel = cancel.clone();
+                cancel.cancel();
+                if inner.upload.is_some() {
+                    Self::finish_locked(&mut inner, Err("文件接收已取消".into()), &cancel);
+                }
+            }
+        }
+    }
+    pub fn finish_upload(&self, token: &str) -> Result<Option<crate::packs::PackPreview>> {
+        let mut upload = {
+            let mut inner = self.inner.lock().map_err(|_| "宿主状态不可用")?;
+            if inner.upload_token.as_deref() != Some(token) {
+                return Err("文件接收令牌无效或已取消".into());
+            }
+            inner.upload.take().ok_or("文件正在检查或已结束")?
+        };
+        let cancel = upload.cancel.clone();
+        let name = upload.name.clone();
+        let target = upload.target.clone();
+        self.progress("file-inspect", "接收完成，正在校验本地文件", 0, 0);
+        let result = (|| -> Result<Option<crate::packs::PackPreview>> {
+            let reader = upload.reader()?;
+            match target {
+                crate::file_upload::Target::Pack => {
+                    let preview = crate::modpack::inspect(&self.root, reader)?;
+                    let mut inner = self.inner.lock().map_err(|_| "宿主状态不可用")?;
+                    if cancel.is_cancelled() {
+                        return Err("归档检查已取消".into());
+                    }
+                    inner.pack_plan = preview.install.clone();
+                    inner.task.phase = "pack-checked".into();
+                    inner.task.completed = 1;
+                    inner.task.total = 1;
+                    Ok(Some(preview))
+                }
+                crate::file_upload::Target::Content { id, content_kind } => {
+                    let root = model::safe_path(&self.root, &format!("instances/{id}/game"))?;
+                    if !root.is_dir() {
+                        return Err("实例游戏目录已变化，未导入文件".into());
+                    }
+                    crate::content::import_reader_cancellable(
+                        &root,
+                        content_kind,
+                        &name,
+                        reader,
+                        &cancel,
+                    )?;
+                    self.progress("file-committed", "本地文件已导入", 1, 1);
+                    Ok(None)
+                }
+            }
+        })();
+        self.finish(result.as_ref().map(|_| ()).map_err(Clone::clone), &cancel);
+        if cancel.is_cancelled() && !matches!(result, Ok(None)) {
+            return Err("文件接收或检查已取消".into());
+        }
+        result
     }
     pub async fn resource_plan(
         &self,
@@ -920,6 +1063,34 @@ pub fn find_java() -> Option<String> {
 #[cfg(test)]
 mod capture_tests {
     use super::*;
+    #[test]
+    fn cancellation_after_commit_does_not_report_a_committed_file_as_unwritten() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../.native/tests")
+            .join(uuid::Uuid::new_v4().to_string());
+        let host = Host::new(root.clone()).unwrap();
+        for phase in [
+            "file-committed",
+            "resources-committed",
+            "pack-committed",
+            "file-inspect",
+        ] {
+            let cancel = host.begin_task("fixture").unwrap();
+            host.progress(phase, "fixture", 1, 1);
+            cancel.cancel();
+            host.finish(Ok(()), &cancel);
+            assert_eq!(
+                host.status().task.status,
+                if phase == "file-inspect" {
+                    "cancelled"
+                } else {
+                    "succeeded"
+                }
+            );
+        }
+        drop(host);
+        fs::remove_dir_all(root).unwrap();
+    }
     #[tokio::test]
     async fn output_capture_bounds_lines_and_redacts_before_publication() {
         let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))

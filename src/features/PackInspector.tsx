@@ -1,4 +1,10 @@
-import { useState, useSyncExternalStore } from 'react';
+import {
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  useSyncExternalStore,
+} from 'react';
 import type {
   NativeService,
   PackPreview,
@@ -7,9 +13,13 @@ import type {
 export function PackInspector({
   service,
   onlineSource,
+  incomingFile,
+  onFileConsumed,
 }: {
   service: NativeService;
   onlineSource?: PackInstallPlan['origin'];
+  incomingFile?: File | null;
+  onFileConsumed?(): void;
 }) {
   const { available, state } = useSyncExternalStore(
     service.subscribe,
@@ -22,7 +32,7 @@ export function PackInspector({
   const [selected, setSelected] = useState<string[]>([]);
   const [message, setMessage] = useState('');
   const locked = busy || state?.task.status === 'running';
-  function show(value: PackPreview | null) {
+  const show = useCallback((value: PackPreview | null) => {
     setPreview(value);
     setName(
       Array.from(value?.install?.name ?? '')
@@ -30,42 +40,55 @@ export function PackInspector({
         .join(''),
     );
     setSelected([]);
-  }
-  async function inspect(file?: File, native = false, online = false) {
-    if (!file && !native && !online) return;
-    setPreview(null);
-    setError('');
-    setMessage('');
-    setBusy(true);
-    try {
-      if (online && onlineSource) {
-        show(
-          await service.previewOnlinePack(
-            onlineSource.project,
-            onlineSource.version,
-            onlineSource.filename,
-          ),
-        );
-        return;
+  }, []);
+  const inspect = useCallback(
+    async (file?: File, native = false, online = false) => {
+      if (!file && !native && !online) return;
+      setPreview(null);
+      setError('');
+      setMessage('');
+      setBusy(true);
+      try {
+        if (online && onlineSource) {
+          show(
+            await service.previewOnlinePack(
+              onlineSource.project,
+              onlineSource.version,
+              onlineSource.filename,
+            ),
+          );
+          return;
+        }
+        if (native) {
+          show(await service.pickPack());
+          return;
+        }
+        if (!file) return;
+        if (
+          !/\.(zip|mrpack)$/i.test(file.name) ||
+          file.size > 512 * 1024 * 1024
+        )
+          throw new Error('请选择不超过 512 MiB 的 ZIP 或 MRPACK 文件');
+        show(await service.previewPackFile(file));
+      } catch (error) {
+        setError(error instanceof Error ? error.message : '检查失败');
+      } finally {
+        setBusy(false);
       }
-      if (native) {
-        show(await service.pickPack());
-        return;
-      }
-      if (!file) return;
-      if (!/\.(zip|mrpack)$/i.test(file.name) || file.size > 16 * 1024 * 1024)
-        throw new Error('请选择不超过 16 MB 的 ZIP 或 MRPACK 文件');
-      show(
-        await service.previewPack(
-          Array.from(new Uint8Array(await file.arrayBuffer())),
-        ),
-      );
-    } catch (error) {
-      setError(error instanceof Error ? error.message : '检查失败');
-    } finally {
-      setBusy(false);
+    },
+    [service, onlineSource, show],
+  );
+  const received = useRef<File | null>(null);
+  useEffect(() => {
+    if (!incomingFile) {
+      received.current = null;
+      return;
     }
-  }
+    if (received.current === incomingFile) return;
+    received.current = incomingFile;
+    onFileConsumed?.();
+    void inspect(incomingFile);
+  }, [incomingFile, onFileConsumed, inspect]);
   return (
     <section
       className="card"
@@ -74,6 +97,10 @@ export function PackInspector({
       onDrop={(event) => {
         event.preventDefault();
         event.stopPropagation();
+        if (event.dataTransfer.files.length !== 1) {
+          setError('请每次拖入一个 ZIP 或 MRPACK 文件');
+          return;
+        }
         if (available && !locked) void inspect(event.dataTransfer.files[0]);
       }}
     >
@@ -104,7 +131,7 @@ export function PackInspector({
         从电脑选择 ZIP / MRPACK（最大 512 MiB）
       </button>
       <details>
-        <summary>拖放与小文件选择（最大 16 MB）</summary>
+        <summary>拖放与文件选择（最大 512 MiB）</summary>
         <label>
           选择整合包
           <input

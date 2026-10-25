@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import { afterEach, expect, test, vi } from 'vitest';
-import { createElement } from 'react';
+import { createElement, StrictMode } from 'react';
+import { File as NodeFile } from 'node:buffer';
 import {
   cleanup,
   fireEvent,
@@ -552,6 +553,154 @@ test('backup responses are bounded and restoration previews cannot change the se
   await expect(
     service.previewConfigBackup('instance', backup.id, 'WorldA'),
   ).rejects.toThrow('预览目标');
+  service.stop();
+});
+test('file transport uses bounded ordered chunks, a frozen target, and releases the token after success', async () => {
+  const chunk = 1024 * 1024;
+  const file = new NodeFile(
+    [new Uint8Array(chunk * 2 + 3).fill(91)],
+    'large.zip',
+  ) as unknown as File;
+  const whole = vi.spyOn(file, 'arrayBuffer');
+  const token = '11111111-1111-4111-8111-111111111111';
+  const offsets: number[] = [];
+  const sizes: number[] = [];
+  const call = vi.fn(
+    async (command: string, args?: Record<string, unknown>) => {
+      if (command === 'native_file_upload_begin') return token;
+      if (command === 'native_file_upload_chunk') {
+        offsets.push(args!.offset as number);
+        sizes.push((args!.bytes as number[]).length);
+        expect((args!.bytes as number[]).every((byte) => byte === 91)).toBe(
+          true,
+        );
+        return;
+      }
+      if (command === 'native_file_upload_finish') return null;
+      return state();
+    },
+  );
+  const service = createNativeService(true, call as typeof invoke);
+  await service.importContentFile('instance', 'resourcepacks', file);
+  expect(call).toHaveBeenCalledWith('native_file_upload_begin', {
+    name: 'large.zip',
+    size: file.size,
+    target: { kind: 'content', id: 'instance', contentKind: 'resourcepacks' },
+  });
+  expect(offsets).toEqual([0, chunk, chunk * 2]);
+  expect(sizes).toEqual([chunk, chunk, 3]);
+  expect(whole).not.toHaveBeenCalled();
+  expect(call).toHaveBeenCalledWith('native_file_upload_finish', { token });
+  expect(call).toHaveBeenCalledWith('native_file_upload_abort', { token });
+  service.stop();
+});
+test('a file read failure aborts its native upload and never finalizes partial bytes', async () => {
+  const file = new NodeFile(
+    [new Uint8Array(1024 * 1024 + 3)],
+    'fixture.zip',
+  ) as unknown as File;
+  const slice = file.slice.bind(file);
+  vi.spyOn(file, 'slice').mockImplementation((start, end) => {
+    if (start) throw new Error('source changed');
+    return slice(start, end);
+  });
+  const token = '11111111-1111-4111-8111-111111111111';
+  const call = vi.fn(async (command: string) =>
+    command === 'native_file_upload_begin' ? token : state(),
+  );
+  const service = createNativeService(true, call as typeof invoke);
+  await expect(service.previewPackFile(file)).rejects.toThrow('source changed');
+  expect(call).toHaveBeenCalledWith('native_file_upload_abort', { token });
+  expect(
+    call.mock.calls.some(
+      ([command]) => command === 'native_file_upload_finish',
+    ),
+  ).toBe(false);
+  service.stop();
+});
+test('incoming and directly dropped archives share the same preview and never install automatically', async () => {
+  const file = new NodeFile(['fixture'], 'fixture.mrpack') as unknown as File;
+  const consumed = vi.fn();
+  const call = vi.fn(async (command: string) => {
+    if (command === 'native_file_upload_begin')
+      return '11111111-1111-4111-8111-111111111111';
+    if (command === 'native_file_upload_finish')
+      return {
+        kind: 'MRPACK',
+        name: 'Dropped fixture',
+        files: 1,
+        expandedBytes: 1,
+        downloads: 0,
+        dependencies: [],
+        paths: [],
+        warnings: [],
+      };
+    return state();
+  });
+  const service = createNativeService(true, call as typeof invoke);
+  render(
+    createElement(StrictMode, {
+      children: createElement(PackInspector, {
+        service,
+        incomingFile: file,
+        onFileConsumed: consumed,
+      }),
+    }),
+  );
+  await screen.findByText('Dropped fixture · MRPACK');
+  expect(consumed).toHaveBeenCalledOnce();
+  expect(
+    call.mock.calls.filter(
+      ([command]) => command === 'native_file_upload_begin',
+    ),
+  ).toHaveLength(1);
+  fireEvent.drop(screen.getByLabelText('整合包安全检查'), {
+    dataTransfer: { files: [file] },
+  });
+  await waitFor(() =>
+    expect(
+      call.mock.calls.filter(
+        ([command]) => command === 'native_file_upload_begin',
+      ),
+    ).toHaveLength(2),
+  );
+  expect(
+    call.mock.calls.some(([command]) => command === 'native_pack_install'),
+  ).toBe(false);
+  service.stop();
+});
+test('content drops need the closed-game acknowledgement before receiving any bytes', async () => {
+  const file = new NodeFile(['fixture'], 'fixture.zip') as unknown as File;
+  const call = vi.fn(async (command: string) => {
+    if (command === 'native_content') return [];
+    if (command === 'native_file_upload_begin')
+      return '11111111-1111-4111-8111-111111111111';
+    if (command === 'native_file_upload_finish') return null;
+    return state();
+  });
+  const service = createNativeService(true, call as typeof invoke);
+  render(
+    createElement(ContentPanel, {
+      service,
+      id: 'instance',
+      kind: 'resourcepacks',
+      running: false,
+      onDownload: vi.fn(),
+      query: '',
+      onQuery: vi.fn(),
+    }),
+  );
+  const drop = () =>
+    fireEvent.drop(screen.getByLabelText('本地内容拖放区'), {
+      dataTransfer: { files: [file] },
+    });
+  drop();
+  expect(
+    call.mock.calls.some(([command]) => command === 'native_file_upload_begin'),
+  ).toBe(false);
+  fireEvent.click(screen.getByLabelText('确认内容修改前游戏已关闭'));
+  drop();
+  await screen.findByText('文件已导入；在游戏中是否启用仍需确认。');
   service.stop();
 });
 function LeaveEditor({ onLeave }: { onLeave(): void }) {

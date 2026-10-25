@@ -203,6 +203,24 @@ pub fn import(root: &Path, kind: Kind, file: &str, bytes: &[u8]) -> Result<()> {
     import_reader(root, kind, file, Cursor::new(bytes))
 }
 pub fn import_reader(root: &Path, kind: Kind, file: &str, input: impl Read) -> Result<()> {
+    import_reader_cancellable(
+        root,
+        kind,
+        file,
+        input,
+        &tokio_util::sync::CancellationToken::new(),
+    )
+}
+pub fn import_reader_cancellable(
+    root: &Path,
+    kind: Kind,
+    file: &str,
+    input: impl Read,
+    cancel: &tokio_util::sync::CancellationToken,
+) -> Result<()> {
+    if cancel.is_cancelled() {
+        return Err("本地导入已取消，未提交文件".into());
+    }
     let _locks = crate::worlds::lock_worlds(root)?;
     crate::resource_install::recover_all(root)?;
     if kind == Kind::Screenshots || kind == Kind::Datapacks {
@@ -243,7 +261,12 @@ pub fn import_reader(root: &Path, kind: Kind, file: &str, input: impl Read) -> R
         validate_archive(kind, &mut zip)
     })();
     drop(output);
-    let result = result.and_then(|()| move_no_replace(&staging, &path));
+    let result = result.and_then(|()| {
+        if cancel.is_cancelled() {
+            return Err("本地导入已取消，未提交文件".into());
+        }
+        move_no_replace(&staging, &path)
+    });
     if result.is_err() {
         let _ = fs::remove_file(&staging);
     }

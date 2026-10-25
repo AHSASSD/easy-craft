@@ -32,6 +32,8 @@ export function ResourceBrowser({
   selectedId,
   worldSelection,
   onWorldSelection,
+  incomingPack,
+  onPackConsumed,
 }: {
   service: NativeService;
   kind: ResourceKind;
@@ -41,6 +43,8 @@ export function ResourceBrowser({
   selectedId?: string;
   worldSelection?: Record<string, string>;
   onWorldSelection?(id: string, world: string): void;
+  incomingPack?: File | null;
+  onPackConsumed?(): void;
 }) {
   const native = useSyncExternalStore(service.subscribe, service.snapshot);
   const [targetId, setTargetId] = useState(
@@ -584,6 +588,8 @@ export function ResourceBrowser({
           <PackInspector
             key={`${detail?.id ?? ''}:${selected?.id ?? ''}:${file}`}
             service={service}
+            incomingFile={incomingPack}
+            onFileConsumed={onPackConsumed}
             onlineSource={
               detail &&
               selected &&

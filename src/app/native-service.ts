@@ -496,6 +496,47 @@ export function createNativeService(
     if (!string(value)) throw new Error('文件保存响应无效');
     return value;
   };
+  async function uploadFile(
+    file: File,
+    target:
+      { kind: 'pack' } | { kind: 'content'; id: string; contentKind: string },
+  ): Promise<unknown> {
+    if (!file.size || file.size > 512 * 1024 * 1024)
+      throw new Error('请选择不超过 512 MiB 的非空文件');
+    let token: string | undefined;
+    try {
+      const value = await request('native_file_upload_begin', {
+        name: file.name,
+        size: file.size,
+        target,
+      });
+      if (
+        !string(value) ||
+        !/^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(value)
+      )
+        throw new Error('文件接收令牌无效');
+      token = value;
+      await refresh(true);
+      const chunk = 1024 * 1024;
+      for (let offset = 0; offset < file.size; offset += chunk) {
+        const bytes = new Uint8Array(
+          await file.slice(offset, offset + chunk).arrayBuffer(),
+        );
+        if (bytes.length !== Math.min(chunk, file.size - offset))
+          throw new Error('文件读取长度已变化，请重新选择');
+        await request('native_file_upload_chunk', {
+          token,
+          offset,
+          bytes: Array.from(bytes),
+        });
+      }
+      return await request('native_file_upload_finish', { token });
+    } finally {
+      if (token)
+        await request('native_file_upload_abort', { token }).catch(() => {});
+      await refresh(true);
+    }
+  }
   const timer = available
     ? setInterval(() => {
         void refresh();
@@ -574,6 +615,13 @@ export function createNativeService(
       if (bytes.length > 16 * 1024 * 1024)
         throw new Error('本地导入暂限 16 MB');
       await operation('native_content_import', { id, kind, file, bytes });
+    },
+    importContentFile: async (id, kind, file) => {
+      if (
+        (await uploadFile(file, { kind: 'content', id, contentKind: kind })) !==
+        null
+      )
+        throw new Error('本地导入响应无效');
     },
     pickContent: async (id, kind) => {
       const value = await request('native_content_pick', { id, kind });
@@ -724,6 +772,8 @@ export function createNativeService(
         throw new Error('预览文件须小于 16 MB');
       return packPreview(await request('native_pack_preview', { bytes }));
     },
+    previewPackFile: async (file) =>
+      packPreview(await uploadFile(file, { kind: 'pack' })),
     pickPack: async () => {
       const value = await request('native_pack_pick');
       return value === null ? null : packPreview(value);

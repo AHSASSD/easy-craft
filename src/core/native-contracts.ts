@@ -219,6 +219,7 @@ export interface NativeService extends Observable<NativeSnapshot> {
     bytes: number[],
   ): Promise<void>;
   pickContent(id: string, kind: ContentKind): Promise<boolean>;
+  importContentFile(id: string, kind: ContentKind, file: File): Promise<void>;
   contentImage(id: string, file: string): Promise<string>;
   openContent(id: string, kind?: ContentKind): Promise<void>;
   renameInstance(id: string, name: string): Promise<void>;
@@ -247,6 +248,7 @@ export interface NativeService extends Observable<NativeSnapshot> {
   background(bytes?: number[]): Promise<string | null>;
   versions(): Promise<string[]>;
   previewPack(bytes: number[]): Promise<PackPreview>;
+  previewPackFile(file: File): Promise<PackPreview>;
   pickPack(): Promise<PackPreview | null>;
   previewOnlinePack(
     project: string,

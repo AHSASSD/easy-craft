@@ -110,6 +110,8 @@ function Shell({ services }: { services: Services }) {
   const [notice, setNotice] = useState('');
   const [collapsed, setCollapsed] = useState(false);
   const [background, setBackground] = useState('');
+  const [droppedPack, setDroppedPack] = useState<File | null>(null);
+  const consumeDroppedPack = useCallback(() => setDroppedPack(null), []);
   const [backgroundBusy, setBackgroundBusy] = useState(available);
   const [tasks, setTasks] = useState(false);
   const [closing, setClosing] = useState(false);
@@ -159,7 +161,11 @@ function Shell({ services }: { services: Services }) {
       if (element) positions[location] = element.scrollTop;
     };
   }, [location]);
-  function change(patch: Partial<Navigation>, selectedId?: string) {
+  function change(
+    patch: Partial<Navigation>,
+    selectedId?: string,
+    onChanged?: () => void,
+  ) {
     guard(() => {
       if (content.current) scroll.current[location] = content.current.scrollTop;
       services.preferences.update({
@@ -172,6 +178,7 @@ function Shell({ services }: { services: Services }) {
           ),
         },
       });
+      onChanged?.();
     });
   }
   const closeWindow = useCallback(() => {
@@ -433,6 +440,31 @@ function Shell({ services }: { services: Services }) {
                 </label>
                 <button
                   className="library-import-link"
+                  onDragOver={(event) => event.preventDefault()}
+                  onDrop={(event) => {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    if (!available || running || state?.loginPending) {
+                      setNotice(
+                        '请使用桌面版，并先结束当前任务或登录，再拖入整合包。',
+                      );
+                      return;
+                    }
+                    if (event.dataTransfer.files.length !== 1) {
+                      setNotice('请每次拖入一个 ZIP 或 MRPACK 文件');
+                      return;
+                    }
+                    const file = event.dataTransfer.files[0];
+                    if (!/\.(zip|mrpack)$/i.test(file.name)) {
+                      setNotice('请拖入 ZIP 或 MRPACK 文件');
+                      return;
+                    }
+                    change(
+                      { section: 'download', downloadCategory: 'modpack' },
+                      undefined,
+                      () => setDroppedPack(file),
+                    );
+                  }}
                   onClick={() =>
                     change({ section: 'download', downloadCategory: 'modpack' })
                   }
@@ -440,7 +472,7 @@ function Shell({ services }: { services: Services }) {
                   <FolderOpen size={22} />
                   <span>
                     <strong>导入整合包</strong>
-                    <small>ZIP / MRPACK，先预览再新建实例</small>
+                    <small>拖入 ZIP / MRPACK，先预览再新建实例</small>
                   </span>
                 </button>
               </div>
@@ -1046,6 +1078,8 @@ function Shell({ services }: { services: Services }) {
                       key={nav.downloadCategory}
                       selectedId={selected?.id}
                       worldSelection={nav.datapackWorlds}
+                      incomingPack={droppedPack}
+                      onPackConsumed={consumeDroppedPack}
                       onWorldSelection={(id, world) =>
                         change({
                           datapackWorlds: Object.fromEntries(

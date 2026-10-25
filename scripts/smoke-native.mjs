@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { spawn, execFile } from 'node:child_process';
 import { createServer } from 'node:net';
-import { mkdir, copyFile, readFile, rm } from 'node:fs/promises';
+import { mkdir, copyFile, readFile, readdir, rm } from 'node:fs/promises';
 import { createHash, randomUUID } from 'node:crypto';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -67,6 +67,31 @@ let page;
 let installedPack;
 let restoreProbe;
 let launchedGame;
+let droppedFixture;
+async function dropLocalFile(target, file) {
+  await page.evaluate(() => {
+    document.querySelector('[data-native-drop-fixture]')?.remove();
+    const input = document.createElement('input');
+    input.type = 'file';
+    input.hidden = true;
+    input.dataset.nativeDropFixture = 'true';
+    document.body.append(input);
+  });
+  await page.locator('[data-native-drop-fixture]').setInputFiles(file);
+  await target.evaluate((element) => {
+    const input = document.querySelector('[data-native-drop-fixture]');
+    const transfer = new DataTransfer();
+    transfer.items.add(input.files[0]);
+    element.dispatchEvent(
+      new DragEvent('drop', {
+        dataTransfer: transfer,
+        bubbles: true,
+        cancelable: true,
+      }),
+    );
+    input.remove();
+  });
+}
 async function selectNativeFile(button, file) {
   assert.equal(
     profile,
@@ -739,6 +764,97 @@ try {
       'PASS: MRPACK created a new real instance, applied overrides, verified every stored file hash and preserved the prior instance catalog.',
     );
   }
+  if (process.argv.includes('--streamed-drop')) {
+    droppedFixture = path.join(
+      project,
+      `.native/fixtures/ec-drop-${randomUUID()}.zip`,
+    );
+    await copyFile(
+      path.join(project, '.native/fixtures/local-large-resource.zip'),
+      droppedFixture,
+    );
+    const bytes = await readFile(droppedFixture);
+    assert(bytes.length > 16 * 1024 * 1024);
+    const before = await page.evaluate(() =>
+      window.__TAURI_INTERNALS__.invoke('native_status'),
+    );
+    const baseline = (
+      await readdir(path.join(before.dataRoot, 'file-inputs')).catch(() => [])
+    ).sort();
+    await page.evaluate(() => {
+      const original = Blob.prototype.arrayBuffer;
+      const fixture = { original, chunks: [], pauseAt: -1 };
+      window.__dropFixture = fixture;
+      const capture = async function () {
+        const result = await original.call(this);
+        fixture.chunks.push({ length: result.byteLength });
+        if (fixture.chunks.length === fixture.pauseAt) {
+          await new Promise((resolve) => {
+            fixture.resume = resolve;
+          });
+        }
+        return result;
+      };
+      Blob.prototype.arrayBuffer = capture;
+      if (Blob.prototype.arrayBuffer !== capture)
+        throw new Error('Blob read fixture could not be installed');
+    });
+    await page
+      .getByRole('navigation')
+      .getByRole('button', { name: '游戏库', exact: true })
+      .click();
+    await dropLocalFile(page.locator('.library-import-link'), droppedFixture);
+    await page
+      .getByRole('heading', { name: '未命名 ZIP · ZIP', exact: true })
+      .waitFor({ timeout: 120000 });
+    const trace = await page.evaluate(() => window.__dropFixture.chunks);
+    assert.equal(trace.length, Math.ceil(bytes.length / (1024 * 1024)));
+    trace.forEach((chunk) => {
+      assert(chunk.length <= 1024 * 1024);
+    });
+    assert.equal(
+      trace.reduce((sum, chunk) => sum + chunk.length, 0),
+      bytes.length,
+    );
+    assert.deepEqual(
+      (
+        await page.evaluate(() =>
+          window.__TAURI_INTERNALS__.invoke('native_status'),
+        )
+      ).instances,
+      before.instances,
+    );
+    await page.evaluate(() => {
+      window.__dropFixture.pauseAt = window.__dropFixture.chunks.length + 2;
+    });
+    await dropLocalFile(page.getByLabel('整合包安全检查'), droppedFixture);
+    await page.waitForFunction(() => !!window.__dropFixture.resume);
+    const receiving = await page.evaluate(() =>
+      window.__TAURI_INTERNALS__.invoke('native_status'),
+    );
+    assert.equal(receiving.task.phase, 'file-receive');
+    assert.equal(receiving.task.completed, 1024 * 1024);
+    await page.getByRole('button', { name: '查看任务', exact: true }).click();
+    await page.getByRole('button', { name: '取消任务', exact: true }).click();
+    await page.waitForFunction(
+      async () =>
+        (await window.__TAURI_INTERNALS__.invoke('native_status')).task
+          .status === 'cancelled',
+    );
+    await page.evaluate(() => {
+      window.__dropFixture.resume();
+      delete window.__dropFixture.resume;
+    });
+    await page.getByRole('button', { name: '关闭弹窗', exact: true }).click();
+    await page.getByLabel('整合包安全检查').getByRole('alert').waitFor();
+    assert.deepEqual(
+      (await readdir(path.join(before.dataRoot, 'file-inputs'))).sort(),
+      baseline,
+    );
+    console.log(
+      'PASS: a real WebView File over 16 MiB follows the left-sidebar drop into a native chunked preview; cancellation through the task drawer cleans its partial file and creates no instance.',
+    );
+  }
   if (process.argv.includes('--native-picker')) {
     const picker = page.getByRole('button', { name: /从电脑选择 ZIP/ });
     await selectNativeFile(picker);
@@ -991,6 +1107,46 @@ try {
   await page.getByLabel('搜索本地模组').fill('');
   await page.getByRole('tab', { name: '资源与光影', exact: true }).click();
   await page.getByLabel('搜索本地光影包').fill('');
+  if (droppedFixture) {
+    await page.getByRole('button', { name: '资源包', exact: true }).click();
+    await page.getByLabel('确认内容修改前游戏已关闭').check();
+    await dropLocalFile(page.getByLabel('本地内容拖放区'), droppedFixture);
+    await page
+      .getByRole('status')
+      .filter({ hasText: '文件已导入；在游戏中是否启用仍需确认。' })
+      .waitFor({ timeout: 120000 });
+    const destination = path.join(
+      fabricGameDir,
+      'resourcepacks',
+      path.basename(droppedFixture),
+    );
+    const expected = createHash('sha512')
+      .update(await readFile(droppedFixture))
+      .digest('hex');
+    assert.equal(
+      createHash('sha512')
+        .update(await readFile(destination))
+        .digest('hex'),
+      expected,
+    );
+    await dropLocalFile(page.getByLabel('本地内容拖放区'), droppedFixture);
+    await page.getByRole('alert').waitFor({ timeout: 120000 });
+    assert.equal(
+      createHash('sha512')
+        .update(await readFile(destination))
+        .digest('hex'),
+      expected,
+    );
+    assert.equal(
+      createHash('sha512')
+        .update(await readFile(droppedFixture))
+        .digest('hex'),
+      expected,
+    );
+    console.log(
+      'PASS: a real large resource ZIP dropped into the selected instance is verified byte-for-byte with SHA-512; duplicate import preserves the existing file and original source.',
+    );
+  }
   const screenshotName = `ec-ui-${randomUUID()}.png`;
   await mkdir(path.join(fabricGameDir, 'screenshots'), { recursive: true });
   const { writeFile } = await import('node:fs/promises');
@@ -1729,6 +1885,16 @@ try {
   }
   throw error;
 } finally {
+  if (page)
+    await page
+      .evaluate(() => {
+        if (window.__dropFixture) {
+          window.__dropFixture.resume?.();
+          Blob.prototype.arrayBuffer = window.__dropFixture.original;
+          delete window.__dropFixture;
+        }
+      })
+      .catch(() => {});
   if (originalSettings && page) {
     await page
       .evaluate(

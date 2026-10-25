@@ -5,6 +5,7 @@ mod auth;
 mod content;
 mod fabric;
 mod file_picker;
+mod file_upload;
 mod host;
 mod memory;
 mod minecraft;
@@ -369,6 +370,44 @@ async fn native_pack_preview(
     .map_err(|_| "压缩包检查任务失败".to_string())?
 }
 #[tauri::command]
+async fn native_file_upload_begin(
+    host: State<'_, Arc<Host>>,
+    name: String,
+    size: u64,
+    target: file_upload::Target,
+) -> Result<String> {
+    let host = host.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || host.begin_upload(name, size, target))
+        .await
+        .map_err(|_| "文件接收准备失败".to_string())?
+}
+#[tauri::command]
+async fn native_file_upload_chunk(
+    host: State<'_, Arc<Host>>,
+    token: String,
+    offset: u64,
+    bytes: Vec<u8>,
+) -> Result<()> {
+    let host = host.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || host.append_upload(&token, offset, &bytes))
+        .await
+        .map_err(|_| "文件分块接收失败".to_string())?
+}
+#[tauri::command]
+async fn native_file_upload_finish(
+    host: State<'_, Arc<Host>>,
+    token: String,
+) -> Result<Option<packs::PackPreview>> {
+    let host = host.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || host.finish_upload(&token))
+        .await
+        .map_err(|_| "文件检查或导入失败".to_string())?
+}
+#[tauri::command]
+fn native_file_upload_abort(host: State<'_, Arc<Host>>, token: String) {
+    host.abort_upload(&token);
+}
+#[tauri::command]
 async fn native_pack_pick(
     window: tauri::WebviewWindow,
     host: State<'_, Arc<Host>>,
@@ -525,6 +564,10 @@ fn main() {
             native_instance_launch_settings,
             native_background,
             native_pack_preview,
+            native_file_upload_begin,
+            native_file_upload_chunk,
+            native_file_upload_finish,
+            native_file_upload_abort,
             native_pack_pick,
             native_pack_install,
             native_pack_online,

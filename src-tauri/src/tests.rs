@@ -21,6 +21,117 @@ fn automatic_memory_reserves_system_space_and_bounds_heap() {
     assert!(crate::memory::optimize().is_ok());
     assert!(!crate::memory::process_ids().unwrap().is_empty());
 }
+#[test]
+fn streamed_upload_enforces_frozen_target_offsets_cleanup_and_real_large_file_import() {
+    use crate::{
+        content::Kind,
+        file_upload::{Target, CHUNK},
+    };
+    use std::io::{Cursor, Write};
+    let root = root();
+    model::save_json(&root, "instances.json", &json!([{"id":"upload-test","name":"Upload test","version":"1.21.1","manifestSha1":"a".repeat(40),"javaMajor":21}])).unwrap();
+    fs::create_dir_all(root.join("instances/upload-test/game")).unwrap();
+    let host = host::Host::new(root.clone()).unwrap();
+    let target = || Target::Content {
+        id: "upload-test".into(),
+        content_kind: Kind::Resourcepacks,
+    };
+    let pending = || {
+        fs::read_dir(root.join("file-inputs"))
+            .map(|entries| entries.count())
+            .unwrap_or(0)
+    };
+    for (name, size) in [
+        ("../escape.zip", 2),
+        ("CON.zip", 2),
+        ("empty.zip", 0),
+        ("large.zip", crate::file_picker::MAX_FILE + 1),
+        ("wrong.jar", 2),
+    ] {
+        assert!(host.begin_upload(name.into(), size, target()).is_err());
+        assert_eq!(pending(), 0);
+    }
+    let token = host
+        .begin_upload("partial.zip".into(), 10, target())
+        .unwrap();
+    host.append_upload(&token, 0, b"abc").unwrap();
+    assert!(host.append_upload(&token, 0, b"abc").is_err());
+    assert_eq!(host.status().task.status, "failed");
+    assert_eq!(pending(), 0);
+    let old = host
+        .begin_upload("cancel.zip".into(), 10, target())
+        .unwrap();
+    host.append_upload(&old, 0, b"abc").unwrap();
+    host.cancel();
+    assert_eq!(host.status().task.status, "cancelled");
+    assert_eq!(pending(), 0);
+    let token = host.begin_upload("next.zip".into(), 10, target()).unwrap();
+    host.abort_upload(&old);
+    assert!(host.finish_upload(&old).is_err());
+    assert_eq!(host.status().task.status, "running");
+    assert!(host.append_upload("wrong-token", 0, b"a").is_err());
+    assert_eq!(host.status().task.status, "running");
+    host.abort_upload(&token);
+    assert_eq!(pending(), 0);
+    let token = host
+        .begin_upload("incomplete.zip".into(), 10, target())
+        .unwrap();
+    host.append_upload(&token, 0, b"abc").unwrap();
+    assert!(host.finish_upload(&token).is_err());
+    assert_eq!(pending(), 0);
+    let token = host
+        .begin_upload("oversized-chunk.zip".into(), (CHUNK * 2) as u64, target())
+        .unwrap();
+    assert!(host.append_upload(&token, 0, &vec![0; CHUNK + 1]).is_err());
+    assert_eq!(pending(), 0);
+    let token = host
+        .begin_upload("invalid.zip".into(), 3, target())
+        .unwrap();
+    host.append_upload(&token, 0, b"bad").unwrap();
+    assert!(host.finish_upload(&token).is_err());
+    assert_eq!(pending(), 0);
+    let mut writer = zip::ZipWriter::new(Cursor::new(vec![]));
+    let options =
+        zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+    writer.start_file("pack.mcmeta", options).unwrap();
+    writer
+        .write_all(br#"{"pack":{"pack_format":34,"description":"stream fixture"}}"#)
+        .unwrap();
+    writer.start_file("assets/large.bin", options).unwrap();
+    writer.write_all(&vec![0x5a; 17 * 1024 * 1024]).unwrap();
+    let bytes = writer.finish().unwrap().into_inner();
+    assert!(bytes.len() > 16 * 1024 * 1024);
+    for duplicate in [false, true] {
+        let token = host
+            .begin_upload("large.zip".into(), bytes.len() as u64, target())
+            .unwrap();
+        for (index, chunk) in bytes.chunks(CHUNK).enumerate() {
+            host.append_upload(&token, (index * CHUNK) as u64, chunk)
+                .unwrap();
+        }
+        assert_eq!(host.status().task.completed, bytes.len());
+        let result = host.finish_upload(&token);
+        assert_eq!(result.is_err(), duplicate);
+        assert_eq!(
+            fs::read(root.join("instances/upload-test/game/resourcepacks/large.zip")).unwrap(),
+            bytes
+        );
+        assert_eq!(pending(), 0);
+    }
+    let pack = pack_zip(&[("modrinth.index.json", br#"{"formatVersion":1,"game":"minecraft","name":"Streamed pack","versionId":"1","dependencies":{"minecraft":"1.21.1"},"files":[]}"#)]);
+    let token = host
+        .begin_upload("fixture.mrpack".into(), pack.len() as u64, Target::Pack)
+        .unwrap();
+    host.append_upload(&token, 0, &pack).unwrap();
+    let preview = host.finish_upload(&token).unwrap().unwrap();
+    assert!(preview.install.is_some());
+    assert_eq!(host.status().task.phase, "pack-checked");
+    assert_eq!(host.status().instances.len(), 1);
+    assert_eq!(pending(), 0);
+    drop(preview);
+    drop(host);
+    fs::remove_dir_all(root).unwrap();
+}
 #[tokio::test]
 async fn instance_overrides_migrate_persist_clear_and_reject_stale_or_external_changes() {
     let root = root();
