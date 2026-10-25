@@ -17,6 +17,7 @@ import { ContentPanel } from '../src/features/ContentPanel';
 import { ResourceBrowser } from '../src/features/ResourceBrowser';
 import { PackInspector } from '../src/features/PackInspector';
 import { CachePanel } from '../src/features/CachePanel';
+import { BackupRetention } from '../src/features/BackupRetention';
 import { instanceSettings } from '../src/core/instance-settings';
 import {
   UnsavedChanges,
@@ -523,6 +524,133 @@ test('config restoration requires both acknowledgements, preserves errors and re
   });
   service.stop();
 });
+test('backup cleanup requires closed-game and preview acknowledgements and sends only a frozen token', async () => {
+  const entry = {
+    id: '11111111-1111-4111-8111-111111111111',
+    sha1: 'a'.repeat(40),
+    bytes: 20,
+    createdMs: 1700000000000,
+  };
+  const old = {
+    ...entry,
+    id: '22222222-2222-4222-8222-222222222222',
+    createdMs: 1600000000000,
+  };
+  const plan = {
+    token: '33333333-3333-4333-8333-333333333333',
+    instanceId: 'instance',
+    worldId: 'WorldA',
+    keep: 1,
+    retained: [entry],
+    remove: [old],
+    warnings: [],
+  };
+  const call = vi.fn(async (command: string) => {
+    if (command === 'native_backup_cleanup_prepare') return plan;
+    if (command === 'native_backup_cleanup_clear')
+      return { removed: [old.id], kept: [], warnings: [], cancelled: false };
+    return state();
+  });
+  const service = createNativeService(true, call as typeof invoke);
+  const onDone = vi.fn(async () => {});
+  const props = {
+    service,
+    id: 'instance',
+    worldId: 'WorldA',
+    disabled: false,
+    closed: false,
+    dirty: false,
+    onDone,
+  };
+  const view = render(createElement(BackupRetention, props));
+  expect(
+    (screen.getByText('检查备份保留计划') as HTMLButtonElement).disabled,
+  ).toBe(true);
+  expect(call).not.toHaveBeenCalled();
+  view.rerender(createElement(BackupRetention, { ...props, closed: true }));
+  fireEvent.change(screen.getByLabelText('配置备份保留数量'), {
+    target: { value: '1' },
+  });
+  fireEvent.click(screen.getByText('检查备份保留计划'));
+  await screen.findByLabelText('旧配置备份清理预览');
+  const clear = screen.getByText('确认清理旧配置备份') as HTMLButtonElement;
+  expect(clear.disabled).toBe(true);
+  expect(
+    call.mock.calls.some(
+      ([command]) => command === 'native_backup_cleanup_clear',
+    ),
+  ).toBe(false);
+  fireEvent.click(screen.getByLabelText('确认旧配置备份清理'));
+  view.rerender(
+    createElement(BackupRetention, { ...props, closed: true, dirty: true }),
+  );
+  expect(clear.disabled).toBe(true);
+  view.rerender(createElement(BackupRetention, { ...props, closed: true }));
+  fireEvent.click(clear);
+  await screen.findByText(/已清理 1 份，保留 0 份候选/);
+  expect(call).toHaveBeenCalledWith('native_backup_cleanup_prepare', {
+    id: 'instance',
+    worldId: 'WorldA',
+    keep: 1,
+  });
+  expect(call).toHaveBeenCalledWith('native_backup_cleanup_clear', {
+    token: plan.token,
+  });
+  await waitFor(() => expect(onDone).toHaveBeenCalledOnce());
+  service.stop();
+});
+
+test('backup cleanup rejects cross-target plans, overlapping entries and results outside the frozen plan', async () => {
+  const entry = {
+    id: '11111111-1111-4111-8111-111111111111',
+    sha1: 'a'.repeat(40),
+    bytes: 20,
+    createdMs: 1700000000000,
+  };
+  const old = { ...entry, id: '22222222-2222-4222-8222-222222222222' };
+  const plan = {
+    token: '33333333-3333-4333-8333-333333333333',
+    instanceId: 'instance',
+    worldId: null,
+    keep: 1,
+    retained: [entry],
+    remove: [old],
+    warnings: [],
+  };
+  let response: unknown = plan;
+  const call = vi.fn(async (command: string) =>
+    command === 'native_status' ? state() : response,
+  );
+  const service = createNativeService(true, call as typeof invoke);
+  for (const invalid of [
+    { ...plan, worldId: 'Other' },
+    { ...plan, instanceId: 'other' },
+    { ...plan, retained: [] },
+    { ...plan, remove: [entry] },
+    { ...plan, keep: 2 },
+  ]) {
+    response = invalid;
+    await expect(service.prepareBackupCleanup('instance', 1)).rejects.toThrow(
+      '响应无效',
+    );
+  }
+  await expect(service.prepareBackupCleanup('instance', 0)).rejects.toThrow(
+    '保留数量',
+  );
+  response = { removed: [entry.id], kept: [], warnings: [], cancelled: false };
+  await expect(service.clearBackupCleanup(plan)).rejects.toThrow(
+    '超出预览范围',
+  );
+  response = {
+    removed: [],
+    kept: [{ id: old.id, reason: '已取消，未处理' }],
+    warnings: [],
+    cancelled: true,
+  };
+  expect((await service.clearBackupCleanup(plan)).cancelled).toBe(true);
+  service.stop();
+});
+
 test('backup responses are bounded and restoration previews cannot change the selected world or backup', async () => {
   const backup = {
     id: '11111111-1111-4111-8111-111111111111',

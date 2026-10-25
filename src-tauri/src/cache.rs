@@ -1,26 +1,11 @@
+use crate::file_guard::{digest, Guard as Opened};
 use crate::{
     model::{self, Result},
     resource_install,
 };
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha512};
-use std::{
-    fs,
-    io::Read,
-    os::windows::{
-        ffi::OsStringExt,
-        fs::{MetadataExt, OpenOptionsExt},
-        io::AsRawHandle,
-    },
-    path::Path,
-    time::Instant,
-};
+use std::{fs, path::Path, time::Instant};
 use tokio_util::sync::CancellationToken;
-use windows_sys::Win32::Storage::FileSystem::{
-    FileDispositionInfo, GetFinalPathNameByHandleW, SetFileInformationByHandle, DELETE,
-    FILE_DISPOSITION_INFO, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
-    FILE_GENERIC_READ, FILE_SHARE_READ,
-};
 
 const BATCH: usize = 2000;
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -205,10 +190,6 @@ fn collect(root: &Path, groups: &[Group]) -> Result<(Summary, Vec<Entry>)> {
 pub fn summary(root: &Path) -> Result<Summary> {
     collect(root, &Group::ALL).map(|(summary, _)| summary)
 }
-struct Opened {
-    file: fs::File,
-    _directory: fs::File,
-}
 fn open(root: &Path, entry: &Entry, delete: bool) -> Result<Opened> {
     let name = entry
         .path
@@ -218,74 +199,7 @@ fn open(root: &Path, entry: &Entry, delete: bool) -> Result<Opened> {
     if entry.group.expected(name).is_none() {
         return Err("非受控缓存文件".into());
     }
-    let path = model::safe_path(root, &entry.path)?;
-    let parent = path.parent().ok_or("缓存目录无效")?;
-    let directory = fs::OpenOptions::new()
-        .read(true)
-        .share_mode(FILE_SHARE_READ)
-        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
-        .open(parent)
-        .map_err(|_| "缓存目录被占用或不可读")?;
-    if directory
-        .metadata()
-        .map_err(|_| "缓存目录状态无效")?
-        .file_attributes()
-        & 0x400
-        != 0
-    {
-        return Err("拒绝缓存目录链接".into());
-    }
-    let file = fs::OpenOptions::new()
-        .access_mode(FILE_GENERIC_READ | if delete { DELETE } else { 0 })
-        .share_mode(FILE_SHARE_READ)
-        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
-        .open(&path)
-        .map_err(|_| "文件被占用或无清理权限，已保留")?;
-    let metadata = file.metadata().map_err(|_| "缓存文件状态不可读")?;
-    if !metadata.is_file()
-        || metadata.file_attributes() & 0x400 != 0
-        || metadata.len() != entry.bytes
-    {
-        return Err("缓存文件类型或大小已变化，已保留".into());
-    }
-    let mut name = vec![0u16; 32768];
-    let len = unsafe {
-        GetFinalPathNameByHandleW(
-            file.as_raw_handle(),
-            name.as_mut_ptr(),
-            name.len() as u32,
-            0,
-        )
-    } as usize;
-    if len == 0
-        || len >= name.len()
-        || std::ffi::OsString::from_wide(&name[..len])
-            != path
-                .canonicalize()
-                .map_err(|_| "无法核对缓存实际位置")?
-                .as_os_str()
-    {
-        return Err("缓存实际位置不符，已保留".into());
-    }
-    Ok(Opened {
-        file,
-        _directory: directory,
-    })
-}
-fn digest(file: &mut fs::File, cancel: &CancellationToken) -> Result<String> {
-    let mut hash = Sha512::new();
-    let mut buffer = vec![0; 1024 * 1024];
-    loop {
-        if cancel.is_cancelled() {
-            return Err("缓存检查已取消".into());
-        }
-        let count = file.read(&mut buffer).map_err(|_| "缓存内容读取失败")?;
-        if count == 0 {
-            break;
-        }
-        hash.update(&buffer[..count]);
-    }
-    Ok(format!("{:x}", hash.finalize()))
+    Opened::open(root, &entry.path, entry.bytes, delete)
 }
 pub fn prepare(
     root: &Path,
@@ -383,20 +297,7 @@ pub fn clear(
             if cancel.is_cancelled() {
                 return Err("已取消，未处理".into());
             }
-            // Delete the verified open link, never resolve a frontend path for deletion.
-            let disposition = FILE_DISPOSITION_INFO { DeleteFile: true };
-            if unsafe {
-                SetFileInformationByHandle(
-                    opened.file.as_raw_handle(),
-                    FileDispositionInfo,
-                    (&disposition as *const FILE_DISPOSITION_INFO).cast(),
-                    std::mem::size_of::<FILE_DISPOSITION_INFO>() as u32,
-                )
-            } == 0
-            {
-                return Err("文件无法移除，已保留".into());
-            }
-            drop(opened);
+            opened.remove()?;
             Ok(())
         })();
         match result {
@@ -419,7 +320,10 @@ pub fn clear(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use sha2::{Digest, Sha512};
+    use std::os::windows::fs::OpenOptionsExt;
     use std::{cell::Cell, io::Write, path::PathBuf, time::Duration};
+    use windows_sys::Win32::Storage::FileSystem::FILE_SHARE_READ;
     fn root() -> PathBuf {
         let root = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../.native/cache-tests")

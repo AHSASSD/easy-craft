@@ -660,7 +660,7 @@ struct BackupRecord {
     bytes: u64,
     created_ms: u64,
 }
-#[derive(Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BackupEntry {
     pub id: String,
@@ -723,7 +723,7 @@ fn backup_record(root: &Path, id: &str) -> Result<BackupRecord> {
     }
     Ok(record)
 }
-fn backup_target(root: &Path, world_id: Option<&str>) -> Result<String> {
+pub(crate) fn backup_target(root: &Path, world_id: Option<&str>) -> Result<String> {
     if let Some(id) = world_id {
         selected_world(root, id)?;
         Ok(format!("saves/{id}/level.dat"))
@@ -756,7 +756,11 @@ fn backup_entry(root: &Path, id: &str, target: &str) -> Result<BackupEntry> {
         created_ms: record.created_ms,
     })
 }
-fn checked_backup(root: &Path, id: &str, target: &str) -> Result<(BackupEntry, Vec<u8>)> {
+pub(crate) fn checked_backup(
+    root: &Path,
+    id: &str,
+    target: &str,
+) -> Result<(BackupEntry, Vec<u8>)> {
     let entry = backup_entry(root, id, target)?;
     let filename = if target == "options.txt" {
         "options.txt"
@@ -952,6 +956,13 @@ fn restore_plan(
 pub fn preview_backup(root: &Path, world_id: Option<&str>, id: &str) -> Result<BackupPreview> {
     restore_plan(root, world_id, id).map(|(preview, _, _)| preview)
 }
+pub(crate) fn config_locks(root: &Path, world_id: Option<&str>) -> Result<Vec<fs::File>> {
+    if let Some(world) = world_id {
+        Ok(vec![session_lock(&selected_world(root, world)?)?])
+    } else {
+        lock_worlds(root)
+    }
+}
 pub fn restore_backup(
     root: &Path,
     world_id: Option<&str>,
@@ -959,11 +970,7 @@ pub fn restore_backup(
     revision: &str,
     backup_sha1: &str,
 ) -> Result<String> {
-    let _locks = if let Some(world) = world_id {
-        vec![session_lock(&selected_world(root, world)?)?]
-    } else {
-        lock_worlds(root)?
-    };
+    let _locks = config_locks(root, world_id)?;
     let (preview, original, replacement) = restore_plan(root, world_id, id)?;
     if preview.revision != revision || preview.backup.sha1 != backup_sha1 {
         return Err("当前配置或备份已变化，请重新预览；未恢复".into());

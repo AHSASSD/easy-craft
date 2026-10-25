@@ -1526,6 +1526,178 @@ try {
   console.log(
     'PASS: native skin avatar, world rules/difficulty/time/weather, exact backup and options round trip.',
   );
+  if (process.argv.includes('--backup-retention')) {
+    await page.evaluate(
+      async ({ id, worldId }) => {
+        for (let index = 0; index < 6; index++) {
+          const settings = await window.__TAURI_INTERNALS__.invoke(
+            'native_world',
+            { id, worldId },
+          );
+          settings.difficulty = (settings.difficulty + 1) % 4;
+          await window.__TAURI_INTERNALS__.invoke('native_world_save', {
+            id,
+            worldId,
+            settings,
+          });
+        }
+      },
+      { id: instanceId, worldId },
+    );
+    const list = await page.evaluate(
+      ({ id, worldId }) =>
+        window.__TAURI_INTERNALS__.invoke('native_config_backups', {
+          id,
+          worldId,
+        }),
+      { id: instanceId, worldId },
+    );
+    assert(list.entries.length >= 6);
+    const backupRoot = path.join(gameDir, '.easycraft-backups');
+    const snapshots = new Map();
+    for (const entry of list.entries) {
+      for (const name of ['level.dat', 'record.json']) {
+        const file = path.join(backupRoot, entry.id, name);
+        snapshots.set(file, await readFile(file));
+      }
+    }
+    const protectedFiles = new Map();
+    for (const file of [
+      path.join(worldDir, 'level.dat'),
+      path.join(gameDir, 'options.txt'),
+      path.join(testState.dataRoot, 'settings.json'),
+      path.join(testState.dataRoot, 'instances.json'),
+    ])
+      protectedFiles.set(file, await readFile(file));
+    const optionsBackups = await page.evaluate(
+      (id) =>
+        window.__TAURI_INTERNALS__.invoke('native_config_backups', {
+          id,
+          worldId: null,
+        }),
+      instanceId,
+    );
+    for (const entry of optionsBackups.entries)
+      for (const name of ['options.txt', 'record.json']) {
+        const file = path.join(backupRoot, entry.id, name);
+        protectedFiles.set(file, await readFile(file));
+      }
+    await page.getByRole('tab', { name: '存档', exact: true }).click();
+    await page.getByLabel('选择存档', { exact: true }).selectOption(worldId);
+    await page.getByLabel('确认游戏已关闭', { exact: true }).check();
+    const manager = page.getByLabel('世界配置备份保留管理', { exact: true });
+    await manager.getByLabel('配置备份保留数量').selectOption('3');
+    // Match the chosen UI preset when deriving expected retained files.
+    const keep = Number(
+      await manager.getByLabel('配置备份保留数量').inputValue(),
+    );
+    const retainedEntries = list.entries.slice(0, keep);
+    const removedEntries = list.entries.slice(keep);
+    await manager
+      .getByRole('button', { name: '检查备份保留计划', exact: true })
+      .click();
+    const preview = manager.getByLabel('旧配置备份清理预览', { exact: true });
+    await preview.waitFor();
+    assert(
+      await preview
+        .getByRole('button', { name: '确认清理旧配置备份', exact: true })
+        .isDisabled(),
+    );
+    for (const [file, bytes] of snapshots)
+      assert.deepEqual(await readFile(file), bytes);
+    const stale = path.join(backupRoot, removedEntries[0].id, 'record.json');
+    await writeFile(
+      stale,
+      Buffer.concat([snapshots.get(stale), Buffer.from('\n')]),
+    );
+    await manager.getByLabel('确认旧配置备份清理').check();
+    await manager
+      .getByRole('button', { name: '确认清理旧配置备份', exact: true })
+      .click();
+    await manager.getByRole('alert').filter({ hasText: '变化' }).waitFor();
+    for (const entry of list.entries)
+      assert.deepEqual(
+        await readFile(path.join(backupRoot, entry.id, 'level.dat')),
+        snapshots.get(path.join(backupRoot, entry.id, 'level.dat')),
+      );
+    await writeFile(stale, snapshots.get(stale));
+    await manager
+      .getByRole('button', { name: '检查备份保留计划', exact: true })
+      .click();
+    await manager.getByLabel('确认旧配置备份清理').waitFor();
+    assert(!(await manager.getByLabel('确认旧配置备份清理').isChecked()));
+    const viewport = await page.evaluate(() => ({
+      width: innerWidth,
+      height: innerHeight,
+    }));
+    await page.setViewportSize({ width: 800, height: 540 });
+    assert(
+      await manager.evaluate(
+        (element) => element.scrollWidth <= element.clientWidth + 1,
+      ),
+    );
+    assert(
+      await page.evaluate(
+        () => document.documentElement.scrollWidth <= innerWidth + 1,
+      ),
+    );
+    assert(
+      await manager
+        .getByRole('button', { name: '确认清理旧配置备份', exact: true })
+        .evaluate((element) => element.getBoundingClientRect().height >= 36),
+    );
+    await preview.screenshot({
+      path: path.join(
+        project,
+        'output/playwright/backup-retention-preview.png',
+      ),
+    });
+    await page.setViewportSize(viewport);
+    await manager.getByLabel('确认旧配置备份清理').check();
+    await manager
+      .getByRole('button', { name: '确认清理旧配置备份', exact: true })
+      .click();
+    await manager.getByLabel('旧配置备份清理结果').waitFor();
+    const after = await page.evaluate(
+      ({ id, worldId }) =>
+        window.__TAURI_INTERNALS__.invoke('native_config_backups', {
+          id,
+          worldId,
+        }),
+      { id: instanceId, worldId },
+    );
+    assert.deepEqual(after.entries, retainedEntries);
+    for (const entry of removedEntries)
+      for (const name of ['level.dat', 'record.json'])
+        assert.equal(
+          await readFile(path.join(backupRoot, entry.id, name)).then(
+            () => true,
+            () => false,
+          ),
+          false,
+        );
+    for (const entry of retainedEntries)
+      for (const name of ['level.dat', 'record.json']) {
+        const file = path.join(backupRoot, entry.id, name);
+        assert.deepEqual(await readFile(file), snapshots.get(file));
+      }
+    for (const [file, bytes] of protectedFiles)
+      assert.deepEqual(await readFile(file), bytes);
+    const restore = await page.evaluate(
+      ({ id, worldId, backupId }) =>
+        window.__TAURI_INTERNALS__.invoke('native_config_backup_preview', {
+          id,
+          worldId,
+          backupId,
+        }),
+      { id: instanceId, worldId, backupId: retainedEntries[0].id },
+    );
+    assert.equal(restore.backup.id, retainedEntries[0].id);
+    assert.equal(restore.worldId, worldId);
+    console.log(
+      'PASS: native backup retention requires explicit confirmation, rejects stale records, removes only listed older world backups and keeps the latest backups restorable; options backups and live configuration remain exact.',
+    );
+  }
   if (process.argv.includes('--cache-clear')) {
     const resourceCache = path.join(testState.dataRoot, 'cache/modrinth');
     await mkdir(resourceCache, { recursive: true });
@@ -1921,6 +2093,23 @@ try {
             ),
           );
         rendered = true;
+        if (process.argv.includes('--backup-retention')) {
+          const refused = await page.evaluate(async (id) => {
+            try {
+              await window.__TAURI_INTERNALS__.invoke(
+                'native_backup_cleanup_prepare',
+                { id, worldId: null, keep: 1 },
+              );
+              return '';
+            } catch (error) {
+              return String(error);
+            }
+          }, instanceId);
+          assert.match(refused, /请先结束/);
+          console.log(
+            'PASS: backup cleanup preparation is refused while the actual game process runs.',
+          );
+        }
         if (process.argv.includes('--cache-clear')) {
           const refused = await page.evaluate(async () => {
             try {

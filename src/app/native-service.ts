@@ -20,6 +20,8 @@ import type {
   CacheSummary,
   CachePlan,
   CacheReport,
+  BackupCleanupPlan,
+  BackupCleanupReport,
 } from '../core/native-contracts';
 import { isRecord } from '../core/services';
 const string = (value: unknown): value is string => typeof value === 'string';
@@ -65,6 +67,33 @@ function validBackup(value: unknown): value is ConfigBackup {
     value.bytes <= 16 * 1024 * 1024 &&
     integer(value.createdMs) &&
     value.createdMs <= 8640000000000000
+  );
+}
+function validBackupCleanup(value: unknown): value is BackupCleanupPlan {
+  if (
+    !isRecord(value) ||
+    !bounded(value.token, 36) ||
+    !/^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(value.token) ||
+    !bounded(value.instanceId, 128) ||
+    !(value.worldId === null || bounded(value.worldId, 255)) ||
+    !integer(value.keep) ||
+    value.keep < 1 ||
+    value.keep > 100 ||
+    !Array.isArray(value.retained) ||
+    value.retained.length > value.keep ||
+    !value.retained.every(validBackup) ||
+    !Array.isArray(value.remove) ||
+    !value.remove.every(validBackup) ||
+    !cacheWarnings(value.warnings)
+  )
+    return false;
+  const entries = [...value.retained, ...value.remove];
+  return (
+    entries.length <= 2000 &&
+    new Set(entries.map((entry) => entry.id)).size === entries.length &&
+    (!value.remove.length || value.retained.length === value.keep) &&
+    entries.reduce((total, entry) => total + entry.bytes, 0) <=
+      512 * 1024 * 1024
   );
 }
 function validBackupPreview(value: unknown): value is ConfigBackupPreview {
@@ -728,6 +757,61 @@ export function createNativeService(
     },
     saveOptions: (id, options) =>
       saveFile('native_options_save', { id, options }),
+    prepareBackupCleanup: async (id, keep, worldId) => {
+      if (!integer(keep) || keep < 1 || keep > 100)
+        throw new Error('保留数量须为 1–100');
+      try {
+        const value = await request('native_backup_cleanup_prepare', {
+          id,
+          keep,
+          worldId: worldId ?? null,
+        });
+        if (
+          !validBackupCleanup(value) ||
+          value.instanceId !== id ||
+          value.worldId !== (worldId ?? null) ||
+          value.keep !== keep
+        )
+          throw new Error('备份清理预览目标或响应无效');
+        return value;
+      } finally {
+        await refresh(true);
+      }
+    },
+    clearBackupCleanup: async (plan) => {
+      if (!validBackupCleanup(plan)) throw new Error('备份清理预览无效');
+      try {
+        const value = await request('native_backup_cleanup_clear', {
+          token: plan.token,
+        });
+        if (
+          !isRecord(value) ||
+          !Array.isArray(value.removed) ||
+          !value.removed.every(string) ||
+          !Array.isArray(value.kept) ||
+          !value.kept.every(
+            (item: unknown) =>
+              isRecord(item) && string(item.id) && bounded(item.reason, 2048),
+          ) ||
+          !cacheWarnings(value.warnings) ||
+          typeof value.cancelled !== 'boolean'
+        )
+          throw new Error('备份清理结果响应无效');
+        const ids = [
+          ...value.removed,
+          ...value.kept.map((item: { id: string }) => item.id),
+        ];
+        if (
+          ids.length !== plan.remove.length ||
+          new Set(ids).size !== ids.length ||
+          !ids.every((id) => plan.remove.some((entry) => entry.id === id))
+        )
+          throw new Error('备份清理结果超出预览范围');
+        return value as BackupCleanupReport;
+      } finally {
+        await refresh(true);
+      }
+    },
     configBackups: async (id, worldId) => {
       const value = await request('native_config_backups', {
         id,

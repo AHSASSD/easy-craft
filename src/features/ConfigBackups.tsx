@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import { BackupRetention } from './BackupRetention';
 import type {
   ConfigBackupList,
   ConfigBackupPreview,
@@ -62,7 +63,7 @@ export function ConfigBackups({
         先预览具体变更，再确认恢复。恢复前会备份当前文件；只恢复已支持的设置，保留未知字段，不回滚区块或背包。
       </p>
       <p className="hint">
-        仅列出带有实例与目标归属记录的备份，预览和恢复时校验内容；早期未记录归属的文件仍保留，不自动匹配。备份不会自动清理。
+        仅列出带有实例与目标归属记录的备份，预览和恢复时校验内容；早期未记录归属的文件仍保留，不自动匹配。旧备份可在下方检查后明确确认清理，不会自动删除。
       </p>
       <button
         disabled={disabled}
@@ -188,6 +189,20 @@ export function ConfigBackups({
           {!closed && <p className="hint">请先勾选上方“确认游戏已关闭”。</p>}
         </section>
       )}
+      <BackupRetention
+        service={service}
+        id={id}
+        worldId={worldId}
+        disabled={disabled}
+        closed={closed}
+        dirty={dirty}
+        onDone={async () => {
+          clearPreview();
+          const value = await service.configBackups(id, worldId);
+          setList(value);
+          setSelected(value.entries[0]?.id ?? '');
+        }}
+      />
     </section>
   );
 }

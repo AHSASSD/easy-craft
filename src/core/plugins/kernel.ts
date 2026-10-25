@@ -269,6 +269,8 @@ export class PluginManager {
             'options',
             'saveOptions',
             'configBackups',
+            'prepareBackupCleanup',
+            'clearBackupCleanup',
             'previewConfigBackup',
             'restoreConfigBackup',
             'avatar',

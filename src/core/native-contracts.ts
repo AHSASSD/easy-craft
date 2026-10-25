@@ -84,6 +84,21 @@ export type ConfigBackup = {
   createdMs: number;
 };
 export type ConfigBackupList = { entries: ConfigBackup[]; warnings: string[] };
+export type BackupCleanupPlan = {
+  token: string;
+  instanceId: string;
+  worldId: string | null;
+  keep: number;
+  retained: ConfigBackup[];
+  remove: ConfigBackup[];
+  warnings: string[];
+};
+export type BackupCleanupReport = {
+  removed: string[];
+  kept: { id: string; reason: string }[];
+  warnings: string[];
+  cancelled: boolean;
+};
 export type ConfigBackupPreview = {
   backup: ConfigBackup;
   worldId: string | null;
@@ -267,6 +282,12 @@ export interface NativeService extends Observable<NativeSnapshot> {
   options(id: string): Promise<ClientOptions>;
   saveOptions(id: string, options: ClientOptions): Promise<string>;
   configBackups(id: string, worldId?: string): Promise<ConfigBackupList>;
+  prepareBackupCleanup(
+    id: string,
+    keep: number,
+    worldId?: string,
+  ): Promise<BackupCleanupPlan>;
+  clearBackupCleanup(plan: BackupCleanupPlan): Promise<BackupCleanupReport>;
   previewConfigBackup(
     id: string,
     backupId: string,

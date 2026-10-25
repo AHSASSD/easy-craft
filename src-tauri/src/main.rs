@@ -2,9 +2,11 @@
 
 mod appearance;
 mod auth;
+mod backup_retention;
 mod cache;
 mod content;
 mod fabric;
+mod file_guard;
 mod file_picker;
 mod file_upload;
 mod host;
@@ -304,6 +306,30 @@ async fn native_cache_clear(host: State<'_, Arc<Host>>, token: String) -> Result
         .map_err(|_| "缓存清理失败".to_string())?
 }
 #[tauri::command]
+async fn native_backup_cleanup_prepare(
+    host: State<'_, Arc<Host>>,
+    id: String,
+    world_id: Option<String>,
+    keep: u16,
+) -> Result<backup_retention::Plan> {
+    let host = host.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        host.prepare_backup_cleanup(&id, world_id.as_deref(), keep)
+    })
+    .await
+    .map_err(|_| "备份检查失败".to_string())?
+}
+#[tauri::command]
+async fn native_backup_cleanup_clear(
+    host: State<'_, Arc<Host>>,
+    token: String,
+) -> Result<backup_retention::Report> {
+    let host = host.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || host.clear_backup_cleanup(&token))
+        .await
+        .map_err(|_| "备份清理失败".to_string())?
+}
+#[tauri::command]
 async fn native_config_backups(
     host: State<'_, Arc<Host>>,
     id: String,
@@ -582,6 +608,8 @@ fn main() {
             native_options,
             native_options_save,
             native_config_backups,
+            native_backup_cleanup_prepare,
+            native_backup_cleanup_clear,
             native_config_backup_preview,
             native_config_backup_restore,
             native_avatar,

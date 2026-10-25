@@ -31,6 +31,7 @@ struct Inner {
     upload: Option<crate::file_upload::Upload>,
     upload_token: Option<String>,
     cache_plan: Option<crate::cache::Plan>,
+    backup_plan: Option<crate::backup_retention::Plan>,
 }
 pub struct Host {
     _lock: fs::File,
@@ -136,6 +137,7 @@ impl Host {
                 upload: None,
                 upload_token: None,
                 cache_plan: None,
+                backup_plan: None,
             }),
         }))
     }
@@ -314,7 +316,9 @@ impl Host {
         }
         .into();
         inner.task.message = if cancelled {
-            if inner.task.phase.starts_with("file-") {
+            if inner.task.phase.starts_with("backup-") {
+                "备份操作已取消，已完成的清理不会撤销。"
+            } else if inner.task.phase.starts_with("file-") {
                 "文件接收或检查已取消，未提交目标文件。"
             } else {
                 "任务已取消，已校验缓存保留"
@@ -404,6 +408,96 @@ impl Host {
                     "完成"
                 },
                 report.removed_files,
+                report.kept.len()
+            );
+        }
+        result
+    }
+    pub fn prepare_backup_cleanup(
+        &self,
+        id: &str,
+        world: Option<&str>,
+        keep: u16,
+    ) -> Result<crate::backup_retention::Plan> {
+        let root = self.instance_files(id, |root| Ok(root.to_path_buf()))?;
+        let cancel = self.begin_task("检查配置备份保留计划")?;
+        self.progress("backup-retention-check", "校验此目标的配置备份", 0, 0);
+        let result = crate::backup_retention::prepare(
+            &root,
+            id,
+            world,
+            keep,
+            &cancel,
+            |completed, total| {
+                self.progress(
+                    "backup-retention-check",
+                    "校验此目标的配置备份",
+                    completed,
+                    total,
+                )
+            },
+        );
+        let mut inner = self.inner.lock().map_err(|_| "宿主状态不可用")?;
+        if let Ok(plan) = &result {
+            if !cancel.is_cancelled() {
+                inner.backup_plan = Some(plan.clone());
+            }
+        }
+        Self::finish_locked(
+            &mut inner,
+            result.as_ref().map(|_| ()).map_err(Clone::clone),
+            &cancel,
+        );
+        if cancel.is_cancelled() {
+            return Err("备份检查已取消；未清理".into());
+        }
+        if result.is_ok() {
+            inner.task.message = "备份检查完成；尚未清理，等待确认。".into();
+        }
+        result
+    }
+    pub fn clear_backup_cleanup(&self, token: &str) -> Result<crate::backup_retention::Report> {
+        let cancel = self.begin_task("清理已确认的旧配置备份")?;
+        self.progress("backup-retention-clear", "重新校验已确认的备份清单", 0, 0);
+        let plan = {
+            let mut inner = self.inner.lock().map_err(|_| "宿主状态不可用")?;
+            if !inner
+                .backup_plan
+                .as_ref()
+                .is_some_and(|plan| plan.token == token)
+            {
+                let error = "备份清理令牌无效或已使用，请重新检查".to_string();
+                Self::finish_locked(&mut inner, Err(error.clone()), &cancel);
+                return Err(error);
+            }
+            inner.backup_plan.take().ok_or("备份清理预览不可用")?
+        };
+        let mut result = crate::backup_retention::clear(plan, &cancel, |completed, total| {
+            self.progress(
+                "backup-retention-clear",
+                "处理已确认的旧配置备份",
+                completed,
+                total,
+            )
+        });
+        let mut inner = self.inner.lock().map_err(|_| "宿主状态不可用")?;
+        if let Ok(report) = &mut result {
+            report.cancelled |= cancel.is_cancelled();
+        }
+        Self::finish_locked(
+            &mut inner,
+            result.as_ref().map(|_| ()).map_err(Clone::clone),
+            &cancel,
+        );
+        if let Ok(report) = &result {
+            inner.task.message = format!(
+                "备份清理{}：移除 {} 份，保留 {} 份候选。",
+                if report.cancelled {
+                    "已取消"
+                } else {
+                    "完成"
+                },
+                report.removed.len(),
                 report.kept.len()
             );
         }
