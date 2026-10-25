@@ -8,3 +8,9 @@ output/
 *.local
 data/
 .native/
+.env
+.env.*
+!.env.example
+*.dpapi
+*.pem
+*.key

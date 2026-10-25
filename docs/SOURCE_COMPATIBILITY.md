@@ -17,6 +17,7 @@
 
 - 本次程序 GET `https://www.curseforge.com/minecraft/mc-mods` 返回 **HTTP 403**。
 - 未带 API Key 的 `https://api.curseforge.com/v1/mods/search?gameId=432&searchFilter=sodium&pageSize=1` 也返回 **HTTP 403**。
+- 后续使用用户提供的临时密钥进行内存中测试：搜索 Sodium、pageSize=3，仍返回 **HTTP 403**，未获得项目列表。此结果不足以判定密钥是否无效、权限是否未开通或请求是否受网络限制；没有把密钥写入代码、配置、日志或提交。
 - 官网程序请求被拒绝不代表用户用正常浏览器访问一定失败；本次没有通过浏览器完成网站访问验收。也不能只凭 HTTP 403 判定唯一原因是缺密钥。
 - [官方 API 文档](https://docs.curseforge.com/rest-api/)要求请求携带 `x-api-key`。下一步应用内接入需申请自己的 API 访问资格/密钥，按平台条件处理资源和下载权限；不借用 PCL/HMCL 的密钥，不绕过网站访问控制，不展示假搜索结果。
 - 当前应用内社区搜索、项目图标和资源安装来源仍是 Modrinth，CurseForge API 尚未接入。后续开始正式接入前提前说明本机密钥配置方式；密钥不放聊天、前端、源码或普通偏好文件。本轮 UI 和原版/Fabric 工作无需等待此授权。
