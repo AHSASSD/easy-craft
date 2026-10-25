@@ -154,6 +154,28 @@
 .native-library.rail-layout {
   --rail-width: 76px;
 }
+.appearance-background-preview {
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+  gap: 8px;
+  min-height: 120px;
+  padding: 20px;
+  border-radius: 10px;
+  background-size: cover;
+  background-position: center;
+  color: #ffffff;
+}
+.appearance-background-preview span {
+  font-size: 12px;
+}
+.native-library[data-reduce-motion='true'] *,
+.native-library[data-reduce-motion='true'] *::before,
+.native-library[data-reduce-motion='true'] *::after {
+  animation: none !important;
+  transition: none !important;
+  scroll-behavior: auto !important;
+}
 .native-library.rail-layout[data-theme='slate'] {
   --bg: #171d1b;
   --surface: #222b26;
@@ -211,7 +233,7 @@
 .native-library .global-rail button.active,
 .native-library .global-rail button.active:hover {
   color: white;
-  background: linear-gradient(150deg, #53a743, #338636);
+  background: linear-gradient(150deg, #377d2d, #338636);
 }
 .global-rail button.active::before {
   content: '';

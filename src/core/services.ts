@@ -62,6 +62,13 @@ export function validPreferences(value: unknown): value is Preferences {
     typeof value.doubleClickLaunch === 'boolean' &&
     typeof value.developerEnabled === 'boolean' &&
     (value.sort === 'name' || value.sort === 'recent') &&
+    (value.backgroundShade === undefined ||
+      (typeof value.backgroundShade === 'number' &&
+        Number.isInteger(value.backgroundShade) &&
+        value.backgroundShade >= 20 &&
+        value.backgroundShade <= 80)) &&
+    (value.reduceMotion === undefined ||
+      typeof value.reduceMotion === 'boolean') &&
     (value.navigation === undefined || validNavigation(value.navigation))
   );
 }

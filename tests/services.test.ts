@@ -68,6 +68,31 @@ test('navigation persists independently while old preferences remain valid', () 
     }),
   ).toBe(false);
 });
+test('appearance preferences preserve old profiles and reject invalid persisted values', () => {
+  const storage = memory();
+  const preferences = createPreferences(storage);
+  preferences.update({ theme: 'grass', sidebarWidth: 340 });
+  expect(preferences.snapshot().backgroundShade).toBeUndefined();
+  expect(preferences.snapshot().reduceMotion).toBeUndefined();
+  preferences.update({ backgroundShade: 60, reduceMotion: true });
+  expect(createPreferences(storage).snapshot()).toMatchObject({
+    theme: 'grass',
+    sidebarWidth: 340,
+    backgroundShade: 60,
+    reduceMotion: true,
+  });
+  for (const value of [NaN, Infinity, 19, 81, 35.5, '60', null]) {
+    expect(
+      validPreferences({ ...preferences.snapshot(), backgroundShade: value }),
+    ).toBe(false);
+  }
+  expect(() => preferences.update({ backgroundShade: 90 })).toThrow();
+  expect(createPreferences(storage).snapshot().backgroundShade).toBe(60);
+  expect(
+    validPreferences({ ...preferences.snapshot(), reduceMotion: 'yes' }),
+  ).toBe(false);
+});
+
 test('preferences and instance edits persist across reload; duplicate versions have unique ids', async () => {
   const storage = memory();
   const prefs = createPreferences(storage);

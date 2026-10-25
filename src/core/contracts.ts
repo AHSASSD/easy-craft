@@ -19,6 +19,8 @@ export type Preferences = {
   doubleClickLaunch: boolean;
   developerEnabled: boolean;
   sort: 'name' | 'recent';
+  backgroundShade?: number;
+  reduceMotion?: boolean;
   navigation?: Navigation;
 };
 export type ThemeDefinition = {

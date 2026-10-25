@@ -18,8 +18,8 @@
   --hover: #eaf2e8;
   --border: #e0e7e2;
   --text: #25332e;
-  --muted: #7a8781;
-  --accent: #3a963a;
+  --muted: #5d7065;
+  --accent: #2f792f;
   --accent-dark: #e6f2e3;
   background:
     radial-gradient(ellipse at 16% 0, #dbe9d6 0, transparent 65%), #edf1ef;
@@ -415,9 +415,10 @@
   backdrop-filter: blur(5px);
   color: #e5eee2;
 }
-.native-library .library-launch {
+.native-library .library-launch,
+.native-library .library-launch:hover:not(:disabled) {
   border: 1px solid #80c66f;
-  background: linear-gradient(#69bd50, #399737);
+  background: linear-gradient(#377d2d, #2d742b);
   color: white;
   display: flex;
   gap: 10px;

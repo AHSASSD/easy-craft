@@ -30,6 +30,7 @@ import {
   FileCode,
 } from 'lucide-react';
 import type { Services } from '../core/contracts';
+import { warnings } from '../app/bootstrap';
 import { defaultNavigation, type Navigation } from '../core/navigation';
 import { Titlebar } from '../components/Titlebar';
 import { Modal } from '../components/Modal';
@@ -108,7 +109,12 @@ function Shell({ services }: { services: Services }) {
     !state?.loginPending &&
     (state?.settings.launchMode === 'offline' || !!state?.account);
   const [account, setAccount] = useState(false);
-  const [notice, setNotice] = useState('');
+  const [notice, setNotice] = useState(warnings.at(-1) ?? '');
+  useEffect(() => {
+    const warning = () => setNotice(warnings.at(-1) ?? '');
+    window.addEventListener('easycraft-warning', warning);
+    return () => window.removeEventListener('easycraft-warning', warning);
+  }, []);
   const [collapsed, setCollapsed] = useState(false);
   const [background, setBackground] = useState('');
   const [droppedPack, setDroppedPack] = useState<File | null>(null);
@@ -301,10 +307,15 @@ function Shell({ services }: { services: Services }) {
         .toLowerCase()
         .includes(nav.query.toLowerCase()),
     ) ?? [];
+  const shade = (preferences.backgroundShade ?? 35) / 100;
+  const backgroundStyle = {
+    backgroundImage: `linear-gradient(0deg,rgba(11,37,28,${Math.min(0.98, shade + 0.4)}),rgba(20,47,38,${shade})),url("${background || landscape}")`,
+  };
   return (
     <div
       className="app native-library rail-layout"
       data-theme={preferences.theme}
+      data-reduce-motion={preferences.reduceMotion ? 'true' : undefined}
       style={
         { '--sidebar-width': `${preferences.sidebarWidth}px` } as CSSProperties
       }
@@ -619,7 +630,7 @@ function Shell({ services }: { services: Services }) {
                 <section
                   className={`library-hero ${tab !== 'overview' ? 'compact-hero' : ''}`}
                   style={{
-                    backgroundImage: `linear-gradient(0deg,rgba(11,37,28,.95),rgba(20,47,38,.05) 85%),url("${background || landscape}")`,
+                    ...backgroundStyle,
                   }}
                 >
                   {tab === 'overview' && (
@@ -1005,6 +1016,46 @@ function Shell({ services }: { services: Services }) {
                     <p className="hint">
                       PNG、JPEG 或 WebP，最多 10 MiB / 1600 万像素；保存时转换为
                       PNG。{backgroundBusy ? '正在读取或保存背景…' : ''}
+                    </p>
+                    <div
+                      className="appearance-background-preview"
+                      aria-label="背景遮罩预览"
+                      style={backgroundStyle}
+                    >
+                      <strong>你的世界，由你设定</strong>
+                      <span>与实例概览使用相同背景和遮罩</span>
+                    </div>
+                    <label className="native-label">
+                      背景遮罩强度：{preferences.backgroundShade ?? 35}%
+                      <input
+                        aria-label="背景遮罩强度"
+                        type="range"
+                        min="20"
+                        max="80"
+                        step="1"
+                        value={preferences.backgroundShade ?? 35}
+                        onChange={(event) =>
+                          services.preferences.update({
+                            backgroundShade: Number(event.target.value),
+                          })
+                        }
+                      />
+                    </label>
+                    <label className="toggle-row">
+                      <span>减少动态效果</span>
+                      <input
+                        aria-label="减少动态效果"
+                        type="checkbox"
+                        checked={preferences.reduceMotion ?? false}
+                        onChange={(event) =>
+                          services.preferences.update({
+                            reduceMotion: event.target.checked,
+                          })
+                        }
+                      />
+                    </label>
+                    <p className="hint">
+                      外观调整立即生效，偏好写入本机存储，保存失败时上方会提示。减少动态效果关闭时，仍遵循系统的减少动画偏好。
                     </p>
                   </section>
                 )}

@@ -72,6 +72,152 @@ test('real library is the default and remains usable at minimum size', async ({
   await page.keyboard.press('Escape');
   await expect(page.getByRole('dialog')).toHaveCount(0);
 });
+test('appearance mask and reduced motion persist and honor the system preference', async ({
+  page,
+}) => {
+  await page.emulateMedia({ reducedMotion: 'no-preference' });
+  await page.goto('/');
+  await page
+    .getByRole('navigation')
+    .getByRole('button', { name: '设置', exact: true })
+    .click();
+  await page.getByRole('button', { name: '个性化', exact: true }).click();
+  const preview = page.getByLabel('背景遮罩预览');
+  const before = await preview.evaluate(
+    (element) => element.style.backgroundImage,
+  );
+  await page.getByLabel('背景遮罩强度', { exact: true }).fill('65');
+  await expect(preview).not.toHaveCSS('background-image', before);
+  const motion = () =>
+    page
+      .getByRole('navigation')
+      .getByRole('button')
+      .first()
+      .evaluate((element) => getComputedStyle(element).transitionDuration);
+  expect(await motion()).not.toBe('0s');
+  await page.getByLabel('减少动态效果', { exact: true }).check();
+  expect(await motion()).toBe('0s');
+  await page.reload();
+  await expect(page.getByLabel('背景遮罩强度', { exact: true })).toHaveValue(
+    '65',
+  );
+  await expect(page.getByLabel('减少动态效果', { exact: true })).toBeChecked();
+  const saved = await preview.evaluate(
+    (element) => element.style.backgroundImage,
+  );
+  await page
+    .getByRole('navigation')
+    .getByRole('button', { name: '游戏库', exact: true })
+    .click();
+  await expect(page.locator('.library-hero')).toHaveCSS(
+    'background-image',
+    saved,
+  );
+  await page
+    .getByRole('navigation')
+    .getByRole('button', { name: '设置', exact: true })
+    .click();
+  await page.getByLabel('减少动态效果', { exact: true }).uncheck();
+  expect(await motion()).not.toBe('0s');
+  await page.emulateMedia({ reducedMotion: 'reduce' });
+  expect(await motion()).toBe('0s');
+  await page.setViewportSize({ width: 800, height: 540 });
+  expect(
+    await page.evaluate(
+      () => document.documentElement.scrollWidth <= innerWidth,
+    ),
+  ).toBe(true);
+  await page
+    .getByLabel('背景遮罩强度', { exact: true })
+    .scrollIntoViewIfNeeded();
+  await expect(page.getByLabel('背景遮罩强度', { exact: true })).toBeVisible();
+  await page.screenshot({
+    path: 'output/playwright/appearance-mask-minimum.png',
+  });
+  await page.evaluate(() => {
+    const setItem = Storage.prototype.setItem;
+    Storage.prototype.setItem = function (key, value) {
+      if (key === 'easycraft.preferences.v1')
+        throw new DOMException('Fixture storage full', 'QuotaExceededError');
+      return setItem.call(this, key, value);
+    };
+  });
+  await page.getByLabel('背景遮罩强度', { exact: true }).fill('70');
+  await expect(page.getByRole('alert')).toContainText(
+    '本次更改仅在当前窗口有效',
+  );
+  await page.reload();
+  await expect(page.getByLabel('背景遮罩强度', { exact: true })).toHaveValue(
+    '65',
+  );
+});
+
+test('rail labels, selected categories and secondary text meet contrast targets in both themes', async ({
+  page,
+}) => {
+  await page.goto('/');
+  await page
+    .getByRole('navigation')
+    .getByRole('button', { name: '设置', exact: true })
+    .click();
+  await page.getByRole('button', { name: '个性化', exact: true }).click();
+  for (const name of ['草方块亮色', '深板岩夜色']) {
+    await page.getByRole('button', { name: new RegExp(name) }).click();
+    await page.locator('.native-library').evaluate(async (element) => {
+      await Promise.all(
+        element
+          .getAnimations({ subtree: true })
+          .map((animation) => animation.finished.catch(() => {})),
+      );
+    });
+    const results = await page.evaluate(() => {
+      const style = (selector: string) =>
+        getComputedStyle(document.querySelector(selector)!);
+      const luminance = (color: string) => {
+        const components = color
+          .match(/[\d.]+/g)!
+          .slice(0, 3)
+          .map((value) => {
+            const channel = Number(value) / 255;
+            return channel <= 0.04045
+              ? channel / 12.92
+              : ((channel + 0.055) / 1.055) ** 2.4;
+          });
+        return (
+          components[0] * 0.2126 +
+          components[1] * 0.7152 +
+          components[2] * 0.0722
+        );
+      };
+      const contrast = (a: string, b: string) => {
+        const first = luminance(a),
+          second = luminance(b);
+        return (
+          (Math.max(first, second) + 0.05) / (Math.min(first, second) + 0.05)
+        );
+      };
+      const active = style('.global-rail .active');
+      const category = style('.context-category-list .selected');
+      const breadcrumb = style('.workspace-breadcrumb');
+      const navigation = style('.global-rail');
+      const inactive = style('.global-rail button:not(.active)');
+      return [
+        ...active.backgroundImage
+          .match(/rgba?\([^)]+\)/g)!
+          .map((color) => contrast(active.color, color)),
+        contrast(category.color, category.backgroundColor),
+        contrast(breadcrumb.color, breadcrumb.backgroundColor),
+        contrast(inactive.color, navigation.backgroundColor),
+      ];
+    });
+    for (const [index, ratio] of results.entries())
+      expect(
+        ratio,
+        `${name}, color pair ${index}: ${results.join(', ')}`,
+      ).toBeGreaterThanOrEqual(4.5);
+  }
+});
+
 test('real features are explicitly unavailable in browser and never simulated', async ({
   page,
 }) => {

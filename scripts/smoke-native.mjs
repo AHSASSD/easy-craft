@@ -155,11 +155,19 @@ try {
     .click();
   await page.getByRole('button', { name: '启动', exact: true }).click();
   if (process.argv.includes('--background')) {
+    const originalPreferences = await page.evaluate(() =>
+      localStorage.getItem('easycraft.preferences.v1'),
+    );
     const original = await page.evaluate(() =>
       window.__TAURI_INTERNALS__.invoke('native_background'),
     );
     try {
       await page.getByRole('button', { name: '个性化', exact: true }).click();
+      await page.getByLabel('背景遮罩强度', { exact: true }).fill('65');
+      await page.getByLabel('减少动态效果', { exact: true }).check();
+      const savedMask = await page
+        .getByLabel('背景遮罩预览')
+        .evaluate((element) => element.style.backgroundImage.split('url(')[0]);
       const input = page.getByLabel('选择背景图片');
       await input.setInputFiles({
         name: 'background.png',
@@ -201,6 +209,32 @@ try {
       await page.locator('.library-shell').waitFor();
       await page
         .getByRole('navigation')
+        .getByRole('button', { name: '设置', exact: true })
+        .click();
+      await page.getByRole('button', { name: '个性化', exact: true }).click();
+      assert.equal(
+        await page.getByLabel('背景遮罩强度', { exact: true }).inputValue(),
+        '65',
+      );
+      assert(
+        await page.getByLabel('减少动态效果', { exact: true }).isChecked(),
+      );
+      assert.equal(
+        await page
+          .locator('.native-library')
+          .getAttribute('data-reduce-motion'),
+        'true',
+      );
+      assert.equal(
+        await page
+          .getByLabel('背景遮罩预览')
+          .evaluate(
+            (element) => element.style.backgroundImage.split('url(')[0],
+          ),
+        savedMask,
+      );
+      await page
+        .getByRole('navigation')
         .getByRole('button', { name: '游戏库', exact: true })
         .click();
       await page.waitForFunction(
@@ -209,6 +243,14 @@ try {
             .querySelector('.library-hero')
             ?.style.backgroundImage.includes(saved),
         saved,
+      );
+      assert.equal(
+        await page
+          .locator('.library-hero')
+          .evaluate(
+            (element) => element.style.backgroundImage.split('url(')[0],
+          ),
+        savedMask,
       );
       for (const mime of ['image/jpeg', 'image/webp']) {
         const data = await page.evaluate((mime) => {
@@ -249,7 +291,7 @@ try {
         null,
       );
       console.log(
-        'PASS: PNG/JPEG/WebP background converted and persisted; a newly started desktop process restores the actual hero background, reset persists.',
+        'PASS: PNG/JPEG/WebP background converted and persisted; a newly started desktop process restores the actual hero background, mask strength and reduced motion; reset persists.',
       );
     } finally {
       await page.evaluate(
@@ -259,6 +301,12 @@ try {
           ? Array.from(Buffer.from(original.split(',')[1], 'base64'))
           : [],
       );
+      await page.evaluate((raw) => {
+        if (raw === null) localStorage.removeItem('easycraft.preferences.v1');
+        else localStorage.setItem('easycraft.preferences.v1', raw);
+      }, originalPreferences);
+      await page.reload();
+      await page.locator('.library-shell').waitFor();
     }
     await page
       .getByRole('navigation')
@@ -1757,6 +1805,14 @@ try {
       name: '启动游戏',
       exact: true,
     });
+    await launchButton.hover();
+    assert.match(
+      await launchButton.evaluate(
+        (element) => getComputedStyle(element).backgroundImage,
+      ),
+      /^linear-gradient\(/,
+      'The enabled launch button retains its readable green background on hover.',
+    );
     await launchButton.click();
     let rendered = false;
     let sawMemoryAllocation = false;
