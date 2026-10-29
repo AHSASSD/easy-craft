@@ -5,7 +5,32 @@ use crate::{
 use reqwest::Url;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use std::sync::{Arc, OnceLock};
+use std::time::Duration;
 use tokio_util::sync::CancellationToken;
+
+async fn browse_json(url: &str) -> Result<Arc<Value>> {
+    static CLIENT: OnceLock<Result<reqwest::Client>> = OnceLock::new();
+    static CACHE: OnceLock<crate::browse_cache::BrowseCache> = OnceLock::new();
+    let client = CLIENT
+        .get_or_init(net::client)
+        .as_ref()
+        .map_err(Clone::clone)?;
+    let ttl = if url.contains("/search?") { 60 } else { 300 };
+    CACHE
+        .get_or_init(Default::default)
+        .get(url, Duration::from_secs(ttl), || async {
+            net::resource_json(client, url, &CancellationToken::new()).await
+        })
+        .await
+}
+#[derive(Clone, Copy, Deserialize, PartialEq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum Source {
+    #[default]
+    Modrinth,
+    Curseforge,
+}
 
 #[derive(Clone, Copy, Deserialize, Serialize, PartialEq)]
 #[serde(rename_all = "lowercase")]
@@ -39,11 +64,14 @@ impl Kind {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Hit {
-    id: String,
-    title: String,
-    description: String,
-    author: String,
-    icon_url: Option<String>,
+    pub(crate) id: String,
+    pub(crate) title: String,
+    pub(crate) description: String,
+    pub(crate) author: String,
+    pub(crate) icon_url: Option<String>,
+    pub(crate) downloads: Option<u64>,
+    pub(crate) updated: Option<String>,
+    pub(crate) game_versions: Vec<String>,
 }
 fn icon_url(value: &Value) -> Option<String> {
     let raw = value.as_str().filter(|value| value.len() <= 2048)?;
@@ -59,43 +87,47 @@ fn icon_url(value: &Value) -> Option<String> {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Search {
-    hits: Vec<Hit>,
-    total: u64,
-    offset: u64,
+    pub(crate) hits: Vec<Hit>,
+    pub(crate) total: u64,
+    pub(crate) offset: u64,
 }
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct File {
-    filename: String,
-    size: u64,
-    sha1: String,
+    pub(crate) filename: String,
+    pub(crate) size: u64,
+    pub(crate) sha1: String,
 }
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Dependency {
-    project_id: Option<String>,
-    version_id: Option<String>,
-    kind: String,
+    pub(crate) project_id: Option<String>,
+    pub(crate) version_id: Option<String>,
+    pub(crate) kind: String,
 }
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Version {
-    id: String,
-    name: String,
-    number: String,
-    environment: String,
-    loaders: Vec<String>,
-    files: Vec<File>,
-    dependencies: Vec<Dependency>,
+    pub(crate) id: String,
+    pub(crate) name: String,
+    pub(crate) number: String,
+    pub(crate) environment: String,
+    pub(crate) loaders: Vec<String>,
+    pub(crate) files: Vec<File>,
+    pub(crate) dependencies: Vec<Dependency>,
+    pub(crate) game_versions: Vec<String>,
+    pub(crate) published: Option<String>,
+    pub(crate) downloads: Option<u64>,
+    pub(crate) version_type: Option<String>,
 }
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Detail {
-    id: String,
-    title: String,
-    description: String,
-    body: String,
-    versions: Vec<Version>,
+    pub(crate) id: String,
+    pub(crate) title: String,
+    pub(crate) description: String,
+    pub(crate) body: String,
+    pub(crate) versions: Vec<Version>,
 }
 pub(crate) fn text(value: &Value, key: &str, max: usize) -> Result<String> {
     value
@@ -172,6 +204,12 @@ fn filtered_search_url(
         .append_pair("index", index);
     Ok(url)
 }
+fn optional_date(value: &Value, key: &str) -> Option<String> {
+    value[key]
+        .as_str()
+        .filter(|s| s.len() <= 64 && !s.chars().any(char::is_control))
+        .map(str::to_string)
+}
 fn parse_search(value: &Value, offset: u64) -> Result<Search> {
     let rows = value
         .get("hits")
@@ -188,6 +226,13 @@ fn parse_search(value: &Value, offset: u64) -> Result<Search> {
             description: text(row, "description", 4096)?,
             author: text(row, "author", 128)?,
             icon_url: icon_url(&row["icon_url"]),
+            downloads: row["downloads"].as_u64(),
+            updated: optional_date(row, "date_modified"),
+            game_versions: if row.get("versions").is_some() {
+                strings(row, "versions")?
+            } else {
+                vec![]
+            },
         });
     }
     Ok(Search {
@@ -202,8 +247,7 @@ fn parse_search(value: &Value, offset: u64) -> Result<Search> {
 }
 pub async fn search(kind: Kind, query: &str, game: &str, offset: u64) -> Result<Search> {
     let url = search_url(kind, query, game, offset)?;
-    let value =
-        net::resource_json(&net::client()?, url.as_str(), &CancellationToken::new()).await?;
+    let value = browse_json(url.as_str()).await?;
     parse_search(&value, offset)
 }
 pub async fn filtered_search(
@@ -218,17 +262,11 @@ pub async fn filtered_search(
         return search(kind, query, game, offset).await;
     }
     let url = filtered_search_url(kind, query, game, offset, category, index)?;
-    let value =
-        net::resource_json(&net::client()?, url.as_str(), &CancellationToken::new()).await?;
+    let value = browse_json(url.as_str()).await?;
     parse_search(&value, offset)
 }
 pub async fn categories(kind: Kind) -> Result<Vec<String>> {
-    let value = net::resource_json(
-        &net::client()?,
-        "https://api.modrinth.com/v2/tag/category",
-        &CancellationToken::new(),
-    )
-    .await?;
+    let value = browse_json("https://api.modrinth.com/v2/tag/category").await?;
     parse_categories(&value, kind)
 }
 fn parse_categories(value: &Value, kind: Kind) -> Result<Vec<String>> {
@@ -267,7 +305,7 @@ pub(crate) fn parse_versions(
 ) -> Result<Vec<Version>> {
     let rows = value
         .as_array()
-        .filter(|v| v.len() <= 1000)
+        .filter(|v| v.len() <= 10000)
         .ok_or("资源版本列表过大或格式无效")?;
     let mut result = vec![];
     for row in rows {
@@ -276,7 +314,7 @@ pub(crate) fn parse_versions(
         }
         let games = strings(row, "game_versions")?;
         let loaders = strings(row, "loaders")?;
-        if !games.iter().any(|v| v == game)
+        if (game != "all" && !games.iter().any(|v| v == game))
             || !loaders.iter().any(|v| kind.loaders().contains(&v.as_str()))
         {
             continue;
@@ -345,30 +383,42 @@ pub(crate) fn parse_versions(
             loaders,
             files,
             dependencies,
+            game_versions: games,
+            published: optional_date(row, "date_published"),
+            downloads: row["downloads"].as_u64(),
+            version_type: row["version_type"]
+                .as_str()
+                .filter(|s| ["release", "beta", "alpha"].contains(s))
+                .map(str::to_string),
         });
     }
     Ok(result)
 }
 pub async fn detail(project: &str, kind: Kind, game: &str) -> Result<Detail> {
+    detail_with_scope(project, kind, game, false).await
+}
+pub async fn detail_with_scope(project: &str, kind: Kind, game: &str, all: bool) -> Result<Detail> {
     id(project)?;
     if !crate::fabric::valid_version(game) {
         return Err("游戏版本无效".into());
     }
-    let client = net::client()?;
-    let cancel = CancellationToken::new();
     let mut versions_url = Url::parse(&format!(
         "https://api.modrinth.com/v2/project/{project}/version"
     ))
     .map_err(|_| "项目地址无效")?;
     versions_url
         .query_pairs_mut()
-        .append_pair("game_versions", &json!([game]).to_string())
         .append_pair("loaders", &json!(kind.loaders()).to_string())
         .append_pair("include_changelog", "false");
+    if !all {
+        versions_url
+            .query_pairs_mut()
+            .append_pair("game_versions", &json!([game]).to_string());
+    }
     let project_url = format!("https://api.modrinth.com/v2/project/{project}");
     let (info, versions) = tokio::try_join!(
-        net::resource_json(&client, &project_url, &cancel),
-        net::resource_json(&client, versions_url.as_str(), &cancel)
+        browse_json(&project_url),
+        browse_json(versions_url.as_str())
     )?;
     if text(&info, "id", 64)? != project {
         return Err("资源项目归属不符".into());
@@ -378,7 +428,7 @@ pub async fn detail(project: &str, kind: Kind, game: &str) -> Result<Detail> {
         title: text(&info, "title", 512)?,
         description: text(&info, "description", 4096)?,
         body: text(&info, "body", 256 * 1024)?,
-        versions: parse_versions(&versions, project, kind, game)?,
+        versions: parse_versions(&versions, project, kind, if all { "all" } else { game })?,
     })
 }
 #[cfg(test)]

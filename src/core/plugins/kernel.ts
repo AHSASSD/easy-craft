@@ -249,6 +249,12 @@ export class PluginManager {
         if (this.services.has(id)) throw new Error(`重复服务注册：${id}`);
         const methods = {
           native: [
+            'forgeVersions',
+            'downloadForge',
+            'modCheck',
+            'saveResource',
+            'previewModFile',
+            'pickModPlan',
             'datapacks',
             'openDatapacks',
             'planResources',
@@ -262,6 +268,7 @@ export class PluginManager {
             'importContentFile',
             'contentImage',
             'openContent',
+            'openFolder',
             'renameInstance',
             'worlds',
             'world',
@@ -286,6 +293,8 @@ export class PluginManager {
             'previewOnlinePack',
             'installPack',
             'fabricVersions',
+            'fabricGames',
+            'fabricCatalog',
             'saveSettings',
             'cacheSummary',
             'prepareCache',

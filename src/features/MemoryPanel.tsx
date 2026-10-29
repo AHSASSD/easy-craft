@@ -227,77 +227,82 @@ export function MemoryPanel({
               放弃内存修改并重新读取
             </button>
           )}
-          <label className="toggle-row">
-            <span>启动前整理系统工作集（可选）</span>
-            <input
-              type="checkbox"
-              aria-label="启动前内存整理"
-              checked={optimize}
-              disabled={!!instanceId && inherit}
-              onChange={(event) => setOptimize(event.target.checked)}
-            />
-          </label>
-          <p className="hint">
-            默认关闭。会尝试整理当前权限可访问进程的工作集，无权限进程自动跳过。不结束程序或清空内核缓存，不保证固定释放量；其他程序可能短暂卡顿，机械硬盘尤其明显。启用后下次启动游戏前执行。
-          </p>
-          <button
-            type="button"
-            onClick={() => {
-              setBusy(true);
-              void service
-                .optimizeMemory()
-                .then((value) => {
-                  setInfo(value);
-                  setMessage(
-                    '已请求 Windows 整理启动器工作集，当前可用内存已刷新。',
-                  );
-                })
-                .catch((error: unknown) =>
-                  setMessage(
-                    error instanceof Error ? error.message : '整理失败',
-                  ),
-                )
-                .finally(() => setBusy(false));
-            }}
-          >
-            仅整理启动器
-          </button>
-          <button type="button" onClick={() => setConfirmSystem(true)}>
-            系统内存整理
-          </button>
-          {confirmSystem && (
-            <div className="notice" role="alert">
-              <p>
-                系统整理会影响其他可访问进程，可能导致短暂卡顿。只在内存不足时使用。
-              </p>
-              <button
-                type="button"
-                onClick={() => {
-                  setConfirmSystem(false);
-                  setBusy(true);
-                  void service
-                    .optimizeMemory(true)
-                    .then((value) => {
-                      setInfo(value);
-                      setMessage(
-                        '已请求系统整理可访问进程工作集，当前可用内存已刷新。',
-                      );
-                    })
-                    .catch((error: unknown) =>
-                      setMessage(
-                        error instanceof Error ? error.message : '系统整理失败',
-                      ),
-                    )
-                    .finally(() => setBusy(false));
-                }}
-              >
-                确认整理系统工作集
-              </button>
-              <button type="button" onClick={() => setConfirmSystem(false)}>
-                取消系统整理
-              </button>
-            </div>
-          )}
+          <details className="setting-help">
+            <summary>高级内存维护</summary>
+            <label className="toggle-row">
+              <span>启动前整理系统工作集（可选）</span>
+              <input
+                type="checkbox"
+                aria-label="启动前内存整理"
+                checked={optimize}
+                disabled={!!instanceId && inherit}
+                onChange={(event) => setOptimize(event.target.checked)}
+              />
+            </label>
+            <p className="hint">
+              默认关闭。会尝试整理当前权限可访问进程的工作集，无权限进程自动跳过。不结束程序或清空内核缓存，不保证固定释放量；其他程序可能短暂卡顿，机械硬盘尤其明显。启用后下次启动游戏前执行。
+            </p>
+            <button
+              type="button"
+              onClick={() => {
+                setBusy(true);
+                void service
+                  .optimizeMemory()
+                  .then((value) => {
+                    setInfo(value);
+                    setMessage(
+                      '已请求 Windows 整理启动器工作集，当前可用内存已刷新。',
+                    );
+                  })
+                  .catch((error: unknown) =>
+                    setMessage(
+                      error instanceof Error ? error.message : '整理失败',
+                    ),
+                  )
+                  .finally(() => setBusy(false));
+              }}
+            >
+              仅整理启动器
+            </button>
+            <button type="button" onClick={() => setConfirmSystem(true)}>
+              系统内存整理
+            </button>
+            {confirmSystem && (
+              <div className="notice" role="alert">
+                <p>
+                  系统整理会影响其他可访问进程，可能导致短暂卡顿。只在内存不足时使用。
+                </p>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setConfirmSystem(false);
+                    setBusy(true);
+                    void service
+                      .optimizeMemory(true)
+                      .then((value) => {
+                        setInfo(value);
+                        setMessage(
+                          '已请求系统整理可访问进程工作集，当前可用内存已刷新。',
+                        );
+                      })
+                      .catch((error: unknown) =>
+                        setMessage(
+                          error instanceof Error
+                            ? error.message
+                            : '系统整理失败',
+                        ),
+                      )
+                      .finally(() => setBusy(false));
+                  }}
+                >
+                  确认整理系统工作集
+                </button>
+                <button type="button" onClick={() => setConfirmSystem(false)}>
+                  取消系统整理
+                </button>
+              </div>
+            )}
+          </details>
         </fieldset>
       </form>
       {message && <p role="status">{message}</p>}

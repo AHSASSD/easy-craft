@@ -499,6 +499,7 @@ mod tests {
                 fabric_version: String::new(),
                 fabric_sha1: String::new(),
                 launch: Default::default(),
+                local: None,
             }],
         )
         .unwrap();

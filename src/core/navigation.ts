@@ -1,4 +1,9 @@
-export const sections = ['library', 'settings', 'download'] as const;
+export const sections = [
+  'library',
+  'settings',
+  'download',
+  'extensions',
+] as const;
 export const settingsCategories = [
   'launch',
   'appearance',

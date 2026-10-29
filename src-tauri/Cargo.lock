@@ -778,6 +778,7 @@ dependencies = [
  "tauri-build",
  "tokio",
  "tokio-util",
+ "toml 0.8.2",
  "uuid",
  "windows",
  "windows-sys 0.61.2",

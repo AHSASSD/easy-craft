@@ -9,12 +9,23 @@ use std::{collections::HashMap, fs, io::Read, path::PathBuf, time::Duration};
 use tokio_util::sync::CancellationToken;
 
 pub async fn versions(host: &Host, cancel: &CancellationToken) -> Result<Vec<Version>> {
+    Ok(version_catalog(host, cancel)
+        .await?
+        .into_iter()
+        .filter(|entry| entry.kind == "release")
+        .collect())
+}
+pub async fn version_catalog(host: &Host, cancel: &CancellationToken) -> Result<Vec<Version>> {
     let value = net::get_json(&host.client, net::MANIFEST, cancel).await?;
     let entries: Vec<Version> =
         serde_json::from_value(value["versions"].clone()).map_err(|_| "官方版本列表格式无效")?;
     Ok(entries
         .into_iter()
-        .filter(|entry| entry.kind == "release" && valid_id(&entry.id) && valid_sha1(&entry.sha1))
+        .filter(|entry| {
+            ["release", "snapshot", "old_beta", "old_alpha"].contains(&entry.kind.as_str())
+                && valid_id(&entry.id)
+                && valid_sha1(&entry.sha1)
+        })
         .collect())
 }
 fn text<'a>(value: &'a Value, field: &str) -> Result<&'a str> {
@@ -38,8 +49,15 @@ pub fn allowed(rules: Option<&Value>) -> Result<bool> {
                 matches &= arch == "x86_64" || arch == "amd64";
             }
             // shortcut: legacy OS-version rules are unsupported; extend only with version-specific integration fixtures.
-            if os.get("version").is_some() && matches {
-                return Err("此旧版 Windows 平台规则尚不支持".into());
+            if let Some(version) = os
+                .get("version")
+                .and_then(Value::as_str)
+                .filter(|_| matches)
+            {
+                // Windows 10 and 11 use NT 10; needed by Minecraft 1.16.5 metadata.
+                if version != "^10\\." {
+                    return Err("该 Windows 版本规则尚不支持".into());
+                }
             }
         }
         if let Some(features) = rule.get("features") {
@@ -77,27 +95,37 @@ pub struct DatapackVersion {
     pub format: crate::content::PackVersion,
 }
 pub fn datapack_version(host: &Host, instance: &Instance) -> Result<DatapackVersion> {
-    let metadata = safe_path(
-        &host.root,
-        &format!(
-            "versions/{}/{}.json",
-            instance.version, instance.manifest_sha1
-        ),
-    )?;
-    if !net::matches(&metadata, &instance.manifest_sha1, None)?
-        || fs::metadata(&metadata)
-            .map_err(|_| "无法读取游戏版本")?
-            .len()
-            > 8 * 1024 * 1024
-    {
-        return Err("官方版本元数据缺失或损坏，请先修复实例".into());
-    }
-    let value: Value = serde_json::from_slice(&fs::read(metadata).map_err(|_| "无法读取游戏版本")?)
-        .map_err(|_| "游戏版本元数据无效")?;
-    let client = safe_path(
-        &host.root,
-        &format!("versions/{}/client.jar", instance.version),
-    )?;
+    let (value, client) = if let Some(local) = &instance.local {
+        let source = crate::local_import::checked_directory(std::path::Path::new(&local.root))?;
+        (
+            crate::local_launch::read_profile(&host.root, instance)?,
+            safe_path(&source, &local.client_jar)?,
+        )
+    } else {
+        let metadata = safe_path(
+            &host.root,
+            &format!(
+                "versions/{}/{}.json",
+                instance.version, instance.manifest_sha1
+            ),
+        )?;
+        if !net::matches(&metadata, &instance.manifest_sha1, None)?
+            || fs::metadata(&metadata)
+                .map_err(|_| "无法读取游戏版本")?
+                .len()
+                > 8 * 1024 * 1024
+        {
+            return Err("官方版本元数据缺失或损坏，请先修复实例".into());
+        }
+        let value: Value =
+            serde_json::from_slice(&fs::read(metadata).map_err(|_| "无法读取游戏版本")?)
+                .map_err(|_| "游戏版本元数据无效")?;
+        let client = safe_path(
+            &host.root,
+            &format!("versions/{}/client.jar", instance.version),
+        )?;
+        (value, client)
+    };
     let hash = value
         .pointer("/downloads/client/sha1")
         .and_then(Value::as_str)
@@ -142,11 +170,35 @@ pub fn datapack_version(host: &Host, instance: &Instance) -> Result<DatapackVers
     Ok(DatapackVersion { world, format })
 }
 pub async fn prepare(host: &Host, entry: &Version, cancel: &CancellationToken) -> Result<Prepared> {
+    prepare_with_sources(host, entry, cancel, &[]).await
+}
+pub async fn prepare_with_sources(
+    host: &Host,
+    entry: &Version,
+    cancel: &CancellationToken,
+    sources: &[PathBuf],
+) -> Result<Prepared> {
+    prepare_sources_mode(host, entry, cancel, sources, false).await
+}
+pub async fn prepare_legacy_pack(
+    host: &Host,
+    entry: &Version,
+    cancel: &CancellationToken,
+) -> Result<Prepared> {
+    prepare_sources_mode(host, entry, cancel, &[], true).await
+}
+async fn prepare_sources_mode(
+    host: &Host,
+    entry: &Version,
+    cancel: &CancellationToken,
+    sources: &[PathBuf],
+    legacy: bool,
+) -> Result<Prepared> {
     if !valid_id(&entry.id) || !valid_sha1(&entry.sha1) {
         return Err("无效版本标识或校验信息".into());
     }
     host.progress("metadata", "校验官方版本元数据", 0, 1);
-    let path = net::download(
+    let path = net::download_from_local(
         &host.client,
         &host.root,
         &Artifact {
@@ -155,6 +207,7 @@ pub async fn prepare(host: &Host, entry: &Version, cancel: &CancellationToken) -
             size: None,
             path: format!("versions/{}/{}.json", entry.id, entry.sha1),
         },
+        sources,
         cancel,
     )
     .await?;
@@ -163,13 +216,23 @@ pub async fn prepare(host: &Host, entry: &Version, cancel: &CancellationToken) -
             .map_err(|_| "版本元数据格式无效")?;
     if text(&metadata, "id")? != entry.id
         || metadata.get("inheritsFrom").is_some()
-        || metadata.get("minecraftArguments").is_some()
-        || !metadata["arguments"]["game"].is_array()
+        || (!(legacy
+            && entry.id == "1.12.2"
+            && metadata["minecraftArguments"]
+                .as_str()
+                .is_some_and(|v| v.len() <= 32768))
+            && (metadata.get("minecraftArguments").is_some()
+                || !metadata["arguments"]["game"].is_array()))
     {
         return Err("V0.3 仅支持现代原版格式，不支持旧式参数或继承版本".into());
     }
     let java_major = metadata["javaVersion"]["majorVersion"]
         .as_u64()
+        .or(if legacy && entry.id == "1.12.2" {
+            Some(8)
+        } else {
+            None
+        })
         .ok_or("缺少 Java 版本要求")? as u32;
     let client = &metadata["downloads"]["client"];
     let mut artifacts = vec![Artifact {
@@ -215,7 +278,8 @@ pub async fn prepare(host: &Host, entry: &Version, cancel: &CancellationToken) -
         size: index["size"].as_u64(),
         path: format!("assets/indexes/{index_id}.json"),
     };
-    let path = net::download(&host.client, &host.root, &index_file, cancel).await?;
+    let path =
+        net::download_from_local(&host.client, &host.root, &index_file, sources, cancel).await?;
     let assets: Value = serde_json::from_slice(&fs::read(path).map_err(|_| "无法读取资源索引")?)
         .map_err(|_| "资源索引格式无效")?;
     if assets["virtual"] == true || assets["map_to_resources"] == true {
@@ -250,7 +314,7 @@ pub async fn prepare(host: &Host, entry: &Version, cancel: &CancellationToken) -
     );
     let mut completed = 0;
     let results = stream::iter(artifacts.into_iter().map(|artifact| async move {
-        net::download(&host.client, &host.root, &artifact, cancel).await
+        net::download_from_local(&host.client, &host.root, &artifact, sources, cancel).await
     }))
     .buffer_unordered(8);
     tokio::pin!(results);
@@ -351,7 +415,7 @@ pub fn command_args(
     token: &str,
     settings: &crate::model::Settings,
 ) -> Result<Vec<String>> {
-    let game = safe_path(&host.root, &format!("instances/{}/game", instance.id))?;
+    let game = instance.game_path(&host.root)?;
     let natives = safe_path(&host.root, &format!("instances/{}/natives", instance.id))?;
     fs::create_dir_all(&game)
         .and_then(|_| fs::create_dir_all(&natives))
@@ -383,12 +447,26 @@ pub fn command_args(
             .into(),
         ),
         ("user_properties", "{}".into()),
-        ("version_name", instance.version.clone()),
+        (
+            "version_name",
+            if instance.local.is_some() {
+                text(&prepared.metadata, "id")?.into()
+            } else {
+                instance.version.clone()
+            },
+        ),
         ("version_type", "release".into()),
         ("game_directory", game.to_string_lossy().into()),
         (
             "assets_root",
-            host.root.join("assets").to_string_lossy().into(),
+            instance
+                .local
+                .as_ref()
+                .map(|v| PathBuf::from(&v.root))
+                .unwrap_or_else(|| host.root.clone())
+                .join("assets")
+                .to_string_lossy()
+                .into(),
         ),
         (
             "assets_index_name",
@@ -399,9 +477,26 @@ pub fn command_args(
         ("launcher_version", "0.3.0".into()),
         ("classpath", classpath),
         ("classpath_separator", ";".into()),
+        ("file_separator", "\\".into()),
+        (
+            "primary_jar_name",
+            instance
+                .local
+                .as_ref()
+                .and_then(|v| std::path::Path::new(&v.client_jar).file_name())
+                .map(|v| v.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "client.jar".into()),
+        ),
         (
             "library_directory",
-            host.root.join("libraries").to_string_lossy().into(),
+            instance
+                .local
+                .as_ref()
+                .map(|v| PathBuf::from(&v.root))
+                .unwrap_or_else(|| host.root.clone())
+                .join("libraries")
+                .to_string_lossy()
+                .into(),
         ),
     ]);
     let mut args = vec![format!("-Xmx{}M", settings.memory_mb)];
@@ -409,11 +504,57 @@ pub fn command_args(
         &prepared.metadata["arguments"]["jvm"],
         &substitutions,
     )?);
+    if let Some(local) = &instance.local {
+        if text(&prepared.metadata, "mainClass")? == "cpw.mods.bootstraplauncher.BootstrapLauncher"
+        {
+            let primary = std::path::Path::new(&local.client_jar)
+                .file_name()
+                .ok_or("基础 JAR 名称无效")?
+                .to_string_lossy();
+            for arg in &mut args {
+                if arg.starts_with("-DignoreList=") {
+                    arg.push(',');
+                    arg.push_str(&primary);
+                }
+            }
+        }
+        if let Some(id) = prepared
+            .metadata
+            .pointer("/logging/client/file/id")
+            .and_then(Value::as_str)
+        {
+            let config = safe_path(
+                std::path::Path::new(&local.root),
+                &format!("assets/log_configs/{id}"),
+            )?;
+            if config.is_file() {
+                args.push(format!(
+                    "-Dlog4j.configurationFile={}",
+                    config.to_string_lossy()
+                ));
+            }
+        }
+    }
+    // Legacy FML's separate progress window hands its GL context to Minecraft.
+    // Start one normal game window instead when the user requests windowed mode.
+    if instance.java_major == 8
+        && text(&prepared.metadata, "mainClass")? == "cpw.mods.modlauncher.Launcher"
+        && instance.launch.window_mode.unwrap_or_default() == crate::model::WindowMode::Windowed
+    {
+        args.retain(|v| !v.starts_with("-Dfml.earlyprogresswindow="));
+        args.push("-Dfml.earlyprogresswindow=false".into());
+    }
     args.push(text(&prepared.metadata, "mainClass")?.into());
-    args.extend(arguments(
-        &prepared.metadata["arguments"]["game"],
-        &substitutions,
-    )?);
+    let mut game_args = arguments(&prepared.metadata["arguments"]["game"], &substitutions)?;
+    match instance.launch.window_mode.unwrap_or_default() {
+        crate::model::WindowMode::Windowed => game_args.retain(|v| v != "--fullscreen"),
+        crate::model::WindowMode::Fullscreen => {
+            game_args.retain(|v| v != "--fullscreen");
+            game_args.push("--fullscreen".into());
+        }
+        crate::model::WindowMode::Inherit => {}
+    }
+    args.extend(game_args);
     Ok(args)
 }
 #[derive(serde::Serialize)]

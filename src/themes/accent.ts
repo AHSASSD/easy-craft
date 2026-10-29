@@ -60,11 +60,30 @@ export function accentStyle(
   if (color === undefined) return {};
   if (!validAccent(color)) throw new Error('强调色须为 #RRGGBB');
   const light = theme === 'grass';
-  const panel = light ? '#f9fbfa' : '#1c2420';
+  const panel = light ? '#f8faf9' : '#191f23';
   const tinted = mix(panel, color, light ? 0.1 : 0.14);
   const surfaces = light
-    ? ['#edf1ef', '#ffffff', panel, '#eaf2e8', tinted]
-    : ['#171d1b', '#222b26', panel, '#2d3931', tinted];
+    ? [
+        '#edf1ef',
+        '#ffffff',
+        '#f9fbfa',
+        '#eaf2e8',
+        '#f2f5f4',
+        panel,
+        '#e8efec',
+        tinted,
+      ]
+    : [
+        '#171d1b',
+        '#222b26',
+        '#1c2420',
+        '#2d3931',
+        '#1c2125',
+        '#252c30',
+        panel,
+        '#2b343a',
+        tinted,
+      ];
   const foreground = readable(color, surfaces, light ? '#000000' : '#ffffff');
   const action = readable(color, ['#ffffff'], '#000000');
   return {

@@ -5,37 +5,56 @@ import {
   useState,
   useSyncExternalStore,
 } from 'react';
+import {
+  Archive,
+  ArrowRight,
+  Download,
+  FolderOpen,
+  LoaderCircle,
+  PackageCheck,
+} from 'lucide-react';
 import type {
   NativeService,
   PackPreview,
   PackInstallPlan,
 } from '../core/native-contracts';
+
 export function PackInspector({
   service,
   onlineSource,
   incomingFile,
   onFileConsumed,
+  initialPreview,
+  onStarted,
 }: {
   service: NativeService;
   onlineSource?: PackInstallPlan['origin'];
   incomingFile?: File | null;
   onFileConsumed?(): void;
+  initialPreview?: PackPreview;
+  onStarted?(): void;
 }) {
   const { available, state } = useSyncExternalStore(
     service.subscribe,
     service.snapshot,
   );
-  const [preview, setPreview] = useState<PackPreview | null>(null);
+  const [preview, setPreview] = useState<PackPreview | null>(
+    initialPreview ?? null,
+  );
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
-  const [name, setName] = useState('');
+  const [name, setName] = useState(
+    Array.from(initialPreview?.install?.name ?? '')
+      .slice(0, 60)
+      .join(''),
+  );
   const [selected, setSelected] = useState<string[]>([]);
   const [message, setMessage] = useState('');
   const locked = busy || state?.task.status === 'running';
-  const show = useCallback((value: PackPreview | null) => {
+  const show = useCallback((value: PackPreview) => {
     setPreview(value);
     setName(
-      Array.from(value?.install?.name ?? '')
+      Array.from(value.install?.name ?? '')
         .slice(0, 60)
         .join(''),
     );
@@ -44,32 +63,29 @@ export function PackInspector({
   const inspect = useCallback(
     async (file?: File, native = false, online = false) => {
       if (!file && !native && !online) return;
-      setPreview(null);
       setError('');
       setMessage('');
       setBusy(true);
       try {
+        let value: PackPreview | null;
         if (online && onlineSource) {
-          show(
-            await service.previewOnlinePack(
-              onlineSource.project,
-              onlineSource.version,
-              onlineSource.filename,
-            ),
+          value = await service.previewOnlinePack(
+            onlineSource.project,
+            onlineSource.version,
+            onlineSource.filename,
           );
-          return;
+        } else if (native) {
+          value = await service.pickPack();
+        } else {
+          if (!file) return;
+          if (
+            !/\.(zip|mrpack)$/i.test(file.name) ||
+            file.size > 512 * 1024 * 1024
+          )
+            throw new Error('请选择不超过 512 MiB 的 ZIP 或 MRPACK 文件');
+          value = await service.previewPackFile(file);
         }
-        if (native) {
-          show(await service.pickPack());
-          return;
-        }
-        if (!file) return;
-        if (
-          !/\.(zip|mrpack)$/i.test(file.name) ||
-          file.size > 512 * 1024 * 1024
-        )
-          throw new Error('请选择不超过 512 MiB 的 ZIP 或 MRPACK 文件');
-        show(await service.previewPackFile(file));
+        if (value) show(value);
       } catch (error) {
         setError(error instanceof Error ? error.message : '检查失败');
       } finally {
@@ -89,10 +105,38 @@ export function PackInspector({
     onFileConsumed?.();
     void inspect(incomingFile);
   }, [incomingFile, onFileConsumed, inspect]);
+  const plan = preview?.install;
+  const files =
+    plan?.files.filter(
+      (file) => !file.optional || selected.includes(file.path),
+    ) ?? [];
+  const optional = plan?.files.filter((file) => file.optional) ?? [];
+  const platformCount = plan?.curseFiles?.length ?? 0;
+  async function install() {
+    if (!plan) return;
+    setBusy(true);
+    setError('');
+    setMessage('');
+    try {
+      await service.installPack(plan.token, name, selected);
+      setPreview(null);
+      setMessage('整合包安装任务已开始，请查看底部任务状态。');
+      onStarted?.();
+    } catch (error) {
+      setError(
+        error instanceof Error
+          ? error.message
+          : '整合包安装未开始，请重新检查文件',
+      );
+    } finally {
+      setBusy(false);
+    }
+  }
   return (
     <section
-      className="card"
+      className="pack-inspector"
       aria-label="整合包安全检查"
+      aria-busy={busy}
       onDragOver={(event) => event.preventDefault()}
       onDrop={(event) => {
         event.preventDefault();
@@ -104,51 +148,42 @@ export function PackInspector({
         if (available && !locked) void inspect(event.dataTransfer.files[0]);
       }}
     >
-      <h2>整合包内容预览</h2>
-      <p>
-        选择或拖入 ZIP / MRPACK，检查内部目录、依赖和下载来源。支持的原版/Fabric
-        整合包可以预览变更后新建实例；其他 ZIP 仅检查，不覆盖现有游戏。
-      </p>
-      {onlineSource && (
-        <div className="card">
-          <p>选定归档：{onlineSource.filename}</p>
-          <p className="hint">
-            项目 {onlineSource.project} · 版本 {onlineSource.version}
-            。先下载并检查内容，再确认新建实例。
+      {!preview && !message && (
+        <div className="pack-dropzone">
+          <span className="pack-archive-icon">
+            <Archive size={30} />
+          </span>
+          <h3>把整合包带到 Easy Craft</h3>
+          <p>
+            {onlineSource
+              ? onlineSource.filename
+              : '拖入 ZIP / MRPACK，或从电脑选择文件'}
           </p>
-          <button
-            disabled={!available || locked}
-            onClick={() => void inspect(undefined, false, true)}
-          >
-            下载此版本并检查整合包
-          </button>
+          {onlineSource ? (
+            <button
+              className="primary"
+              disabled={!available || locked}
+              onClick={() => void inspect(undefined, false, true)}
+            >
+              <Download size={16} /> 下载此版本并检查整合包
+            </button>
+          ) : (
+            <button
+              className="primary"
+              disabled={!available || locked}
+              onClick={() => void inspect(undefined, true)}
+              aria-label="从电脑选择 ZIP / MRPACK（最大 512 MiB）"
+            >
+              <FolderOpen size={16} /> 选择整合包
+            </button>
+          )}
+          <small>单个文件最大 512 MiB · 安装前可查看内容</small>
         </div>
       )}
-      <button
-        disabled={!available || locked}
-        onClick={() => void inspect(undefined, true)}
-      >
-        从电脑选择 ZIP / MRPACK（最大 512 MiB）
-      </button>
-      <details>
-        <summary>拖放与文件选择（最大 512 MiB）</summary>
-        <label>
-          选择整合包
-          <input
-            aria-label="选择整合包"
-            type="file"
-            accept=".zip,.mrpack"
-            disabled={!available || locked}
-            onChange={(event) => {
-              void inspect(event.target.files?.[0]);
-              event.target.value = '';
-            }}
-          />
-        </label>
-      </details>
       {busy && (
-        <p role="status">
-          正在获取或检查归档；联网进度与取消操作可在底部任务中查看…
+        <p className="pack-status" role="status">
+          <LoaderCircle size={16} />{' '}
+          正在处理整合包，进度与取消可在底部任务中查看…
         </p>
       )}
       {error && (
@@ -156,139 +191,142 @@ export function PackInspector({
           {error}
         </p>
       )}
-      {message && <p role="status">{message}</p>}
+      {message && (
+        <p role="status" className="pack-status">
+          <PackageCheck size={20} />
+          {message}
+        </p>
+      )}
       {preview && (
         <>
-          <h3>
-            {preview.name} · {preview.kind}
-          </h3>
-          <p>
-            {preview.files} 个归档条目 · 展开大小{' '}
-            {(preview.expandedBytes / 1024 / 1024).toFixed(1)} MB ·{' '}
-            {preview.downloads} 个待下载文件
-          </p>
-          <ul>
-            {preview.dependencies.map((item) => (
-              <li key={item}>{item}</li>
-            ))}
-          </ul>
-          <details>
-            <summary>内部路径（最多 30 项）</summary>
-            <pre className="diagnostics">{preview.paths.join('\n')}</pre>
-          </details>
-          {preview.warnings.map((warning) => (
-            <p key={warning} className="hint">
-              {warning}
-            </p>
-          ))}
-          {preview.install && (
-            <section className="card" aria-label="整合包安装变更预览">
-              <h3>安装到全新实例</h3>
-              {preview.install.origin && (
-                <p className="hint">
-                  归档来源：Modrinth {preview.install.origin.project} /{' '}
-                  {preview.install.origin.version} ·{' '}
-                  {preview.install.origin.filename}
-                </p>
+          <div className="pack-summary">
+            <span className="pack-archive-icon">
+              <Archive size={28} />
+            </span>
+            <div className="pack-summary-title">
+              <small>已读取整合包</small>
+              <h3>
+                {preview.name} · {preview.kind}
+              </h3>
+              {plan && (
+                <div className="pack-tags">
+                  <span>Minecraft {plan.gameVersion}</span>
+                  <span>
+                    {plan.forgeVersion
+                      ? 'Forge ' + plan.forgeVersion
+                      : plan.fabricVersion
+                        ? 'Fabric ' + plan.fabricVersion
+                        : '原版'}
+                  </span>
+                  <span>整合包 {plan.packVersion}</span>
+                </div>
               )}
-              <p>
-                Minecraft {preview.install.gameVersion} ·{' '}
-                {preview.install.fabricVersion
-                  ? `Fabric ${preview.install.fabricVersion}`
-                  : '原版'}{' '}
-                · 整合包 {preview.install.packVersion}
-              </p>
-              <label>
-                新实例名称
-                <input
-                  aria-label="整合包新实例名称"
-                  value={name}
-                  maxLength={120}
-                  disabled={locked}
-                  onChange={(event) => setName(event.target.value)}
-                />
-              </label>
-              <p>
-                {
-                  preview.install.files.filter(
-                    (file) => !file.optional || selected.includes(file.path),
-                  ).length
-                }{' '}
-                个文件 ·{' '}
-                {(
-                  preview.install.files
-                    .filter(
-                      (file) => !file.optional || selected.includes(file.path),
-                    )
-                    .reduce((size, file) => size + file.size, 0) /
-                  1024 /
-                  1024
-                ).toFixed(1)}{' '}
-                MiB（不含游戏基础资源）
-              </p>
-              {preview.install.files
-                .filter((file) => file.optional)
-                .map((file) => (
-                  <label className="toggle-row" key={file.path}>
-                    <span>可选：{file.path}</span>
-                    <input
-                      type="checkbox"
-                      aria-label={`安装可选文件 ${file.path}`}
-                      disabled={locked}
-                      checked={selected.includes(file.path)}
-                      onChange={(event) =>
-                        setSelected(
-                          event.target.checked
-                            ? [...selected, file.path]
-                            : selected.filter((path) => path !== file.path),
-                        )
-                      }
-                    />
-                  </label>
-                ))}
-              <details>
-                <summary>全部文件变更</summary>
-                <pre className="diagnostics">
-                  {preview.install.files
-                    .map(
-                      (file) =>
-                        `${file.optional && !selected.includes(file.path) ? '跳过' : '新增'} ${file.path} · ${file.source}`,
-                    )
-                    .join('\n')}
-                </pre>
-              </details>
-              <p className="hint">
-                下载并校验完成后才加入游戏库。安装过程中不执行包内脚本；首次启动仍需有效的游戏账户与匹配的
-                Java。
-              </p>
+            </div>
+            <button
+              className="pack-change-file"
+              disabled={!available || locked}
+              onClick={() => void inspect(undefined, true)}
+              aria-label="从电脑选择 ZIP / MRPACK（最大 512 MiB）"
+            >
+              更换文件
+            </button>
+          </div>
+          <div className="pack-facts">
+            <div>
+              <small>{platformCount ? '必需在线资源' : '待安装文件'}</small>
+              <strong>
+                {platformCount || files.length} <span>项</span>
+              </strong>
+            </div>
+            <div>
+              <small>{platformCount ? '包内覆盖内容' : '归档展开大小'}</small>
+              <strong>
+                {(preview.expandedBytes / 1024 / 1024).toFixed(1)}{' '}
+                <span>MiB</span>
+              </strong>
+            </div>
+            <div>
+              <small>安装方式</small>
+              <strong>{plan ? '独立实例' : '仅查看'}</strong>
+            </div>
+          </div>
+          {plan ? (
+            <>
+              <div
+                className="pack-install-form"
+                role="region"
+                aria-label="整合包安装变更预览"
+              >
+                <label className="field-label">
+                  实例名称
+                  <input
+                    aria-label="整合包新实例名称"
+                    value={name}
+                    maxLength={120}
+                    disabled={locked}
+                    onChange={(event) => setName(event.target.value)}
+                  />
+                </label>
+                <div className="pack-destination">
+                  <FolderOpen size={17} />
+                  <div>
+                    <strong>安装到当前游戏库</strong>
+                    <p>{state?.dataRoot ?? '当前启动器数据目录'}</p>
+                  </div>
+                </div>
+                {plan.recommendedMemoryMb && (
+                  <p className="pack-memory">
+                    建议内存 {(plan.recommendedMemoryMb / 1024).toFixed(1)}{' '}
+                    GiB。
+                  </p>
+                )}
+              </div>
+              {optional.length > 0 && (
+                <details className="pack-details">
+                  <summary>可选内容 · {optional.length} 项</summary>
+                  {optional.map((file) => (
+                    <label className="toggle-row" key={file.path}>
+                      <span>{file.path}</span>
+                      <input
+                        type="checkbox"
+                        aria-label={'安装可选文件 ' + file.path}
+                        disabled={locked}
+                        checked={selected.includes(file.path)}
+                        onChange={(event) =>
+                          setSelected(
+                            event.target.checked
+                              ? [...selected, file.path]
+                              : selected.filter((path) => path !== file.path),
+                          )
+                        }
+                      />
+                    </label>
+                  ))}
+                </details>
+              )}
+            </>
+          ) : (
+            <p className="notice">
+              此归档当前仅支持内容预览，尚不能直接创建可启动实例。
+            </p>
+          )}
+          {plan && (
+            <div className="pack-install-footer">
+              <p>安装到独立实例</p>
               <button
                 className="primary"
-                disabled={!available || locked || !name.trim()}
-                onClick={() => {
-                  const plan = preview.install;
-                  if (!plan) return;
-                  setBusy(true);
-                  setError('');
-                  setMessage('');
-                  void service
-                    .installPack(plan.token, name, selected)
-                    .then(() => {
-                      setPreview(null);
-                      setMessage('整合包安装任务已开始，请查看底部任务状态。');
-                    })
-                    .catch((error) =>
-                      setError(
-                        error instanceof Error
-                          ? error.message
-                          : '整合包安装未开始，请重新检查文件',
-                      ),
-                    )
-                    .finally(() => setBusy(false));
-                }}
+                disabled={
+                  !available ||
+                  locked ||
+                  !name.trim() ||
+                  Array.from(name).length > 60
+                }
+                aria-label="确认变更并安装整合包"
+                onClick={() => void install()}
               >
-                确认变更并安装整合包
+                <Download size={17} /> 开始安装 <ArrowRight size={16} />
               </button>
-            </section>
+            </div>
           )}
         </>
       )}

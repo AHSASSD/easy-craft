@@ -2,7 +2,8 @@ param(
     [Parameter(Mandatory=$true)][int]$AppProcessId,
     [Parameter(Mandatory=$true)][ValidateRange(800,1920)][int]$Width,
     [Parameter(Mandatory=$true)][ValidateRange(540,1080)][int]$Height,
-    [ValidateSet('debug','release')][string]$BuildProfile = 'debug'
+    [ValidateSet('debug','release')][string]$BuildProfile = 'debug',
+    [string]$Screenshot
 )
 $ErrorActionPreference = 'Stop'
 $projectRoot = Split-Path $PSScriptRoot -Parent
@@ -13,6 +14,8 @@ Add-Type -TypeDefinition @'
 using System;
 using System.Runtime.InteropServices;
 public static class LauncherWindowSize {
+  [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr window);
+  [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
   [StructLayout(LayoutKind.Sequential)] public struct Rect { public int Left, Top, Right, Bottom; }
   [DllImport("user32.dll")] public static extern IntPtr SetThreadDpiAwarenessContext(IntPtr value);
   [DllImport("user32.dll")] public static extern uint GetDpiForWindow(IntPtr window);
@@ -46,3 +49,21 @@ do {
 } while (($clientRect.Right -ne $targetClientWidth -or $clientRect.Bottom -ne $targetClientHeight) -and [DateTime]::UtcNow -lt $deadline)
 if ($clientRect.Right -ne $targetClientWidth -or $clientRect.Bottom -ne $targetClientHeight) { throw 'Workspace window did not reach the requested client size.' }
 [pscustomobject]@{ width=$Width; height=$Height; clientWidth=$clientRect.Right; clientHeight=$clientRect.Bottom; dpi=$windowDpi } | ConvertTo-Json -Compress
+if ($Screenshot) {
+    $outputRoot = [IO.Path]::GetFullPath((Join-Path $projectRoot 'output/playwright')) + [IO.Path]::DirectorySeparatorChar
+    $capturePath = [IO.Path]::GetFullPath($Screenshot)
+    if (!$capturePath.StartsWith($outputRoot, [StringComparison]::OrdinalIgnoreCase)) { throw 'Capture must stay within workspace Playwright output.' }
+    [void][LauncherWindowSize]::SetForegroundWindow($windowHandle)
+    Start-Sleep -Milliseconds 200
+    [uint32]$foregroundOwner = 0
+    [void][LauncherWindowSize]::GetWindowThreadProcessId([LauncherWindowSize]::GetForegroundWindow(), [ref]$foregroundOwner)
+    if ($foregroundOwner -ne $AppProcessId) { throw 'Workspace launcher is not foreground; no screen pixels captured.' }
+    if (![LauncherWindowSize]::GetWindowRect($windowHandle, [ref]$windowRect)) { throw 'Could not measure capture region.' }
+    Add-Type -AssemblyName System.Drawing
+    $bitmap = New-Object Drawing.Bitmap(($windowRect.Right-$windowRect.Left),($windowRect.Bottom-$windowRect.Top))
+    $graphics = [Drawing.Graphics]::FromImage($bitmap)
+    try {
+        $graphics.CopyFromScreen($windowRect.Left,$windowRect.Top,0,0,$bitmap.Size)
+        $bitmap.Save($capturePath,[Drawing.Imaging.ImageFormat]::Png)
+    } finally { $graphics.Dispose(); $bitmap.Dispose() }
+}

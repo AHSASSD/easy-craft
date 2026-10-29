@@ -79,10 +79,13 @@ test('real library is the default and remains usable at minimum size', async ({
   await page.goto('/');
   await expect(page.locator('.library-instance')).toHaveCount(0);
   await expect(
-    page.getByRole('button', { name: '启动游戏', exact: true }),
-  ).toBeDisabled();
+    page.getByRole('button', { name: '安装游戏', exact: true }),
+  ).toBeVisible();
+  await expect(page.getByRole('tablist', { name: '实例工作区' })).toHaveCount(
+    0,
+  );
   await expect(page.getByRole('img', { name: '默认玩家头像' })).toBeVisible();
-  await expect(page.getByRole('navigation').getByRole('button')).toHaveCount(3);
+  await expect(page.getByRole('navigation').getByRole('button')).toHaveCount(4);
   await page
     .getByRole('navigation')
     .getByRole('button', { name: '设置', exact: true })
@@ -112,7 +115,6 @@ test('real library is the default and remains usable at minimum size', async ({
     .getByRole('navigation')
     .getByRole('button', { name: '游戏库', exact: true })
     .click();
-  await page.getByRole('tab', { name: '存档', exact: true }).click();
   await page.setViewportSize({ width: 800, height: 540 });
   expect(
     (await page.locator('.library-main').boundingBox())!.width,
@@ -146,6 +148,35 @@ test('real library is the default and remains usable at minimum size', async ({
   await page.keyboard.press('Escape');
   await expect(page.getByRole('dialog')).toHaveCount(0);
 });
+test('extensions expose actual built-ins and layout choice persists without claiming a community store', async ({
+  page,
+}) => {
+  await page.goto('/');
+  const root = page.locator('.native-library');
+  await page
+    .getByRole('navigation')
+    .getByRole('button', { name: '扩展', exact: true })
+    .click();
+  await expect(
+    page.getByRole('heading', { name: '官方工作区布局' }),
+  ).toBeVisible();
+  await page.getByRole('button', { name: '紧凑工作区', exact: true }).click();
+  await expect(root).toHaveAttribute('data-layout', 'compact');
+  await page.reload();
+  await expect(root).toHaveAttribute('data-layout', 'compact');
+  await page.getByRole('button', { name: '发现插件', exact: true }).click();
+  await expect(
+    page.getByRole('heading', { name: '社区插件，敬请期待' }),
+  ).toBeVisible();
+  await page.screenshot({ path: 'output/playwright/extensions-discover.png' });
+  await page.getByRole('button', { name: '查看已安装', exact: true }).click();
+  await page
+    .getByRole('button', { name: '恢复默认布局与栏宽', exact: true })
+    .click();
+  await expect(root).toHaveAttribute('data-layout', 'default');
+  await page.screenshot({ path: 'output/playwright/extensions-installed.png' });
+});
+
 test('appearance mask and reduced motion persist and honor the system preference', async ({
   page,
 }) => {
@@ -177,13 +208,13 @@ test('appearance mask and reduced motion persist and honor the system preference
   );
   await expect(page.getByLabel('减少动态效果', { exact: true })).toBeChecked();
   const saved = await preview.evaluate(
-    (element) => element.style.backgroundImage,
+    (element) => getComputedStyle(element).backgroundImage,
   );
   await page
     .getByRole('navigation')
     .getByRole('button', { name: '游戏库', exact: true })
     .click();
-  await expect(page.locator('.library-hero')).toHaveCSS(
+  await expect(page.locator('.library-welcome')).toHaveCSS(
     'background-image',
     saved,
   );
@@ -308,9 +339,7 @@ test('rail labels, selected categories and secondary text meet contrast targets 
                 root.getPropertyValue(name),
               ),
           ),
-          ...active.backgroundImage
-            .match(/rgba?\([^)]+\)/g)!
-            .map((color) => contrast(active.color, color)),
+          contrast(active.color, active.backgroundColor),
           contrast(category.color, category.backgroundColor),
           contrast(breadcrumb.color, breadcrumb.backgroundColor),
           contrast(inactive.color, navigation.backgroundColor),
@@ -338,14 +367,14 @@ test('custom accent previews, persists across themes and reset removes all inlin
   const root = page.locator('.native-library');
   const gradient = await page
     .locator('.global-rail .active')
-    .evaluate((element) => getComputedStyle(element).backgroundImage);
+    .evaluate((element) => getComputedStyle(element).backgroundColor);
   await expect(
     page.getByRole('button', { name: '恢复默认强调色', exact: true }),
   ).toBeDisabled();
   await page.getByLabel('自定义强调色', { exact: true }).fill('#1488ee');
   await expect(root).toHaveAttribute('data-custom-accent', 'true');
   await expect(page.locator('.global-rail .active')).not.toHaveCSS(
-    'background-image',
+    'background-color',
     gradient,
   );
   const light = await root.evaluate((element) =>
@@ -645,9 +674,12 @@ test('instance operations, resize and theme survive refresh', async ({
   await page.getByRole('textbox', { name: '实例名称' }).fill('我的 Fabric');
   await page.getByRole('button', { name: '保存演示资料' }).click();
   const divider = page.getByRole('separator');
+  const resizedWidth = String(
+    Number(await divider.getAttribute('aria-valuenow')) + 10,
+  );
   await divider.focus();
   await page.keyboard.press('ArrowRight');
-  await expect(divider).toHaveAttribute('aria-valuenow', '310');
+  await expect(divider).toHaveAttribute('aria-valuenow', resizedWidth);
   await page
     .getByRole('navigation')
     .getByRole('button', { name: '设置', exact: true })
@@ -656,7 +688,7 @@ test('instance operations, resize and theme survive refresh', async ({
   await page.reload();
   await expect(page.locator('.app')).toHaveAttribute('data-theme', 'grass');
   await expect(page.locator('.summary-info h3')).toHaveText('我的 Fabric');
-  await expect(divider).toHaveAttribute('aria-valuenow', '310');
+  await expect(divider).toHaveAttribute('aria-valuenow', resizedWidth);
   expect(errors).toEqual([]);
 });
 test('minimum desktop size and keyboard dialog work', async ({ page }) => {

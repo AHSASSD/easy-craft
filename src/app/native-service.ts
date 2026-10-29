@@ -4,6 +4,7 @@ import type {
   JavaInfo,
   MemoryInfo,
   PackPreview,
+  LocalVersionScan,
   NativeService,
   NativeSnapshot,
   NativeState,
@@ -22,6 +23,7 @@ import type {
   CacheReport,
   BackupCleanupPlan,
   BackupCleanupReport,
+  ModCheck,
 } from '../core/native-contracts';
 import { isRecord } from '../core/services';
 const string = (value: unknown): value is string => typeof value === 'string';
@@ -166,6 +168,20 @@ function validPackPlan(value: unknown): boolean {
     !string(value.gameVersion) ||
     !/^[A-Za-z0-9._-]{1,99}$/.test(value.gameVersion) ||
     !bounded(value.fabricVersion, 100) ||
+    (value.forgeVersion !== undefined && !bounded(value.forgeVersion, 100)) ||
+    (value.recommendedMemoryMb != null &&
+      (!integer(value.recommendedMemoryMb) ||
+        value.recommendedMemoryMb < 512 ||
+        value.recommendedMemoryMb > 16384)) ||
+    (value.curseFiles !== undefined &&
+      (!Array.isArray(value.curseFiles) ||
+        value.curseFiles.length > 1000 ||
+        !value.curseFiles.every(
+          (pair: unknown) =>
+            Array.isArray(pair) &&
+            pair.length === 2 &&
+            pair.every((id: unknown) => integer(id) && id > 0),
+        ))) ||
     !string(value.archiveSha512) ||
     !/^[a-f0-9]{128}$/.test(value.archiveSha512) ||
     (value.origin !== undefined &&
@@ -242,6 +258,7 @@ export function validResourcePlan(value: unknown): value is ResourcePlan {
     isRecord(value) &&
     string(value.token) &&
     /^[a-f0-9-]{36}$/.test(value.token) &&
+    (value.local === undefined || typeof value.local === 'boolean') &&
     bounded(value.instanceId, 128) &&
     bounded(value.gameVersion, 100) &&
     (value.worldId === undefined ||
@@ -260,6 +277,11 @@ export function validResourcePlan(value: unknown): value is ResourcePlan {
     Array.isArray(value.warnings) &&
     value.warnings.length <= 130 &&
     value.warnings.every((w: unknown) => bounded(w, 2048)) &&
+    (value.preflight == null ||
+      (isRecord(value.preflight) &&
+        value.preflight.instanceId === value.instanceId &&
+        cacheWarnings(value.preflight.issues) &&
+        cacheWarnings(value.preflight.unchecked))) &&
     Array.isArray(value.files) &&
     value.files.length > 0 &&
     value.files.length <= 64 &&
@@ -288,13 +310,23 @@ export function validResourceDetail(value: unknown): value is ResourceDetail {
     bounded(value.description, 4096) &&
     bounded(value.body, 256 * 1024) &&
     Array.isArray(value.versions) &&
-    value.versions.length <= 1000 &&
+    value.versions.length <= 10000 &&
     value.versions.every(
       (version: unknown) =>
         isRecord(version) &&
         resourceId(version.id) &&
         bounded(version.name, 512) &&
         bounded(version.number, 256) &&
+        (version.downloads == null || integer(version.downloads)) &&
+        (version.published == null || bounded(version.published, 64)) &&
+        (version.versionType == null ||
+          ['release', 'beta', 'alpha'].includes(
+            version.versionType as string,
+          )) &&
+        (version.gameVersions === undefined ||
+          (Array.isArray(version.gameVersions) &&
+            version.gameVersions.length <= 512 &&
+            version.gameVersions.every((v: unknown) => bounded(v, 128)))) &&
         bounded(version.environment, 64) &&
         Array.isArray(version.loaders) &&
         version.loaders.length <= 512 &&
@@ -389,7 +421,14 @@ function validMemory(value: unknown): value is MemoryInfo {
 export function validLaunchOverrides(value: unknown): boolean {
   return (
     isRecord(value) &&
-    Object.keys(value).every((key) => ['javaPath', 'memory'].includes(key)) &&
+    Object.keys(value).every((key) =>
+      ['javaPath', 'memory', 'gameIsolation', 'windowMode'].includes(key),
+    ) &&
+    (value.gameIsolation === undefined ||
+      typeof value.gameIsolation === 'boolean') &&
+    (value.windowMode === undefined ||
+      (typeof value.windowMode === 'string' &&
+        ['windowed', 'fullscreen', 'inherit'].includes(value.windowMode))) &&
     (value.javaPath === undefined ||
       (string(value.javaPath) &&
         value.javaPath.trim().length > 0 &&
@@ -427,6 +466,8 @@ export function validNativeState(value: unknown): value is NativeState {
     typeof settings.optimizeMemory === 'boolean' &&
     ['microsoft', 'offline'].includes(settings.launchMode as string) &&
     string(settings.offlineName) &&
+    (settings.isolateNewInstances === undefined ||
+      typeof settings.isolateNewInstances === 'boolean') &&
     (settings.offlineName === '' ||
       /^[A-Za-z0-9_]{3,16}$/.test(settings.offlineName)) &&
     (settings.launchMode !== 'offline' || settings.offlineName !== '') &&
@@ -446,6 +487,18 @@ export function validNativeState(value: unknown): value is NativeState {
         string(item.manifestSha1) &&
         /^[0-9a-f]{40}$/i.test(item.manifestSha1) &&
         integer(item.javaMajor) &&
+        (item.local === undefined ||
+          (isRecord(item.local) &&
+            bounded(item.local.root, 32768) &&
+            bounded(item.local.versionDirectory, 32768) &&
+            bounded(item.local.gameDirectory, 32768) &&
+            bounded(item.local.clientJar, 32768) &&
+            bounded(item.local.sourceKey, 64) &&
+            /^[a-f0-9]{64}$/.test(item.local.sourceKey) &&
+            ['vanilla', 'fabric', 'forge', 'neoforge'].includes(
+              item.local.loader as string,
+            ) &&
+            bounded(item.local.loaderVersion, 256))) &&
         string(item.fabricVersion) &&
         string(item.fabricSha1) &&
         (item.launch === undefined || validLaunchOverrides(item.launch)) &&
@@ -459,6 +512,19 @@ export function validNativeState(value: unknown): value is NativeState {
       task.status,
     ) &&
     string(task.phase) &&
+    (task.pendingInstance == null || bounded(task.pendingInstance, 120)) &&
+    (task.steps === undefined ||
+      (Array.isArray(task.steps) &&
+        task.steps.length <= 32 &&
+        task.steps.every(
+          (step: unknown) =>
+            isRecord(step) &&
+            bounded(step.phase, 128) &&
+            bounded(step.message, 8192) &&
+            integer(step.completed) &&
+            integer(step.total) &&
+            typeof step.done === 'boolean',
+        ))) &&
     string(task.message) &&
     integer(task.completed) &&
     integer(task.total) &&
@@ -481,7 +547,13 @@ export function createNativeService(
   const listeners = new Set<() => void>();
   let stopped = false;
   let refreshing: Promise<void> | null = null;
+  let releaseVersions:
+    { expires: number; value: Promise<string[]> } | undefined;
   let avatarSequence = 0;
+  let pendingModInstall = false;
+  const modRequests = new Map<string, Promise<ModCheck>>();
+  let newestModContext = '';
+  let modQueue: Promise<unknown> = Promise.resolve();
   const identity = (state: NativeState | null) =>
     JSON.stringify([
       state?.settings.launchMode,
@@ -529,8 +601,19 @@ export function createNativeService(
         value = await request('native_status');
         if (!validNativeState(value)) throw new Error('原生状态格式无效');
       }
+      const modInstallFinished =
+        pendingModInstall && value.task.status !== 'running';
+      if (modInstallFinished) pendingModInstall = false;
       update({
         available,
+        modRevision:
+          (snapshot.modRevision ?? 0) +
+          (modInstallFinished ||
+          (snapshot.state?.task.status === 'running' &&
+            value.task.status !== 'running' &&
+            value.task.phase === 'resources-committed')
+            ? 1
+            : 0),
         state: value as NativeState,
         error: snapshot.error,
         avatar:
@@ -549,7 +632,17 @@ export function createNativeService(
   }
   const operation = async (name: string, args?: Record<string, unknown>) => {
     await request(name, args);
-    update({ ...snapshot, error: '' });
+    if (name === 'native_resource_install') pendingModInstall = true;
+    update({
+      ...snapshot,
+      error: '',
+      modRevision:
+        (snapshot.modRevision ?? 0) +
+        (name === 'native_content_toggle' ||
+        (name === 'native_content_import' && args?.kind === 'mods')
+          ? 1
+          : 0),
+    });
     await refresh(true);
   };
   const avatar = async () => {
@@ -578,7 +671,9 @@ export function createNativeService(
   async function uploadFile(
     file: File,
     target:
-      { kind: 'pack' } | { kind: 'content'; id: string; contentKind: string },
+      | { kind: 'pack' }
+      | { kind: 'content'; id: string; contentKind: string }
+      | { kind: 'modPreview'; id: string },
   ): Promise<unknown> {
     if (!file.size || file.size > 512 * 1024 * 1024)
       throw new Error('请选择不超过 512 MiB 的非空文件');
@@ -609,7 +704,12 @@ export function createNativeService(
           bytes: Array.from(bytes),
         });
       }
-      return await request('native_file_upload_finish', { token });
+      return await request(
+        target.kind === 'modPreview'
+          ? 'native_mod_upload_finish'
+          : 'native_file_upload_finish',
+        { token },
+      );
     } finally {
       if (token)
         await request('native_file_upload_abort', { token }).catch(() => {});
@@ -626,14 +726,90 @@ export function createNativeService(
       contentEntries(await request('native_world_datapacks', { id, worldId })),
     openDatapacks: (id, worldId) =>
       operation('native_world_datapacks_open', { id, worldId }),
-    planResources: async (id, kind, version, filename, worldId) => {
-      const value = await request('native_resource_plan', {
-        id,
-        kind,
-        version,
-        filename,
-        worldId: worldId ?? null,
-      });
+    fabricGames: async () => {
+      const value = await request('native_fabric_games');
+      if (
+        !Array.isArray(value) ||
+        value.length > 10000 ||
+        !value.every(
+          (game) =>
+            typeof game === 'string' && /^[A-Za-z0-9._-]{1,99}$/.test(game),
+        )
+      )
+        throw new Error('Fabric 游戏版本响应无效');
+      return value as string[];
+    },
+    fabricCatalog: async (version) => {
+      const value = await request('native_fabric_catalog', { version });
+      const valid = (v: unknown) =>
+        typeof v === 'string' && /^[A-Za-z0-9._+-]{1,100}$/.test(v);
+      if (
+        !isRecord(value) ||
+        !Array.isArray(value.versions) ||
+        value.versions.length > 5000 ||
+        !value.versions.every(valid) ||
+        (value.recommended !== null && !valid(value.recommended))
+      )
+        throw new Error('Fabric 加载器目录无效');
+      return value as { versions: string[]; recommended: string | null };
+    },
+    forgeVersions: async (game) => {
+      const value = await request('native_forge_versions', { game });
+      if (
+        !isRecord(value) ||
+        !Array.isArray(value.versions) ||
+        value.versions.length > 5000 ||
+        !value.versions.every(
+          (version) =>
+            typeof version === 'string' && /^\d+(\.\d+){1,4}$/.test(version),
+        ) ||
+        !Array.isArray(value.gameVersions) ||
+        value.gameVersions.length > 5000 ||
+        !value.gameVersions.every(
+          (game) =>
+            typeof game === 'string' && /^[A-Za-z0-9._-]{1,99}$/.test(game),
+        ) ||
+        ![value.recommended, value.latest].every(
+          (v) =>
+            v === null ||
+            (typeof v === 'string' && /^\d+(\.\d+){1,4}$/.test(v)),
+        )
+      )
+        throw new Error('Forge 版本响应无效');
+      return value as {
+        recommended: string | null;
+        latest: string | null;
+        versions: string[];
+        gameVersions: string[];
+      };
+    },
+    downloadForge: (game, loader) =>
+      operation('native_forge_download', { game, loader }),
+    planResources: async (
+      id,
+      kind,
+      version,
+      filename,
+      worldId,
+      source,
+      project,
+    ) => {
+      if (source === 'curseforge' && (kind !== 'mod' || worldId || !project))
+        throw new Error('CurseForge 安装目标无效');
+      const value = await request(
+        source === 'curseforge'
+          ? 'native_curseforge_plan'
+          : 'native_resource_plan',
+        source === 'curseforge'
+          ? { id, project, version, filename }
+          : {
+              id,
+              kind,
+              version,
+              filename,
+              worldId: worldId ?? null,
+            },
+      );
       if (
         !validResourcePlan(value) ||
         value.instanceId !== id ||
@@ -646,10 +822,17 @@ export function createNativeService(
         throw new Error('安装计划响应无效');
       return value;
     },
-    installResources: (token) =>
-      operation('native_resource_install', { token }),
-    openResource: (kind, project) =>
-      operation('native_open_resource', { kind, project }),
+    installResources: (token, acknowledgeIssues = false) =>
+      operation('native_resource_install', {
+        token,
+        ...(acknowledgeIssues ? { acknowledgeIssues: true } : {}),
+      }),
+    openResource: (kind, project, source) =>
+      operation('native_open_resource', {
+        kind,
+        project,
+        ...(source === 'curseforge' ? { source } : {}),
+      }),
     resourceCategories: async (kind) => {
       const value = await request('native_resource_categories', { kind });
       if (
@@ -672,6 +855,7 @@ export function createNativeService(
         ...(filters
           ? { category: filters.category, index: filters.index }
           : {}),
+        ...(filters?.source === 'curseforge' ? { source: filters.source } : {}),
       });
       if (
         !isRecord(value) ||
@@ -688,9 +872,15 @@ export function createNativeService(
             bounded(hit.title, 512) &&
             bounded(hit.description, 4096) &&
             bounded(hit.author, 128) &&
+            (hit.downloads == null || integer(hit.downloads)) &&
+            (hit.updated == null || bounded(hit.updated, 64)) &&
+            (hit.gameVersions === undefined ||
+              (Array.isArray(hit.gameVersions) &&
+                hit.gameVersions.length <= 512 &&
+                hit.gameVersions.every((v: unknown) => bounded(v, 128)))) &&
             (hit.iconUrl == null ||
               (bounded(hit.iconUrl, 2048) &&
-                /^https:\/\/cdn\.modrinth\.com\/data\/[A-Za-z0-9/_.%+-]+(?:\?[^\s]*)?$/.test(
+                /^https:\/\/(?:cdn\.modrinth\.com\/data|media\.forgecdn\.net)\/[A-Za-z0-9/_.%+-]+(?:\?[^\s]*)?$/.test(
                   hit.iconUrl,
                 ))),
         )
@@ -698,14 +888,98 @@ export function createNativeService(
         throw new Error('资源搜索响应无效');
       return value as ResourceSearch;
     },
-    resourceDetail: async (project, kind, gameVersion) => {
+    resourceDetail: async (project, kind, gameVersion, options) => {
       const value = await request('native_resource_detail', {
         project,
         kind,
         gameVersion,
+        ...(options?.allVersions ? { allVersions: true } : {}),
+        ...(options?.source === 'curseforge' ? { source: options.source } : {}),
       });
       if (!validResourceDetail(value) || value.id !== project)
         throw new Error('资源详情响应无效');
+      return value;
+    },
+    saveResource: async (project, version, filename) => {
+      const result = await request('native_resource_save', {
+        project,
+        version,
+        filename,
+      });
+      if (typeof result !== 'boolean') throw Error('资源保存响应无效');
+      await refresh(true);
+      return result;
+    },
+    modCheck: (id, force = false) => {
+      const context = JSON.stringify([
+        id,
+        snapshot.modRevision,
+        snapshot.state?.instances.find((item) => item.id === id),
+      ]);
+      const key = `${force}:${context}`;
+      const pending = modRequests.get(key);
+      if (pending) return pending;
+      newestModContext = context;
+      const promise = modQueue
+        .catch(() => {})
+        .then(async () => {
+          if (!force && context !== newestModContext)
+            throw new Error('检查已由更新的实例请求替代');
+          const value = await request('native_mod_check', {
+            id,
+            ...(force ? { force: true } : {}),
+          });
+          const details = isRecord(value) ? value.details : undefined;
+          if (
+            !isRecord(value) ||
+            value.instanceId !== id ||
+            !cacheWarnings(value.issues) ||
+            !cacheWarnings(value.unchecked) ||
+            (details !== undefined &&
+              (!isRecord(details) ||
+                !integer(details.checkedAt) ||
+                !bounded(details.scope, 1024) ||
+                typeof details.complete !== 'boolean' ||
+                ![
+                  'scannedFiles',
+                  'parsedFiles',
+                  'reusedFiles',
+                  'elapsedMs',
+                ].every((key) => integer(details[key]))))
+          )
+            throw new Error('启动检查响应无效');
+          return value as ModCheck;
+        })
+        .finally(() => {
+          modRequests.delete(key);
+        });
+      modRequests.set(key, promise);
+      modQueue = promise;
+      return promise;
+    },
+    previewModFile: async (id, file) => {
+      const value = await uploadFile(file, { kind: 'modPreview', id });
+      if (
+        !validResourcePlan(value) ||
+        value.instanceId !== id ||
+        !value.local ||
+        !value.preflight ||
+        !value.files.every((file) => file.path.startsWith('mods/'))
+      )
+        throw new Error('本地 Mod 预检响应无效');
+      return value;
+    },
+    pickModPlan: async (id) => {
+      const value = await request('native_mod_pick_plan', { id });
+      if (value === null) return null;
+      if (
+        !validResourcePlan(value) ||
+        value.instanceId !== id ||
+        !value.local ||
+        !value.preflight ||
+        !value.files.every((file) => file.path.startsWith('mods/'))
+      )
+        throw new Error('本地 Mod 预检响应无效');
       return value;
     },
     content: async (id, kind) => {
@@ -724,11 +998,17 @@ export function createNativeService(
         null
       )
         throw new Error('本地导入响应无效');
+      if (kind === 'mods')
+        update({ ...snapshot, modRevision: (snapshot.modRevision ?? 0) + 1 });
     },
     pickContent: async (id, kind) => {
       const value = await request('native_content_pick', { id, kind });
       if (typeof value !== 'boolean') throw new Error('本地导入响应无效');
-      if (value) await refresh(true);
+      if (value) {
+        if (kind === 'mods')
+          update({ ...snapshot, modRevision: (snapshot.modRevision ?? 0) + 1 });
+        await refresh(true);
+      }
       return value;
     },
     contentImage: async (id, file) => {
@@ -742,6 +1022,8 @@ export function createNativeService(
       return value;
     },
     openContent: (id, kind) => operation('native_content_open', { id, kind }),
+    openFolder: (id, folder) =>
+      operation('native_instance_folder_open', { id, folder }),
     renameInstance: (id, name) =>
       operation('native_instance_rename', { id, name }),
     snapshot: () => snapshot,
@@ -902,11 +1184,12 @@ export function createNativeService(
     },
     stop: () => {
       stopped = true;
+      releaseVersions = undefined;
       if (timer) clearInterval(timer);
       listeners.clear();
     },
     versionCatalog: async () => {
-      const value = await request('native_versions');
+      const value = await request('native_version_catalog');
       if (
         !Array.isArray(value) ||
         value.length > 5000 ||
@@ -915,23 +1198,44 @@ export function createNativeService(
             isRecord(item) &&
             bounded(item.id, 100) &&
             /^[A-Za-z0-9._-]+$/.test(item.id) &&
+            (item.type === undefined ||
+              ['release', 'snapshot', 'old_beta', 'old_alpha'].includes(
+                item.type as string,
+              )) &&
             (item.releaseTime === undefined || bounded(item.releaseTime, 64)),
         )
       )
         throw new Error('版本清单格式无效');
-      return value.map((item: { id: string; releaseTime?: string }) => ({
-        id: item.id,
-        releaseTime: item.releaseTime ?? '',
-      }));
+      return value.map(
+        (item: { id: string; releaseTime?: string; type?: string }) => ({
+          id: item.id,
+          type: item.type ?? 'release',
+          releaseTime: item.releaseTime ?? '',
+        }),
+      );
     },
     versions: async () => {
-      const value = await request('native_versions');
-      if (
-        !Array.isArray(value) ||
-        !value.every((item: unknown) => isRecord(item) && string(item.id))
-      )
-        throw new Error('版本清单格式无效');
-      return value.map((item: { id: string }) => item.id);
+      if (stopped) throw new Error('原版服务已停止');
+      if (!releaseVersions || releaseVersions.expires <= Date.now()) {
+        const value = (async () => {
+          const rows = await request('native_versions');
+          if (
+            !Array.isArray(rows) ||
+            rows.length > 5000 ||
+            !rows.every((item: unknown) => isRecord(item) && string(item.id))
+          )
+            throw new Error('版本清单格式无效');
+          return rows.map((item: { id: string }) => item.id);
+        })();
+        releaseVersions = { expires: Date.now() + 300000, value };
+      }
+      const cached = releaseVersions;
+      try {
+        return [...(await cached.value)];
+      } catch (error) {
+        if (releaseVersions === cached) releaseVersions = undefined;
+        throw error;
+      }
     },
     saveSettings: (settings) => operation('native_settings', { settings }),
     cacheSummary: async () => {
@@ -1046,6 +1350,51 @@ export function createNativeService(
       const value = await request('native_pack_pick');
       return value === null ? null : packPreview(value);
     },
+    scanLocalVersions: async () => {
+      const value = await request('native_local_scan_pick');
+      if (value === null) return null;
+      if (
+        !isRecord(value) ||
+        !bounded(value.token, 100) ||
+        !bounded(value.directory, 32768) ||
+        !Array.isArray(value.candidates) ||
+        value.candidates.length > 256 ||
+        !cacheWarnings(value.warnings) ||
+        !value.candidates.every(
+          (v: unknown) =>
+            isRecord(v) &&
+            bounded(v.id, 100) &&
+            bounded(v.name, 256) &&
+            bounded(v.gameVersion, 100) &&
+            bounded(v.loader, 256) &&
+            bounded(v.directory, 32768) &&
+            bounded(v.gameDirectory, 32768) &&
+            typeof v.supported === 'boolean' &&
+            typeof v.duplicate === 'boolean' &&
+            integer(v.files) &&
+            v.files <= 19000 &&
+            integer(v.bytes) &&
+            (v.contentIndexed === undefined ||
+              typeof v.contentIndexed === 'boolean') &&
+            (v.contentRoots === undefined ||
+              (Array.isArray(v.contentRoots) &&
+                v.contentRoots.length <= 15 &&
+                v.contentRoots.every((p: unknown) => bounded(p, 64)))) &&
+            (v.worlds === undefined ||
+              (integer(v.worlds) && v.worlds <= 19000)) &&
+            (v.sourceIsolation === undefined ||
+              typeof v.sourceIsolation === 'boolean') &&
+            v.bytes <= 2 * 1024 * 1024 * 1024 &&
+            cacheWarnings(v.issues) &&
+            cacheWarnings(v.warnings),
+        )
+      )
+        throw new Error('本地版本扫描响应无效');
+      await refresh();
+      return value as LocalVersionScan;
+    },
+    importLocalVersions: (token, selected) =>
+      operation('native_local_import', { token, selected }),
     previewOnlinePack: async (project, version, filename) => {
       try {
         const value = packPreview(

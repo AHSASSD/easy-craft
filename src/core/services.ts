@@ -44,7 +44,7 @@ export const examples: GameInstance[] = [
 ];
 export const defaultPreferences: Preferences = {
   theme: 'slate',
-  sidebarWidth: 300,
+  sidebarWidth: 240,
   selectedId: ids[0],
   doubleClickLaunch: false,
   developerEnabled: false,
@@ -62,6 +62,8 @@ export function validPreferences(value: unknown): value is Preferences {
     value.sidebarWidth <= 420 &&
     typeof value.selectedId === 'string' &&
     typeof value.doubleClickLaunch === 'boolean' &&
+    (value.autoModCheck === undefined ||
+      typeof value.autoModCheck === 'boolean') &&
     typeof value.developerEnabled === 'boolean' &&
     (value.sort === 'name' || value.sort === 'recent') &&
     (value.backgroundShade === undefined ||
@@ -74,6 +76,8 @@ export function validPreferences(value: unknown): value is Preferences {
     (value.uiScale === undefined ||
       uiScales.some((scale) => scale === value.uiScale)) &&
     (value.accentColor === undefined || validAccent(value.accentColor)) &&
+    (value.layout === undefined ||
+      ['default', 'compact'].includes(String(value.layout))) &&
     (value.navigation === undefined || validNavigation(value.navigation))
   );
 }

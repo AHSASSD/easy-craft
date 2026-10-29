@@ -451,11 +451,23 @@ pub fn image(root: &Path, file: &str) -> Result<String> {
     Ok(format!("data:image/png;base64,{}", STANDARD.encode(bytes)))
 }
 pub fn open(root: &Path, kind: Option<Kind>) -> Result<()> {
-    let directory = match kind {
-        Some(kind) => model::safe_path(root, kind.dir())?,
-        None => root.to_path_buf(),
+    open_folder(root, kind.map(|kind| kind.dir()).unwrap_or("game"))
+}
+pub(crate) fn folder_path(root: &Path, folder: &str) -> Result<PathBuf> {
+    let directory = match folder {
+        "mods" | "saves" | "screenshots" | "resourcepacks" | "shaderpacks" => {
+            model::safe_path(root, folder)?
+        }
+        "game" => root.to_path_buf(),
+        _ => return Err("不支持的实例文件夹".into()),
     };
-    fs::create_dir_all(&directory).map_err(|_| "无法创建内容目录")?;
+    if !directory.is_dir() {
+        return Err("该文件夹尚未生成或不可访问；可先在游戏中使用对应功能。".into());
+    }
+    Ok(directory)
+}
+pub fn open_folder(root: &Path, folder: &str) -> Result<()> {
+    let directory = folder_path(root, folder)?;
     std::process::Command::new("explorer.exe")
         .arg(directory)
         .spawn()
@@ -704,6 +716,7 @@ mod tests {
                 fabric_version: String::new(),
                 fabric_sha1: String::new(),
                 launch: Default::default(),
+                local: None,
             }],
         )
         .unwrap();

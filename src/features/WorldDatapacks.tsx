@@ -36,7 +36,7 @@ export function WorldDatapacks({
     };
   }, [service, id, worldId, running, reload]);
   return (
-    <details className="world-datapacks" open>
+    <details className="world-datapacks">
       <summary>数据包{files ? `（${files.length} 项本地内容）` : ''}</summary>
       {error && (
         <p role="alert" className="notice">

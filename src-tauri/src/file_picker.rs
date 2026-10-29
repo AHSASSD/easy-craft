@@ -14,12 +14,48 @@ use windows::{
         },
         UI::Shell::{
             Common::COMDLG_FILTERSPEC, FileOpenDialog, IFileOpenDialog, FOS_DONTADDTORECENT,
-            FOS_FILEMUSTEXIST, FOS_FORCEFILESYSTEM, FOS_PATHMUSTEXIST, SIGDN_FILESYSPATH,
+            FOS_FILEMUSTEXIST, FOS_FORCEFILESYSTEM, FOS_PATHMUSTEXIST, FOS_PICKFOLDERS,
+            SIGDN_FILESYSPATH,
         },
     },
 };
 
 pub const MAX_FILE: u64 = 512 * 1024 * 1024;
+pub fn pick_directory(owner: isize) -> Result<Option<PathBuf>> {
+    pick_directory_named(owner, "选择 Minecraft 根目录、versions 或具体版本目录")
+}
+pub fn pick_directory_named(owner: isize, title: &str) -> Result<Option<PathBuf>> {
+    unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) }
+        .ok()
+        .map_err(|_| "无法初始化文件夹选择器")?;
+    let _apartment = Apartment;
+    (|| -> windows::core::Result<Option<PathBuf>> {
+        unsafe {
+            let dialog: IFileOpenDialog =
+                CoCreateInstance(&FileOpenDialog, None, CLSCTX_INPROC_SERVER)?;
+            dialog.SetOptions(
+                dialog.GetOptions()?
+                    | FOS_PICKFOLDERS
+                    | FOS_FORCEFILESYSTEM
+                    | FOS_PATHMUSTEXIST
+                    | FOS_DONTADDTORECENT,
+            )?;
+            let title: Vec<u16> = title.encode_utf16().chain(Some(0)).collect();
+            dialog.SetTitle(PCWSTR(title.as_ptr()))?;
+            if let Err(error) = dialog.Show(Some(HWND(owner as *mut _))) {
+                if error.code() == windows::core::HRESULT::from_win32(ERROR_CANCELLED.0) {
+                    return Ok(None);
+                }
+                return Err(error);
+            }
+            let value = dialog.GetResult()?.GetDisplayName(SIGDN_FILESYSPATH)?;
+            let path = PathBuf::from(std::ffi::OsString::from_wide(value.as_wide()));
+            CoTaskMemFree(Some(value.as_ptr().cast()));
+            Ok(Some(path))
+        }
+    })()
+    .map_err(|_| "系统文件夹选择失败".into())
+}
 struct Apartment;
 impl Drop for Apartment {
     fn drop(&mut self) {

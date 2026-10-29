@@ -6,6 +6,9 @@ use std::{
 };
 
 pub type Result<T> = std::result::Result<T, String>;
+fn default_isolation() -> bool {
+    true
+}
 #[derive(Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum LaunchMode {
@@ -34,6 +37,8 @@ pub struct Settings {
     pub launch_mode: LaunchMode,
     #[serde(default)]
     pub offline_name: String,
+    #[serde(default = "default_isolation")]
+    pub isolate_new_instances: bool,
 }
 impl Default for Settings {
     fn default() -> Self {
@@ -46,6 +51,7 @@ impl Default for Settings {
             optimize_memory: false,
             launch_mode: LaunchMode::Microsoft,
             offline_name: String::new(),
+            isolate_new_instances: true,
         }
     }
 }
@@ -56,6 +62,18 @@ pub struct LaunchOverrides {
     pub java_path: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub memory: Option<MemoryOverride>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub game_isolation: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub window_mode: Option<WindowMode>,
+}
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum WindowMode {
+    #[default]
+    Windowed,
+    Fullscreen,
+    Inherit,
 }
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -66,7 +84,10 @@ pub struct MemoryOverride {
 }
 impl LaunchOverrides {
     pub fn is_empty(&self) -> bool {
-        self.java_path.is_none() && self.memory.is_none()
+        self.java_path.is_none()
+            && self.memory.is_none()
+            && self.game_isolation.is_none()
+            && self.window_mode.is_none()
     }
     pub fn validate(&self) -> Result<()> {
         if self
@@ -103,12 +124,78 @@ pub struct Instance {
     pub version: String,
     pub manifest_sha1: String,
     pub java_major: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub local: Option<LocalInstallation>,
     #[serde(default)]
     pub fabric_version: String,
     #[serde(default)]
     pub fabric_sha1: String,
     #[serde(default, skip_serializing_if = "LaunchOverrides::is_empty")]
     pub launch: LaunchOverrides,
+}
+impl Instance {
+    pub fn isolated(&self) -> bool {
+        self.launch.game_isolation.unwrap_or_else(|| {
+            self.local
+                .as_ref()
+                .is_none_or(|v| !v.game_directory.is_empty())
+        })
+    }
+    pub fn game_path(&self, root: &Path) -> Result<PathBuf> {
+        if let Some(local) = &self.local {
+            let source = crate::local_import::checked_directory(Path::new(&local.root))?;
+            let relative = match self.launch.game_isolation {
+                Some(true) => local.version_directory.as_str(),
+                Some(false) => "",
+                None => local.game_directory.as_str(),
+            };
+            return if relative.is_empty() {
+                Ok(source)
+            } else {
+                safe_path(&source, relative)
+            };
+        }
+        safe_path(
+            root,
+            &if self.launch.game_isolation == Some(false) {
+                "shared-game".to_string()
+            } else {
+                format!("instances/{}/game", self.id)
+            },
+        )
+    }
+}
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct LocalInstallation {
+    pub root: String,
+    pub version_directory: String,
+    pub game_directory: String,
+    pub client_jar: String,
+    pub source_key: String,
+    pub loader: String,
+    pub loader_version: String,
+}
+impl LocalInstallation {
+    pub fn validate(&self) -> Result<()> {
+        if !Path::new(&self.root).is_absolute()
+            || self.root.len() > 32768
+            || !["vanilla", "fabric", "forge", "neoforge"].contains(&self.loader.as_str())
+            || self.loader_version.len() > 256
+            || self.source_key.len() != 64
+            || !self.source_key.bytes().all(|b| b.is_ascii_hexdigit())
+        {
+            return Err("本地版本引用无效".into());
+        }
+        safe_path(Path::new(&self.root), &self.client_jar)?;
+        if !self.version_directory.is_empty() {
+            safe_path(Path::new(&self.root), &self.version_directory)?;
+        }
+        if !self.game_directory.is_empty() {
+            safe_path(Path::new(&self.root), &self.game_directory)?;
+        }
+        Ok(())
+    }
 }
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Profile {
@@ -166,6 +253,8 @@ pub struct Version {
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Task {
+    pub pending_instance: Option<String>,
+    pub steps: Vec<TaskStep>,
     pub status: String,
     pub phase: String,
     pub message: String,
@@ -177,6 +266,8 @@ pub struct Task {
 impl Default for Task {
     fn default() -> Self {
         Self {
+            pending_instance: None,
+            steps: vec![],
             status: "idle".into(),
             phase: String::new(),
             message: String::new(),
@@ -196,10 +287,26 @@ pub fn valid_id(id: &str) -> bool {
         && id != "."
         && id != ".."
 }
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskStep {
+    pub outcome: Option<String>,
+    pub phase: String,
+    pub message: String,
+    pub completed: usize,
+    pub total: usize,
+    pub done: bool,
+}
 pub fn valid_sha1(hash: &str) -> bool {
     hash.len() == 40 && hash.bytes().all(|c| c.is_ascii_hexdigit())
 }
 pub fn safe_path(root: &Path, relative: &str) -> Result<PathBuf> {
+    checked_path(root, relative, true)
+}
+pub fn validate_relative_path(relative: &str) -> Result<()> {
+    checked_path(Path::new("C:/EasyCraftPathValidation"), relative, false).map(|_| ())
+}
+fn checked_path(root: &Path, relative: &str, inspect_links: bool) -> Result<PathBuf> {
     if relative.is_empty()
         || relative.contains(['\\', ':', '<', '>', '"', '|', '?', '*'])
         || relative.chars().any(|c| c < ' ')
@@ -225,10 +332,12 @@ pub fn safe_path(root: &Path, relative: &str) -> Result<PathBuf> {
             return Err("拒绝 Windows 保留路径".into());
         }
         path.push(part);
-        if let Ok(metadata) = fs::symlink_metadata(&path) {
-            use std::os::windows::fs::MetadataExt;
-            if metadata.file_attributes() & 0x400 != 0 {
-                return Err("资源路径包含链接或重解析点".into());
+        if inspect_links {
+            if let Ok(metadata) = fs::symlink_metadata(&path) {
+                use std::os::windows::fs::MetadataExt;
+                if metadata.file_attributes() & 0x400 != 0 {
+                    return Err("Resource path contains a link or reparse point".into());
+                }
             }
         }
     }

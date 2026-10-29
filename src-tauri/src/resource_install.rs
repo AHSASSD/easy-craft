@@ -7,11 +7,12 @@ use crate::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use sha1::Digest as Sha1Digest;
 use sha2::{Digest, Sha512};
 use std::{
     collections::{BTreeMap, HashSet},
     fs,
-    io::Read,
+    io::{Read, Write},
     os::windows::io::AsRawHandle,
     path::{Path, PathBuf},
     time::{Duration, Instant},
@@ -51,10 +52,18 @@ pub struct Plan {
     pub token: String,
     pub instance_id: String,
     pub game_version: String,
+    #[serde(skip)]
+    pub(crate) game_isolation: bool,
     pub world_id: Option<String>,
     pub data_format: Option<content::PackVersion>,
     pub files: Vec<Entry>,
     pub warnings: Vec<String>,
+    pub preflight: Option<ModCheck>,
+    #[serde(skip)]
+    approved_issues: bool,
+    pub local: bool,
+    #[serde(skip)]
+    local_paths: Vec<PathBuf>,
     #[serde(skip)]
     snapshot: BTreeMap<String, String>,
     #[serde(skip)]
@@ -75,6 +84,22 @@ pub struct Plan {
 struct Journal {
     token: String,
     added: Vec<Record>,
+}
+impl Plan {
+    pub(crate) fn approve_issues(&mut self, acknowledged: bool) -> Result<()> {
+        if self.kind != Kind::Mod {
+            return Ok(());
+        }
+        let report = self.preflight.as_ref().ok_or("请先完成 Mod 安装预检")?;
+        if report.instance_id != self.instance_id {
+            return Err("预检报告不属于当前实例".into());
+        }
+        if !report.issues.is_empty() && !acknowledged {
+            return Err("预检发现 Mod 声明问题，请阅读报告并明确选择仍然安装".into());
+        }
+        self.approved_issues = acknowledged && !report.issues.is_empty();
+        Ok(())
+    }
 }
 fn scope(kind: Kind) -> Result<(content::Kind, &'static str)> {
     match kind {
@@ -500,14 +525,19 @@ pub async fn prepare(
                 .push("世界数据版本早于目标游戏；首次进入可能升级世界，请先备份。".into());
         }
     }
-    Ok(Plan {
+    let mut plan = Plan {
         token: uuid::Uuid::new_v4().to_string(),
         instance_id: instance.id.clone(),
         game_version: instance.version.clone(),
+        game_isolation: instance.isolated(),
         world_id,
         data_format: world_version.map(|v| v.format),
         files: resolver.files,
         warnings: resolver.warnings,
+        preflight: None,
+        approved_issues: false,
+        local: false,
+        local_paths: vec![],
         snapshot,
         kind,
         created: Instant::now(),
@@ -519,24 +549,66 @@ pub async fn prepare(
         } else {
             vec![]
         },
-    })
+    };
+    if kind == Kind::Mod {
+        let cancel = CancellationToken::new();
+        let paths = tokio::time::timeout(
+            Duration::from_secs(120),
+            download_files(host, &plan, &cancel, false),
+        )
+        .await
+        .map_err(|_| "安装预检下载超时，请重试")??;
+        plan.preflight = Some(host.instance_files(&instance.id, |root| {
+            preflight_install(root, &instance, &plan, &paths)
+        })?);
+    }
+    Ok(plan)
 }
 pub async fn download(
     host: &Host,
     plan: &Plan,
     cancel: &CancellationToken,
 ) -> Result<Vec<PathBuf>> {
+    download_files(host, plan, cancel, true).await
+}
+async fn download_files(
+    host: &Host,
+    plan: &Plan,
+    cancel: &CancellationToken,
+    progress: bool,
+) -> Result<Vec<PathBuf>> {
     if plan.created.elapsed() > Duration::from_secs(600) {
         return Err("安装预览已过期，请重新生成".into());
     }
+    if plan.local || !plan.local_paths.is_empty() {
+        if plan.local_paths.len() != plan.files.len() {
+            return Err("本地预检缓存不完整，请重新预览".into());
+        }
+        for (entry, path) in plan.files.iter().zip(&plan.local_paths) {
+            if cancel.is_cancelled() {
+                return Err("安装已取消".into());
+            }
+            if fs::metadata(path)
+                .map_err(|_| "本地预检缓存已清理，请重新选择文件")?
+                .len()
+                != entry.record.size
+                || sum(path)? != entry.record.sha512
+            {
+                return Err("本地预检缓存已变化，请重新选择文件".into());
+            }
+        }
+        return Ok(plan.local_paths.clone());
+    }
     let mut paths = vec![];
     for (index, entry) in plan.files.iter().enumerate() {
-        host.progress(
-            "resources-download",
-            &format!("下载并校验 {}", entry.record.path),
-            index,
-            plan.files.len(),
-        );
+        if progress {
+            host.progress(
+                "resources-download",
+                &format!("下载并校验 {}", entry.record.path),
+                index,
+                plan.files.len(),
+            );
+        }
         let path = net::resource_download(
             &host.client,
             &host.root,
@@ -657,11 +729,12 @@ fn satisfies(version: &str, predicate: &Value) -> Result<bool> {
     }
     Ok(matched)
 }
-struct ModMetadata {
-    value: Value,
-    nested: bool,
+#[derive(Clone)]
+pub(crate) struct ModMetadata {
+    pub(crate) value: Value,
+    pub(crate) nested: bool,
 }
-fn mod_metadata<R: Read + std::io::Seek>(
+pub(crate) fn mod_metadata<R: Read + std::io::Seek>(
     input: R,
     result: &mut Vec<ModMetadata>,
     depth: usize,
@@ -671,6 +744,9 @@ fn mod_metadata<R: Read + std::io::Seek>(
         return Err("模组内置依赖超过校验上限".into());
     }
     let mut zip = zip::ZipArchive::new(input).map_err(|_| "模组 ZIP 无效")?;
+    if zip.len() > 20000 {
+        return Err("模组归档条目超过检查上限".into());
+    }
     let metadata = content::fabric_metadata(&mut zip)?;
     let id = resources::text(&metadata, "id", 128)?;
     if id.is_empty() {
@@ -712,6 +788,7 @@ fn mod_metadata<R: Read + std::io::Seek>(
     });
     Ok(())
 }
+#[cfg(test)]
 fn validate_mods(root: &Path, instance: &Instance, plan: &Plan, paths: &[PathBuf]) -> Result<()> {
     validate_mod_files(
         root,
@@ -722,7 +799,7 @@ fn validate_mods(root: &Path, instance: &Instance, plan: &Plan, paths: &[PathBuf
         &plan.bundled,
     )
 }
-fn bundled_metadata(cache: &Path, instance: &Instance) -> Result<Vec<Value>> {
+pub(crate) fn bundled_metadata(cache: &Path, instance: &Instance) -> Result<Vec<Value>> {
     let Some(path) = crate::fabric::loader_archive(cache, instance)? else {
         return Ok(vec![]);
     };
@@ -770,6 +847,302 @@ pub(crate) fn validate_pack_mods(cache: &Path, root: &Path, instance: &Instance)
         &bundled_metadata(cache, instance)?,
     )
 }
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModCheck {
+    pub instance_id: String,
+    pub issues: Vec<String>,
+    pub unchecked: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub details: Option<crate::mod_check::Details>,
+}
+
+pub async fn prepare_curseforge(
+    host: &Host,
+    instance: Instance,
+    project: &str,
+    version: &str,
+    filename: &str,
+) -> Result<Plan> {
+    if instance.fabric_version.is_empty() {
+        return Err("CurseForge Mod 安装目前需要 Fabric 实例，Forge 实例尚未接入。".into());
+    }
+    let snapshot = host.instance_files(&instance.id, |root| inventory(root, Kind::Mod))?;
+    let downloads = crate::curseforge::resolve(project, version, &instance.version).await?;
+    let mut files = vec![];
+    let mut paths = vec![];
+    let cancel = CancellationToken::new();
+    let mut total = 0u64;
+    for download in downloads {
+        total += download.size;
+        if total > 1024 * 1024 * 1024 {
+            return Err("CurseForge 安装超过 1 GiB".into());
+        }
+        if files.iter().any(|f: &Entry| {
+            f.record
+                .path
+                .eq_ignore_ascii_case(&format!("mods/{}", download.name))
+        }) {
+            return Err("CurseForge 依赖文件名冲突".into());
+        }
+        let path = net::curseforge_download(
+            &host.client,
+            &host.root,
+            &net::Artifact {
+                path: format!("cache/curseforge/{}.jar", download.sha1),
+                url: download.url,
+                sha1: download.sha1.clone(),
+                size: Some(download.size),
+            },
+            &cancel,
+        )
+        .await?;
+        let sha512 = sum(&path)?;
+        let record = Record {
+            project: download.project,
+            version: download.version,
+            path: format!("mods/{}", download.name),
+            size: download.size,
+            sha512,
+        };
+        checked_record(&host.root, &record)?;
+        let action = match snapshot.get(&record.path) {
+            Some(hash) if hash == &record.sha512 => "keep",
+            Some(_) => return Err("同名文件内容不同，未覆盖".into()),
+            None => "add",
+        }
+        .into();
+        files.push(Entry {
+            record,
+            action,
+            sha1: download.sha1,
+            url: String::new(),
+        });
+        paths.push(path);
+    }
+    if !files.iter().any(|f| {
+        f.record.project == format!("curseforge{project}")
+            && f.record.version == format!("curseforge{version}")
+            && f.record.path == format!("mods/{filename}")
+    }) {
+        return Err("所选文件与 CurseForge 固定版本不符".into());
+    }
+    let java_path = instance.launch.resolve(&host.status().settings).java_path;
+    let java_major = crate::minecraft::probe_java(&java_path).await?.major;
+    let plan=Plan {token:uuid::Uuid::new_v4().to_string(),instance_id:instance.id.clone(),game_version:instance.version.clone(),game_isolation:instance.isolated(),world_id:None,data_format:None,files,warnings:vec!["来源：CurseForge。SHA-1 来自平台；SHA-512 由已验证缓存计算并固定。仅自动新增必需依赖；可选依赖不自动安装，不更改现有 Mod。".into()],preflight:None,approved_issues:false,local:false,local_paths:paths.clone(),snapshot,kind:Kind::Mod,created:Instant::now(),java_path,java_major,fabric_version:instance.fabric_version.clone(),bundled:bundled_metadata(&host.root,&instance)?};
+    let mut report = host.instance_files(&instance.id, |root| {
+        preflight_install(root, &instance, &plan, &paths)
+    })?;
+    report.unchecked.push("CurseForge 平台的不兼容项目关系尚未完整求解；此次校验使用 JAR 声明，详情中的平台关系仍需核对。".into());
+    Ok(Plan {
+        preflight: Some(report),
+        ..plan
+    })
+}
+pub fn prepare_local(
+    cache: &Path,
+    root: &Path,
+    instance: &Instance,
+    java_path: String,
+    name: &str,
+    mut input: impl Read,
+    cancel: &CancellationToken,
+) -> Result<Plan> {
+    if instance.fabric_version.is_empty() {
+        return Err("本地模组预检目前支持 Fabric 实例".into());
+    }
+    if !name.to_ascii_lowercase().ends_with(".jar") || name.contains(['/', '\\']) {
+        return Err("请选择有效的本地 JAR 文件".into());
+    }
+    let token = uuid::Uuid::new_v4().to_string();
+    let staged = model::safe_path(cache, &format!("file-inputs/{token}.part"))?;
+    fs::create_dir_all(staged.parent().ok_or("缓存目录无效")?)
+        .map_err(|_| "无法创建预检缓存目录")?;
+    let mut output = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&staged)
+        .map_err(|_| "无法创建预检缓存")?;
+    let result = (|| {
+        let mut sha1 = sha1::Sha1::new();
+        let mut sha512 = Sha512::new();
+        let mut size = 0u64;
+        let mut buffer = [0; 65536];
+        loop {
+            if cancel.is_cancelled() {
+                return Err("本地 Mod 预检已取消".into());
+            }
+            let count = input.read(&mut buffer).map_err(|_| "本地 Mod 读取失败")?;
+            if count == 0 {
+                break;
+            }
+            size += count as u64;
+            if size > crate::file_picker::MAX_FILE {
+                return Err("本地 Mod 超过 512 MiB".into());
+            }
+            output
+                .write_all(&buffer[..count])
+                .map_err(|_| "本地预检缓存写入失败")?;
+            sha1.update(&buffer[..count]);
+            sha512.update(&buffer[..count]);
+        }
+        output.sync_all().map_err(|_| "本地预检缓存同步失败")?;
+        let sha512 = format!("{:x}", sha512.finalize());
+        let record = Record {
+            project: format!("local{}", &sha512[..12]),
+            version: format!("local{}", &sha512[12..24]),
+            path: format!("mods/{name}"),
+            size,
+            sha512,
+        };
+        checked_record(root, &record)?;
+        let snapshot = inventory(root, Kind::Mod)?;
+        let action = match snapshot.get(&record.path) {
+            Some(hash) if hash == &record.sha512 => "keep",
+            Some(_) => return Err("同名本地模组已经存在且内容不同，未覆盖".into()),
+            None => "add",
+        }
+        .into();
+        let bundled = bundled_metadata(cache, instance);
+        let mut plan = Plan {
+            token,
+            instance_id: instance.id.clone(),
+            game_version: instance.version.clone(),
+            game_isolation: instance.isolated(),
+            world_id: None,
+            data_format: None,
+            files: vec![Entry {
+                record,
+                action,
+                sha1: sha1
+                    .finalize()
+                    .iter()
+                    .map(|byte| format!("{byte:02x}"))
+                    .collect(),
+                url: String::new(),
+            }],
+            warnings: vec![],
+            preflight: None,
+            approved_issues: false,
+            local: true,
+            local_paths: vec![staged.clone()],
+            snapshot,
+            kind: Kind::Mod,
+            created: Instant::now(),
+            java_path,
+            java_major: instance.java_major,
+            fabric_version: instance.fabric_version.clone(),
+            bundled: bundled.as_ref().cloned().unwrap_or_default(),
+        };
+        let mut report = preflight_install(root, instance, &plan, std::slice::from_ref(&staged))?;
+        report.unchecked.push(format!(
+            "本地文件按实例要求的 Java {} 分析，实际 Java 环境在启动时校验。",
+            instance.java_major
+        ));
+        if let Err(error) = bundled {
+            report
+                .unchecked
+                .push(format!("加载器内置依赖未确认：{error}"));
+        }
+        plan.preflight = Some(report);
+        Ok(plan)
+    })();
+    drop(output);
+    if result.is_err() {
+        let _ = fs::remove_file(&staged);
+    }
+    result
+}
+
+pub fn preflight_install(
+    root: &Path,
+    instance: &Instance,
+    plan: &Plan,
+    paths: &[PathBuf],
+) -> Result<ModCheck> {
+    if plan.kind != Kind::Mod
+        || plan.instance_id != instance.id
+        || plan.game_version != instance.version
+        || plan.fabric_version != instance.fabric_version
+        || plan.game_isolation != instance.isolated()
+        || inventory(root, plan.kind)? != plan.snapshot
+    {
+        return Err("安装目标或实例内容已变化，请重新预览".into());
+    }
+    if paths.len() != plan.files.len() {
+        return Err("预检文件数量不符".into());
+    }
+    for (entry, path) in plan.files.iter().zip(paths) {
+        if fs::metadata(path).map_err(|_| "预检文件不可读")?.len() != entry.record.size
+            || sum(path)? != entry.record.sha512
+        {
+            return Err("预检文件校验失败，未安装".into());
+        }
+        crate::packs::preview_reader(fs::File::open(path).map_err(|_| "预检文件不可读")?)?;
+        let mut archive = zip::ZipArchive::new(fs::File::open(path).map_err(|_| "预检文件不可读")?)
+            .map_err(|_| "预检文件不是有效 JAR")?;
+        content::validate_archive(content::Kind::Mods, &mut archive)?;
+    }
+    let mut report = ModCheck {
+        instance_id: instance.id.clone(),
+        issues: vec![],
+        unchecked: vec!["仅检查模组声明与已配置的 Java 条件，不能预测全部运行时冲突。".into()],
+        details: None,
+    };
+    for entry in content::list(root, content::Kind::Mods)? {
+        if entry.enabled && !entry.editable && report.unchecked.len() <= 100 {
+            report
+                .unchecked
+                .push(format!("未识别的已有模组：{}", entry.file));
+        }
+    }
+    match assess_mod_files_report(
+        root,
+        instance,
+        plan.java_major,
+        &plan.files,
+        paths,
+        &plan.bundled,
+    ) {
+        Ok(issues) => report.issues = issues,
+        Err(ModFailure::Declaration(message)) => {
+            report.issues.push(message.replace("，未安装", ""));
+            report
+                .unchecked
+                .push("校验器返回首个声明问题，其余条件尚未确认。".into());
+        }
+        Err(ModFailure::Invalid(message)) => return Err(message),
+    }
+    Ok(report)
+}
+
+#[cfg(test)]
+pub fn check_installed_mods(cache: &Path, root: &Path, instance: &Instance) -> Result<ModCheck> {
+    crate::mod_check::Cache::default().check(cache, root, instance, false)
+}
+
+#[derive(Debug)]
+enum ModFailure {
+    Declaration(String),
+    Invalid(String),
+}
+impl ModFailure {
+    fn message(self) -> String {
+        match self {
+            Self::Declaration(message) | Self::Invalid(message) => message,
+        }
+    }
+}
+impl From<String> for ModFailure {
+    fn from(message: String) -> Self {
+        Self::Invalid(message)
+    }
+}
+impl From<&str> for ModFailure {
+    fn from(message: &str) -> Self {
+        Self::Invalid(message.into())
+    }
+}
 fn validate_mod_files(
     root: &Path,
     instance: &Instance,
@@ -778,6 +1151,31 @@ fn validate_mod_files(
     paths: &[PathBuf],
     bundled: &[Value],
 ) -> Result<()> {
+    assess_mod_files(root, instance, java_major, replacing, paths, bundled)
+        .map_err(ModFailure::message)
+}
+fn assess_mod_files(
+    root: &Path,
+    instance: &Instance,
+    java_major: u32,
+    replacing: &[Entry],
+    paths: &[PathBuf],
+    bundled: &[Value],
+) -> std::result::Result<(), ModFailure> {
+    let issues = assess_mod_files_report(root, instance, java_major, replacing, paths, bundled)?;
+    match issues.first() {
+        Some(message) => Err(ModFailure::Declaration(message.clone())),
+        None => Ok(()),
+    }
+}
+fn assess_mod_files_report(
+    root: &Path,
+    instance: &Instance,
+    java_major: u32,
+    replacing: &[Entry],
+    paths: &[PathBuf],
+    bundled: &[Value],
+) -> std::result::Result<Vec<String>, ModFailure> {
     let mut metadata: Vec<_> = bundled
         .iter()
         .map(|value| ModMetadata {
@@ -827,8 +1225,22 @@ fn validate_mod_files(
             &mut expanded,
         )?;
     }
+    evaluate_metadata(instance, java_major, &metadata).map_err(ModFailure::Invalid)
+}
+pub(crate) fn evaluate_metadata(
+    instance: &Instance,
+    java_major: u32,
+    metadata: &[ModMetadata],
+) -> Result<Vec<String>> {
+    if metadata.len() > 4096 {
+        return Err("模组元数据总量超过检查上限".into());
+    }
+    let mut duplicates = vec![];
     let mut groups: BTreeMap<String, Vec<usize>> = BTreeMap::new();
     for (index, info) in metadata.iter().enumerate() {
+        if info.value.get("environment").and_then(Value::as_str) == Some("server") {
+            continue;
+        }
         groups
             .entry(resources::text(&info.value, "id", 128)?)
             .or_default()
@@ -843,7 +1255,8 @@ fn validate_mod_files(
             .filter(|i| !metadata[*i].nested)
             .collect();
         if roots.len() > 1 {
-            return Err(format!("模组 ID 重复：{id}，未安装"));
+            duplicates.push(format!("模组 ID 重复：{id}"));
+            group = vec![roots[0]];
         }
         if roots.is_empty() {
             let core = [
@@ -933,7 +1346,7 @@ fn validate_mod_files(
             .ok_or("共享内置模组候选超过 4096 种组合，请缩小安装范围")?;
         choices.push(group);
     }
-    let mut last_error = "没有可用的模组候选".to_string();
+    let mut best: Option<Vec<String>> = None;
     let mut evaluated = 0usize;
     for combination in 0..combinations {
         let mut cursor = combination;
@@ -945,22 +1358,30 @@ fn validate_mod_files(
                 &metadata[index].value
             })
             .collect();
-        match check_mod_constraints(instance, java_major, &chosen, &mut evaluated) {
-            Ok(()) => return Ok(()),
-            Err(error) => last_error = error,
+        let issues = check_mod_constraints(instance, java_major, &chosen, &mut evaluated)?;
+        if issues.is_empty() {
+            return Ok(duplicates);
+        }
+        if best
+            .as_ref()
+            .is_none_or(|previous| issues.len() < previous.len())
+        {
+            best = Some(issues);
         }
         if evaluated >= 200_000 {
             return Err("模组条件检查超过上限，请缩小安装范围".into());
         }
     }
-    Err(last_error)
+    duplicates.extend(best.unwrap_or_default());
+    Ok(duplicates)
 }
 fn check_mod_constraints(
     instance: &Instance,
     java_major: u32,
     metadata: &[&Value],
     evaluated: &mut usize,
-) -> Result<()> {
+) -> Result<Vec<String>> {
+    let mut issues = vec![];
     let mut versions = BTreeMap::from([
         ("minecraft".to_string(), instance.version.clone()),
         ("fabricloader".into(), instance.fabric_version.clone()),
@@ -970,7 +1391,7 @@ fn check_mod_constraints(
         let id = resources::text(info, "id", 128)?;
         let version = resources::text(info, "version", 128)?;
         if versions.insert(id.clone(), version.clone()).is_some() {
-            return Err(format!("模组 ID 重复：{id}，未安装"));
+            issues.push(format!("模组 ID 重复：{id}"));
         }
         if let Some(aliases) = info.get("provides") {
             for alias in aliases
@@ -983,7 +1404,7 @@ fn check_mod_constraints(
                     .filter(|v| !v.is_empty() && v.len() <= 128)
                     .ok_or("模组别名无效")?;
                 if versions.insert(alias.into(), version.clone()).is_some() {
-                    return Err(format!("模组提供的别名重复：{alias}"));
+                    issues.push(format!("模组提供的别名重复：{alias}"));
                 }
             }
         }
@@ -1005,7 +1426,7 @@ fn check_mod_constraints(
                         None => false,
                     };
                     if required != matched {
-                        return Err(format!(
+                        issues.push(format!(
                             "模组 {} 的{}条件不满足：{id} {predicate}",
                             info["id"].as_str().unwrap_or("unknown"),
                             if required {
@@ -1019,7 +1440,10 @@ fn check_mod_constraints(
             }
         }
     }
-    Ok(())
+    if issues.len() > 1000 {
+        return Err("依赖问题超过 1000 项，请分批检查".into());
+    }
+    Ok(issues)
 }
 fn transaction_dir(root: &Path, token: &str) -> Result<PathBuf> {
     if uuid::Uuid::parse_str(token).is_err() {
@@ -1137,6 +1561,7 @@ pub fn commit(
     if plan.instance_id != instance.id
         || plan.game_version != instance.version
         || plan.fabric_version != instance.fabric_version
+        || plan.game_isolation != instance.isolated()
         || inventory(root, plan.kind)? != plan.snapshot
     {
         return Err("实例内容已变化，未提交；请重新预览".into());
@@ -1148,7 +1573,22 @@ pub fn commit(
         return Err("资源缓存数量不符".into());
     }
     if plan.kind == Kind::Mod {
-        validate_mods(root, instance, plan, paths)?;
+        match assess_mod_files(
+            root,
+            instance,
+            plan.java_major,
+            &plan.files,
+            paths,
+            &plan.bundled,
+        ) {
+            Ok(()) => (),
+            Err(ModFailure::Declaration(message))
+                if plan.approved_issues
+                    && plan.preflight.as_ref().is_some_and(|report| {
+                        report.issues.contains(&message.replace("，未安装", ""))
+                    }) => {}
+            Err(failure) => return Err(failure.message()),
+        }
     }
     let mut next = catalog(root)?;
     let mut added = vec![];
@@ -1423,6 +1863,7 @@ mod tests {
             fabric_version: "0.16.14".into(),
             fabric_sha1: "b".repeat(40),
             launch: Default::default(),
+            local: None,
         }
     }
     fn entry(path: &str, source: &Path) -> Entry {
@@ -1444,11 +1885,16 @@ mod tests {
             token: uuid::Uuid::new_v4().to_string(),
             instance_id: instance.id.clone(),
             game_version: instance.version.clone(),
+            game_isolation: instance.isolated(),
             world_id: None,
             data_format: None,
             files: vec![entry],
             warnings: vec![],
             snapshot: inventory(root, kind).unwrap(),
+            preflight: None,
+            approved_issues: false,
+            local: false,
+            local_paths: vec![],
             kind,
             created: Instant::now(),
             java_path: "fixture".into(),
@@ -1479,6 +1925,18 @@ mod tests {
             entry("resourcepacks/fixture.zip", &source),
             Kind::Resourcepack,
         );
+        let mut switched = instance.clone();
+        switched.launch.game_isolation = Some(false);
+        assert!(commit(
+            &root,
+            &switched,
+            &original,
+            std::slice::from_ref(&source),
+            &CancellationToken::new()
+        )
+        .unwrap_err()
+        .contains("变化"));
+        assert!(!root.join("resourcepacks/fixture.zip").exists());
         model::write_file(&root, "resourcepacks/external.txt", b"preserve").unwrap();
         assert!(commit(
             &root,
@@ -1603,6 +2061,214 @@ mod tests {
         }
         zip.finish().unwrap().into_inner()
     }
+    #[test]
+    fn install_preflight_reports_missing_dependency_before_writing_instance_files() {
+        let root = root();
+        let instance = instance();
+        let source = root.join("incoming.jar");
+        fs::write(
+            &source,
+            jar(
+                json!({"id":"incoming","version":"1.0.0","depends":{"missing_lib":">=2.0.0"}}),
+                None,
+            ),
+        )
+        .unwrap();
+        let plan = plan(
+            &root,
+            &instance,
+            entry("mods/incoming.jar", &source),
+            Kind::Mod,
+        );
+        let report =
+            preflight_install(&root, &instance, &plan, std::slice::from_ref(&source)).unwrap();
+        assert_eq!(report.instance_id, instance.id);
+        assert!(report
+            .issues
+            .iter()
+            .any(|issue| issue.contains("missing_lib")));
+        assert!(!root.join("mods/incoming.jar").exists());
+        assert!(!root.join(CATALOG).exists());
+    }
+
+    #[test]
+    fn installing_with_declared_issues_requires_consent_and_never_ignores_tampered_files() {
+        let root = root();
+        let instance = instance();
+        let source = root.join("incoming.jar");
+        let bytes = jar(
+            json!({"id":"incoming","version":"1.0.0","depends":{"missing_lib":">=2.0.0"}}),
+            None,
+        );
+        fs::write(&source, &bytes).unwrap();
+        let mut reviewed = plan(
+            &root,
+            &instance,
+            entry("mods/incoming.jar", &source),
+            Kind::Mod,
+        );
+        reviewed.preflight = Some(
+            preflight_install(&root, &instance, &reviewed, std::slice::from_ref(&source)).unwrap(),
+        );
+        assert!(reviewed.approve_issues(false).is_err());
+        reviewed.approve_issues(true).unwrap();
+        fs::write(&source, b"tampered").unwrap();
+        assert!(commit(
+            &root,
+            &instance,
+            &reviewed,
+            std::slice::from_ref(&source),
+            &CancellationToken::new()
+        )
+        .is_err());
+        assert!(!root.join("mods/incoming.jar").exists());
+        fs::write(&source, &bytes).unwrap();
+        commit(
+            &root,
+            &instance,
+            &reviewed,
+            std::slice::from_ref(&source),
+            &CancellationToken::new(),
+        )
+        .unwrap();
+        assert_eq!(fs::read(root.join("mods/incoming.jar")).unwrap(), bytes);
+    }
+
+    #[tokio::test]
+    async fn local_mod_upload_returns_a_review_plan_without_importing_the_file() {
+        let cache = root();
+        let instance = instance();
+        model::save_json(&cache, "instances.json", &vec![instance.clone()]).unwrap();
+        let game = cache.join(format!("instances/{}/game", instance.id));
+        fs::create_dir_all(&game).unwrap();
+        let host = Host::new(cache).unwrap();
+        let bytes = jar(
+            json!({"id":"localexample","version":"1.0.0","depends":{"missing_lib":">=2.0.0"}}),
+            None,
+        );
+        let token = host
+            .begin_upload(
+                "example.jar".into(),
+                bytes.len() as u64,
+                crate::file_upload::Target::ModPreview {
+                    id: instance.id.clone(),
+                },
+            )
+            .unwrap();
+        host.append_upload(&token, 0, &bytes).unwrap();
+        let plan = host.finish_mod_upload(&token).unwrap();
+        assert!(plan
+            .preflight
+            .as_ref()
+            .unwrap()
+            .issues
+            .iter()
+            .any(|message| message.contains("missing_lib")));
+        assert!(!game.join("mods/example.jar").exists());
+        assert!(host
+            .start_resource_install(plan.token.clone(), false)
+            .is_err());
+        assert!(!game.join("mods/example.jar").exists());
+        host.save_instance_launch(
+            instance.id.clone(),
+            instance.launch.clone(),
+            model::LaunchOverrides {
+                game_isolation: Some(false),
+                ..instance.launch.clone()
+            },
+        )
+        .await
+        .unwrap();
+        assert!(host
+            .start_resource_install(plan.token.clone(), true)
+            .unwrap_err()
+            .contains("计划无效"));
+        assert!(!host.root.join("shared-game/mods/example.jar").exists());
+        assert!(host.finish_mod_upload(&token).is_err());
+    }
+
+    #[test]
+    fn installed_report_lists_independent_dependency_problems_together() {
+        let root = root();
+        let instance = instance();
+        fs::create_dir_all(root.join("mods")).unwrap();
+        fs::write(root.join("mods/a.jar"), jar(json!({"id":"a","version":"1.0.0","depends":{"missing_a":"*","missing_b":">=2"},"breaks":{"minecraft":"*"}}), None)).unwrap();
+        let report = check_installed_mods(&root, &root, &instance).unwrap();
+        for dependency in ["missing_a", "missing_b", "minecraft"] {
+            assert!(
+                report
+                    .issues
+                    .iter()
+                    .any(|message| message.contains(dependency)),
+                "omitted {dependency}: {:?}",
+                report.issues
+            );
+        }
+        let source = root.join("incoming.jar");
+        fs::write(
+            &source,
+            jar(
+                json!({"id":"incoming","version":"1.0.0","depends":{"missing_c":"*"}}),
+                None,
+            ),
+        )
+        .unwrap();
+        let plan = plan(
+            &root,
+            &instance,
+            entry("mods/incoming.jar", &source),
+            Kind::Mod,
+        );
+        let preview = preflight_install(&root, &instance, &plan, &[source]).unwrap();
+        for dependency in ["missing_a", "missing_b", "missing_c", "minecraft"] {
+            assert!(
+                preview
+                    .issues
+                    .iter()
+                    .any(|message| message.contains(dependency)),
+                "{dependency}: {:?}",
+                preview.issues
+            );
+        }
+    }
+
+    #[test]
+    fn preflight_reports_missing_dependencies_without_modifying_installed_files() {
+        let root = root();
+        let instance = instance();
+        fs::create_dir_all(root.join("mods")).unwrap();
+        let original = jar(
+            json!({"id":"example","version":"1.0.0","depends":{"missing_lib":">=2.0.0"}}),
+            None,
+        );
+        fs::write(root.join("mods/example.jar"), &original).unwrap();
+        fs::write(root.join("mods/unknown.jar"), b"not a recognized jar").unwrap();
+        let report = check_installed_mods(&root, &root, &instance).unwrap();
+        assert_eq!(report.instance_id, instance.id);
+        assert!(report
+            .issues
+            .iter()
+            .any(|message| message.contains("missing_lib")));
+        assert!(report
+            .unchecked
+            .iter()
+            .any(|message| message.contains("unknown.jar")));
+        assert_eq!(fs::read(root.join("mods/example.jar")).unwrap(), original);
+        assert_eq!(
+            fs::read(root.join("mods/unknown.jar")).unwrap(),
+            b"not a recognized jar"
+        );
+        fs::write(
+            root.join("mods/library.jar"),
+            jar(json!({"id":"missing_lib","version":"2.0.0"}), None),
+        )
+        .unwrap();
+        assert!(check_installed_mods(&root, &root, &instance)
+            .unwrap()
+            .issues
+            .is_empty());
+    }
+
     #[test]
     fn jar_constraints_include_nested_dependencies_and_reject_duplicate_ids_and_wrong_java() {
         let root = root();

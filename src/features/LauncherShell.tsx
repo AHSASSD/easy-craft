@@ -21,7 +21,6 @@ import {
   FolderOpen,
   ChevronRight,
   Menu,
-  Globe2,
   Cpu,
   Palette,
   MoreHorizontal,
@@ -29,6 +28,10 @@ import {
   Package,
   Image,
   FileCode,
+  Puzzle,
+  ShieldCheck,
+  AlertTriangle,
+  Check,
 } from 'lucide-react';
 import { uiScales, type Services } from '../core/contracts';
 import { warnings } from '../app/bootstrap';
@@ -37,7 +40,11 @@ import { Titlebar } from '../components/Titlebar';
 import { Modal } from '../components/Modal';
 import { SkinAvatar } from '../components/SkinAvatar';
 import { backgroundImage } from './background-image';
-import { instanceSettings } from '../core/instance-settings';
+import {
+  instanceSettings,
+  instanceLoader,
+  instanceIsolated,
+} from '../core/instance-settings';
 import { AccountPanel } from './AccountPanel';
 import { MemoryPanel } from './MemoryPanel';
 import { CachePanel } from './CachePanel';
@@ -46,16 +53,28 @@ import { NativeWorkspace } from './NativeWorkspace';
 import { WorldSettingsPanel } from './WorldSettingsPanel';
 import { ContentPanel } from './ContentPanel';
 import { ResourceBrowser } from './ResourceBrowser';
+import { PackInspector } from './PackInspector';
+import { LocalVersionImport } from './LocalVersionImport';
+import { AddInstanceMenu } from './AddInstanceMenu';
+import { IsolationPanel } from './IsolationPanel';
+import { InstanceSettings } from './InstanceSettings';
+import type { PackPreview, LocalVersionScan } from '../core/native-contracts';
+import { ExtensionsPanel } from './ExtensionsPanel';
+import { InstanceOverview } from './InstanceOverview';
+import { LaunchChecks, useModCheck } from './LaunchChecks';
+import layout from '../plugins/official/layout.json';
 import { UnsavedChanges, useNavigationGuard } from './UnsavedChanges';
-import landscape from '../assets/landscape.svg';
+import landscape from '../assets/landscape-dusk.png';
 import '../themes/library.css';
 import '../themes/rail.css';
+import '../themes/instance.css';
 import { accentStyle } from '../themes/accent';
 
 const mainItems = [
   { id: 'library', name: '游戏库', icon: Box },
-  { id: 'settings', name: '设置', icon: Settings },
   { id: 'download', name: '下载', icon: Download },
+  { id: 'extensions', name: '扩展', icon: Puzzle },
+  { id: 'settings', name: '设置', icon: Settings },
 ] as const;
 const settingItems = [
   { id: 'launch', name: '启动', icon: Cpu },
@@ -111,6 +130,38 @@ function Shell({ services }: { services: Services }) {
     !state?.loginPending &&
     (state?.settings.launchMode === 'offline' || !!state?.account);
   const [account, setAccount] = useState(false);
+  const [localImportOpen, setLocalImportOpen] = useState(false);
+  const [localScan, setLocalScan] = useState<LocalVersionScan | null>(null);
+  const [pickedPack, setPickedPack] = useState<PackPreview | null>(null);
+  const [packPicking, setPackPicking] = useState(false);
+  async function importLocalPack() {
+    setPackPicking(true);
+    try {
+      await run(async () => {
+        const value = await services.native.pickPack();
+        if (value) setPickedPack(value);
+      });
+    } finally {
+      setPackPicking(false);
+    }
+  }
+  const [checksOpen, setChecksOpen] = useState(false);
+  const launchPending = useRef(false);
+  const checks = useModCheck(
+    services.native,
+    selected?.id,
+    JSON.stringify([
+      selected?.version,
+      selected?.fabricVersion,
+      selected?.local,
+      effectiveSettings?.javaPath,
+      selected?.javaMajor,
+      selected ? instanceIsolated(selected) : true,
+      native.modRevision,
+    ]),
+    !!running,
+    preferences.autoModCheck !== false,
+  );
   const [notice, setNotice] = useState(warnings.at(-1) ?? '');
   useEffect(() => {
     const warning = () => setNotice(warnings.at(-1) ?? '');
@@ -284,7 +335,7 @@ function Shell({ services }: { services: Services }) {
           else closeWindow();
         });
       }),
-    [guard, services.native, closeWindow],
+    [guard, services.native, closeWindow, setClosing],
   );
   useEffect(() => {
     if (!isTauri()) return;
@@ -362,6 +413,33 @@ function Shell({ services }: { services: Services }) {
       setNotice(error instanceof Error ? error.message : '操作失败');
     }
   }
+  async function requestLaunch() {
+    if (!selected || !canLaunch || launchPending.current) return;
+    launchPending.current = true;
+    const id = selected.id;
+    try {
+      if (checks.busy) {
+        setChecksOpen(true);
+        return;
+      }
+      setChecksOpen(true);
+      const report = await checks.verify();
+      if (!launchPending.current) return;
+      const current = services.native.snapshot().state;
+      const currentId =
+        current?.instances.find(
+          (item) => item.id === services.preferences.snapshot().selectedId,
+        )?.id ?? current?.instances[0]?.id;
+      if (currentId !== id) return;
+      if (report === null || report?.issues.length) setChecksOpen(true);
+      else {
+        setChecksOpen(false);
+        await run(() => services.native.launch(id));
+      }
+    } finally {
+      launchPending.current = false;
+    }
+  }
   function resize(delta: number) {
     services.preferences.update({
       sidebarWidth: Math.min(
@@ -377,26 +455,31 @@ function Shell({ services }: { services: Services }) {
   const category =
     view === 'settings'
       ? settingItems.find((item) => item.id === nav.settingsCategory)?.name
-      : downloadItems.find((item) => item.id === nav.downloadCategory)?.name;
+      : view === 'extensions'
+        ? '插件与布局'
+        : downloadItems.find((item) => item.id === nav.downloadCategory)?.name;
   const matches =
     state?.instances.filter((item) =>
-      `${item.name} ${item.version} ${item.fabricVersion ? 'Fabric' : '原版'}`
+      `${item.name} ${item.version} ${instanceLoader(item)}`
         .toLowerCase()
         .includes(nav.query.toLowerCase()),
     ) ?? [];
   const shade = (preferences.backgroundShade ?? 35) / 100;
   const backgroundStyle = {
-    backgroundImage: `linear-gradient(0deg,rgba(11,37,28,${Math.min(0.98, shade + 0.4)}),rgba(20,47,38,${shade})),url("${background || landscape}")`,
+    backgroundImage: `linear-gradient(90deg,rgba(20,26,30,${Math.min(0.98, shade + 0.4)}),rgba(20,26,30,${shade})),url("${background || landscape}")`,
   };
   return (
     <div
       className="app native-library rail-layout"
       data-theme={preferences.theme}
+      data-layout={preferences.layout ?? 'default'}
       data-reduce-motion={preferences.reduceMotion ? 'true' : undefined}
       data-custom-accent={preferences.accentColor ? 'true' : undefined}
       style={
         {
           '--sidebar-width': `${preferences.sidebarWidth}px`,
+          '--hero-height': `${layout.presets[preferences.layout ?? 'default'].heroHeight}px`,
+          '--content-gap': `${layout.presets[preferences.layout ?? 'default'].contentGap}px`,
           ...accentStyle(preferences.accentColor, preferences.theme),
         } as CSSProperties
       }
@@ -406,21 +489,27 @@ function Shell({ services }: { services: Services }) {
         className={`library-shell ${!expanded ? 'library-collapsed' : ''} ${compact ? 'compact-context' : ''}`}
       >
         <nav className="library-navigation global-rail" aria-label="主功能">
-          {mainItems.map(({ id, name, icon: Icon }) => (
-            <button
-              key={id}
-              aria-pressed={view === id}
-              className={view === id ? 'active' : ''}
-              onClick={() =>
-                change({ section: id }, undefined, () =>
-                  setContextOpen(compact),
-                )
-              }
-            >
-              <Icon size={25} />
-              <span>{name}</span>
-            </button>
-          ))}
+          {[...mainItems]
+            .sort(
+              (a, b) =>
+                layout.navigation.indexOf(a.id) -
+                layout.navigation.indexOf(b.id),
+            )
+            .map(({ id, name, icon: Icon }) => (
+              <button
+                key={id}
+                aria-pressed={view === id}
+                className={`${view === id ? 'active' : ''} ${id === 'settings' ? 'rail-settings' : ''}`}
+                onClick={() =>
+                  change({ section: id }, undefined, () =>
+                    setContextOpen(compact),
+                  )
+                }
+              >
+                <Icon size={22} />
+                <span>{name}</span>
+              </button>
+            ))}
         </nav>
         <aside
           className="library-sidebar"
@@ -434,17 +523,16 @@ function Shell({ services }: { services: Services }) {
                   我的游戏 <span>{state?.instances.length ?? 0}</span>
                 </h2>
                 <div>
-                  <button
-                    aria-label="安装新实例"
-                    onClick={() =>
-                      change({
-                        section: 'download',
-                        downloadCategory: 'vanilla',
-                      })
+                  <AddInstanceMenu
+                    disabled={
+                      !available ||
+                      running ||
+                      !!state?.loginPending ||
+                      packPicking
                     }
-                  >
-                    <Plus size={17} />
-                  </button>
+                    onPack={() => void importLocalPack()}
+                    onLocal={() => setLocalImportOpen(true)}
+                  />
                   <button
                     aria-label="刷新真实实例"
                     disabled={!native.available}
@@ -454,7 +542,61 @@ function Shell({ services }: { services: Services }) {
                   </button>
                 </div>
               </div>
+              <label className="library-search sidebar-search">
+                <Search size={16} />
+                <input
+                  aria-label="搜索真实实例"
+                  value={nav.query}
+                  maxLength={256}
+                  placeholder="搜索实例"
+                  onChange={(event) =>
+                    services.preferences.update({
+                      navigation: { ...nav, query: event.target.value },
+                    })
+                  }
+                />
+              </label>
               <div className="library-instance-list">
+                {task?.pendingInstance && (
+                  <button
+                    className="library-instance pending-install"
+                    style={{
+                      opacity:
+                        0.5 +
+                        0.5 *
+                          (1 -
+                            1 /
+                              (1 +
+                                (task.steps?.filter((step) => step.done)
+                                  .length ?? 0) +
+                                (task.total
+                                  ? task.completed / task.total
+                                  : 0))),
+                    }}
+                    onClick={() => setTasks(true)}
+                  >
+                    <Download size={24} />
+                    <span>
+                      <strong>{task.pendingInstance}</strong>
+                      <small>
+                        {task.status === 'running'
+                          ? '正在安装'
+                          : task.status === 'failed'
+                            ? '安装失败 · 查看原因'
+                            : '安装已取消'}{' '}
+                        ·{' '}
+                        {task.total
+                          ? `${Math.floor((task.completed / task.total) * 100)}%（当前步骤）`
+                          : '处理中'}
+                      </small>
+                      <progress
+                        aria-label="待安装实例当前步骤"
+                        value={task.total ? task.completed : undefined}
+                        max={task.total || undefined}
+                      />
+                    </span>
+                  </button>
+                )}
                 {matches.map((item) => (
                   <button
                     key={item.id}
@@ -480,7 +622,7 @@ function Shell({ services }: { services: Services }) {
                         (state.settings.launchMode === 'offline' ||
                           state.account)
                       )
-                        void run(() => services.native.launch(item.id));
+                        void requestLaunch();
                     }}
                   >
                     <span
@@ -489,22 +631,28 @@ function Shell({ services }: { services: Services }) {
                       <Box size={27} />
                     </span>
                     <span className="library-instance-name">
-                      <strong>{item.name}</strong>
+                      <strong title={item.name}>{item.name}</strong>
                       <small>
-                        {item.version} ·{' '}
-                        {item.fabricVersion
-                          ? `Fabric ${item.fabricVersion}`
-                          : '原版'}
+                        {item.version} · {instanceLoader(item)}
                       </small>
                     </span>
-                    <ChevronRight size={15} />
+                    {selected?.id === item.id &&
+                    !!checks.report?.issues.length ? (
+                      <AlertTriangle
+                        className="instance-warning"
+                        size={16}
+                        aria-label={`${checks.report.issues.length} 项启动建议`}
+                      />
+                    ) : (
+                      <ChevronRight size={15} />
+                    )}
                   </button>
                 ))}
                 {!state?.instances.length && (
                   <div className="library-empty">
                     <Box size={30} />
-                    <strong>添加你的第一个实例</strong>
-                    <p>原版或 Fabric，独立保存你的世界。</p>
+                    <strong>还没有游戏实例</strong>
+                    <p>安装游戏或导入整合包，开始你的冒险。</p>
                     <button
                       onClick={() =>
                         change({
@@ -527,22 +675,14 @@ function Shell({ services }: { services: Services }) {
                 )}
               </div>
               <div className="library-sidebar-tools">
-                <label className="library-search">
-                  <Search size={17} />
-                  <input
-                    aria-label="搜索真实实例"
-                    value={nav.query}
-                    maxLength={256}
-                    placeholder="搜索名称或游戏版本…"
-                    onChange={(event) =>
-                      services.preferences.update({
-                        navigation: { ...nav, query: event.target.value },
-                      })
-                    }
-                  />
-                </label>
                 <button
                   className="library-import-link"
+                  disabled={
+                    !available ||
+                    running ||
+                    !!state?.loginPending ||
+                    packPicking
+                  }
                   onDragOver={(event) => event.preventDefault()}
                   onDrop={(event) => {
                     event.preventDefault();
@@ -568,18 +708,23 @@ function Shell({ services }: { services: Services }) {
                       () => setDroppedPack(file),
                     );
                   }}
-                  onClick={() =>
-                    change({ section: 'download', downloadCategory: 'modpack' })
-                  }
+                  onClick={() => void importLocalPack()}
                 >
                   <FolderOpen size={22} />
                   <span>
                     <strong>导入整合包</strong>
-                    <small>拖入 ZIP / MRPACK，先预览再新建实例</small>
+                    <small>拖入 ZIP / MRPACK</small>
                   </span>
                 </button>
               </div>
             </>
+          ) : view === 'extensions' ? (
+            <div className="extension-sidebar">
+              <Puzzle size={28} />
+              <h2>扩展你的工作区</h2>
+              <p>选择喜欢的布局，让常用功能触手可及。</p>
+              <span className="subtle-badge">官方模块 · 本地运行</span>
+            </div>
           ) : (
             <>
               <div className="library-list-heading">
@@ -730,7 +875,46 @@ function Shell({ services }: { services: Services }) {
                 {notice || native.error}
               </p>
             )}
-            {view === 'library' && (
+            {view === 'library' && !selected && (
+              <section className="library-welcome" style={backgroundStyle}>
+                <div className="welcome-emblem">
+                  <Box size={38} />
+                </div>
+                <span className="welcome-kicker">EASY CRAFT</span>
+                <h1>下一个世界，从这里开始。</h1>
+                <p>
+                  安装 Minecraft，或带上你喜欢的整合包。
+                  <br />
+                  每个实例独立保存，让冒险各有天地。
+                </p>
+                <div className="welcome-actions">
+                  <button
+                    className="primary"
+                    onClick={() =>
+                      change({
+                        section: 'download',
+                        downloadCategory: 'vanilla',
+                      })
+                    }
+                  >
+                    <Plus size={18} /> 安装游戏
+                  </button>
+                  <button
+                    disabled={
+                      !available ||
+                      running ||
+                      !!state?.loginPending ||
+                      packPicking
+                    }
+                    onClick={() => void importLocalPack()}
+                  >
+                    <FolderOpen size={18} /> 导入整合包
+                  </button>
+                </div>
+                <small>支持原版与 Fabric · ZIP / MRPACK 导入</small>
+              </section>
+            )}
+            {view === 'library' && selected && (
               <>
                 <section
                   className={`library-hero ${tab !== 'overview' ? 'compact-hero' : ''}`}
@@ -738,14 +922,26 @@ function Shell({ services }: { services: Services }) {
                     ...backgroundStyle,
                   }}
                 >
-                  {tab === 'overview' && (
-                    <div className="library-hero-wordmark">
-                      EASY CRAFT<span>YOUR WORLD, YOUR WAY</span>
-                    </div>
-                  )}
+                  <button
+                    className="hero-menu"
+                    aria-label="当前实例更多操作"
+                    onClick={(event) => {
+                      menuTrigger.current = event.currentTarget;
+                      const bounds =
+                        event.currentTarget.getBoundingClientRect();
+                      setMenu({
+                        id: selected.id,
+                        name: selected.name,
+                        x: bounds.right - 230,
+                        y: bounds.bottom,
+                      });
+                    }}
+                  >
+                    <MoreHorizontal size={19} />
+                  </button>
                   <div className="library-hero-bottom">
                     <div>
-                      <h1>{selected?.name ?? '你的世界，准备出发。'}</h1>
+                      <h1 title={selected.name}>{selected.name}</h1>
                       <div className="library-chips">
                         <span>
                           <Box size={13} />
@@ -755,40 +951,116 @@ function Shell({ services }: { services: Services }) {
                         </span>
                         {selected && (
                           <>
-                            <span>
-                              {selected.fabricVersion
-                                ? `Fabric ${selected.fabricVersion}`
-                                : '原版旅程'}
-                            </span>
+                            <span>{instanceLoader(selected)}</span>
                             <span>
                               <Cpu size={13} />
-                              Java {selected.javaMajor}
+                              需要 Java {selected.javaMajor}
                             </span>
                           </>
                         )}
                       </div>
                     </div>
-                    <button
-                      className="library-launch"
-                      disabled={!canLaunch}
-                      onClick={() =>
-                        selected &&
-                        void run(() => services.native.launch(selected.id))
-                      }
-                    >
-                      <Play fill="currentColor" size={21} />
-                      {running ? '游戏 / 任务运行中' : '启动游戏'}
-                    </button>
+                    <div className="hero-launch-group">
+                      <button
+                        className="library-launch"
+                        disabled={!canLaunch}
+                        onClick={() => void requestLaunch()}
+                      >
+                        <Play fill="currentColor" size={21} />
+                        {running ? '游戏 / 任务运行中' : '启动游戏'}
+                      </button>
+                      <span className="launch-identity">
+                        {identity ? (
+                          `${identity} · ${running ? '运行中' : state?.settings.launchMode === 'offline' ? '离线账户' : 'Microsoft'}`
+                        ) : (
+                          <button onClick={() => setAccount(true)}>
+                            选择账号后启动
+                          </button>
+                        )}
+                      </span>
+                    </div>
                   </div>
                 </section>
+                <button
+                  className={`preflight-summary ${checks.report?.issues.length ? 'has-warning' : ''}`}
+                  onClick={() => setChecksOpen(true)}
+                >
+                  {checks.report?.issues.length ? (
+                    <AlertTriangle size={15} />
+                  ) : (
+                    <ShieldCheck size={15} />
+                  )}
+                  <span>
+                    {checks.busy
+                      ? checks.report
+                        ? '正在核对文件变化，上次报告待更新…'
+                        : '正在检查本地模组…'
+                      : checks.stale
+                        ? '上次报告待更新 · 可查看详情或详细检查'
+                        : checks.error
+                          ? '启动检查未完成，仍可启动'
+                          : checks.report?.issues.length
+                            ? `发现 ${checks.report.issues.length} 项依赖问题，仍可启动`
+                            : checks.report?.details?.complete
+                              ? '支持范围内未发现声明问题 · 查看检查详情'
+                              : checks.report
+                                ? '检查未完成 · 查看范围与建议'
+                                : '尚未检查 · 查看范围与建议'}
+                  </span>
+                  {checks.report?.details && (
+                    <small
+                      className="check-time"
+                      title={new Date(
+                        checks.report.details.checkedAt,
+                      ).toLocaleString()}
+                    >
+                      {checks.stale ? '上次' : '核对'}{' '}
+                      {new Date(
+                        checks.report.details.checkedAt,
+                      ).toLocaleTimeString([], {
+                        hour: '2-digit',
+                        minute: '2-digit',
+                      })}
+                    </small>
+                  )}
+                  <ChevronRight size={14} />
+                </button>
                 <div
                   className="library-tabs"
                   role="tablist"
                   aria-label="实例工作区"
+                  onKeyDown={(event) => {
+                    if (
+                      !['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(
+                        event.key,
+                      )
+                    )
+                      return;
+                    event.preventDefault();
+                    const tabs = Array.from(
+                      event.currentTarget.querySelectorAll<HTMLButtonElement>(
+                        '[role="tab"]',
+                      ),
+                    );
+                    const current = tabs.indexOf(
+                      document.activeElement as HTMLButtonElement,
+                    );
+                    const index =
+                      event.key === 'Home'
+                        ? 0
+                        : event.key === 'End'
+                          ? tabs.length - 1
+                          : (current +
+                              (event.key === 'ArrowRight' ? 1 : -1) +
+                              tabs.length) %
+                            tabs.length;
+                    tabs[index]?.click();
+                    tabs[index]?.focus();
+                  }}
                 >
                   {(
                     [
-                      { id: 'overview', name: '实例详情' },
+                      { id: 'overview', name: '概览' },
                       { id: 'mods', name: '模组' },
                       { id: 'resources', name: '资源与光影' },
                       { id: 'worlds', name: '存档' },
@@ -799,6 +1071,7 @@ function Shell({ services }: { services: Services }) {
                     <button
                       key={id}
                       role="tab"
+                      tabIndex={tab === id ? 0 : -1}
                       aria-selected={tab === id}
                       onClick={() => selectTab(id)}
                     >
@@ -807,168 +1080,58 @@ function Shell({ services }: { services: Services }) {
                   ))}
                 </div>
                 {tab === 'overview' ? (
-                  <div className="library-details-grid">
-                    <div>
-                      <section className="card library-description">
-                        <h2>
-                          {selected ? '属于你的独立世界' : '从一个世界开始'}
-                        </h2>
-                        <p>
-                          {selected
-                            ? '实例的存档与配置独立保存。启动前可调整世界规则，音量和视距在实例设置中修改。'
-                            : '安装你喜欢的版本，再选择账户开始冒险。这里仅展示真实安装的实例。'}
-                        </p>
-                        <div className="library-tags">
-                          <span>本地保存</span>
-                          <span>独立实例</span>
-                          <span>配置可备份</span>
-                        </div>
-                      </section>
-                      <section className="card">
-                        <h2>快速操作</h2>
-                        <div className="button-row">
-                          <button
-                            disabled={!selected || running}
-                            onClick={() =>
-                              selected &&
-                              setRename({
-                                id: selected.id,
-                                name: selected.name,
-                              })
-                            }
-                          >
-                            重命名实例
-                          </button>
-                          <button
-                            disabled={!selected}
-                            onClick={(event) => {
-                              if (selected) {
-                                menuTrigger.current = event.currentTarget;
-                                const bounds =
-                                  event.currentTarget.getBoundingClientRect();
-                                setMenu({
-                                  id: selected.id,
-                                  name: selected.name,
-                                  x: bounds.left,
-                                  y: bounds.bottom,
-                                });
-                              }
-                            }}
-                          >
-                            实例操作
-                          </button>
-                          <button
-                            disabled={!selected || running}
-                            onClick={() =>
-                              selected &&
-                              void run(() =>
-                                services.native.openContent(selected.id),
-                              )
-                            }
-                          >
-                            打开游戏目录
-                          </button>
-                          <button
-                            disabled={!selected}
-                            onClick={() => selectTab('worlds')}
-                          >
-                            世界设置
-                          </button>
-                          <button
-                            onClick={() =>
-                              change({
-                                section: 'settings',
-                                settingsCategory: 'launch',
-                              })
-                            }
-                          >
-                            内存与 Java
-                          </button>
-                          <button onClick={() => setAccount(true)}>
-                            账户与皮肤头像
-                          </button>
-                        </div>
-                      </section>
-                    </div>
-                    <section className="card library-facts">
-                      <h2>实例信息</h2>
-                      <dl>
-                        <dt>游戏版本</dt>
-                        <dd>{selected?.version ?? '尚未安装'}</dd>
-                        <dt>加载器</dt>
-                        <dd>
-                          {selected?.fabricVersion
-                            ? `Fabric ${selected.fabricVersion}`
-                            : '原版'}
-                        </dd>
-                        <dt>Java 版本</dt>
-                        <dd>
-                          {selected
-                            ? `Java ${selected.javaMajor} (x64)`
-                            : '等待选择实例'}
-                          {selected &&
-                            ` · ${selected.launch?.javaPath ? '实例覆盖' : '全局默认'}`}
-                        </dd>
-                        {selected && (
-                          <>
-                            <dt>Java 路径</dt>
-                            <dd className="resource-hash">
-                              {effectiveSettings?.javaPath || '尚未配置'}
-                            </dd>
-                          </>
-                        )}
-                        <dt>启动身份</dt>
-                        <dd>{identity || '尚未选择账户'}</dd>
-                        <dt>堆内存</dt>
-                        <dd>
-                          {effectiveSettings?.memoryMode === 'auto'
-                            ? '自动分配'
-                            : `${effectiveSettings?.memoryMb ?? 2048} MB`}
-                          {` · ${selected?.launch?.memory ? '实例覆盖' : '全局默认'}`}
-                        </dd>
-                      </dl>
-                    </section>
-                  </div>
+                  <InstanceOverview
+                    key={`${selected.id}:${instanceIsolated(selected)}`}
+                    service={services.native}
+                    instance={selected}
+                    settings={effectiveSettings!}
+                    identity={identity ?? ''}
+                    running={!!running}
+                    onWorlds={() => selectTab('worlds')}
+                    onMods={() => selectTab('mods')}
+                    onSettings={() => selectTab('options')}
+                    onChecks={() => setChecksOpen(true)}
+                    report={setNotice}
+                  />
                 ) : selected &&
                   (tab === 'mods' ||
                     tab === 'resources' ||
                     tab === 'screenshots') ? (
                   <>
-                    {tab === 'resources' && (
-                      <div className="content-subtabs">
-                        <button
-                          aria-pressed={resourceKind === 'resourcepacks'}
-                          onClick={() =>
-                            change({
-                              resourceKinds: {
-                                ...nav.resourceKinds,
-                                [selected.id]: 'resourcepacks',
-                              },
-                            })
-                          }
-                        >
-                          资源包
-                        </button>
-                        <button
-                          aria-pressed={resourceKind === 'shaderpacks'}
-                          onClick={() =>
-                            change({
-                              resourceKinds: {
-                                ...nav.resourceKinds,
-                                [selected.id]: 'shaderpacks',
-                              },
-                            })
-                          }
-                        >
-                          光影包
-                        </button>
-                      </div>
-                    )}
                     <ContentPanel
-                      key={`${selected.id}:${tab}:${resourceKind}`}
+                      key={`${selected.id}:${tab}:${resourceKind}:${instanceIsolated(selected)}`}
                       service={services.native}
                       id={selected.id}
                       kind={contentKind}
+                      categorySwitch={
+                        tab === 'resources' ? (
+                          <div
+                            className="content-subtabs"
+                            aria-label="资源类型"
+                          >
+                            {(['resourcepacks', 'shaderpacks'] as const).map(
+                              (kind) => (
+                                <button
+                                  key={kind}
+                                  aria-pressed={resourceKind === kind}
+                                  onClick={() =>
+                                    change({
+                                      resourceKinds: {
+                                        ...nav.resourceKinds,
+                                        [selected.id]: kind,
+                                      },
+                                    })
+                                  }
+                                >
+                                  {kind === 'resourcepacks'
+                                    ? '资源包'
+                                    : '光影包'}
+                                </button>
+                              ),
+                            )}
+                          </div>
+                        ) : undefined
+                      }
                       query={nav.contentQueries?.[contentQueryKey] ?? ''}
                       onQuery={(query) =>
                         change({
@@ -994,26 +1157,21 @@ function Shell({ services }: { services: Services }) {
                       }
                     />
                   </>
+                ) : selected && tab === 'options' ? (
+                  <InstanceSettings
+                    key={`${selected.id}:settings`}
+                    service={services.native}
+                    id={selected.id}
+                    running={!!running}
+                  />
                 ) : selected ? (
                   <>
-                    {tab === 'options' && (
-                      <div key={`${selected.id}:launch-settings`}>
-                        <JavaPanel
-                          service={services.native}
-                          instanceId={selected.id}
-                        />
-                        <MemoryPanel
-                          service={services.native}
-                          instanceId={selected.id}
-                        />
-                      </div>
-                    )}
                     <WorldSettingsPanel
-                      key={`${selected.id}:${tab}`}
+                      key={`${selected.id}:${tab}:${instanceIsolated(selected)}`}
                       service={services.native}
                       id={selected.id}
                       running={!!running}
-                      section={tab === 'options' ? 'options' : 'world'}
+                      section="world"
                       onDatapacks={(worldId) =>
                         change({
                           section: 'download',
@@ -1028,7 +1186,7 @@ function Shell({ services }: { services: Services }) {
                   </>
                 ) : (
                   <section className="card library-empty">
-                    <Globe2 size={30} />
+                    <Box size={30} />
                     <h2>先选择一个已安装实例</h2>
                     <button
                       onClick={() =>
@@ -1047,9 +1205,20 @@ function Shell({ services }: { services: Services }) {
             {view === 'settings' && (
               <div className="workspace-page">
                 <div className="library-page-heading">
-                  <span>PREFERENCES</span>
-                  <h1>{category}设置</h1>
-                  <p>全局默认；运行环境更改在下次启动时生效。</p>
+                  <h1>
+                    {nav.settingsCategory === 'downloads'
+                      ? '下载设置'
+                      : `${category}设置`}
+                  </h1>
+                  <p>
+                    {nav.settingsCategory === 'appearance'
+                      ? '选择你的配色与背景，调整后立即生效。'
+                      : nav.settingsCategory === 'launch'
+                        ? '全局默认，运行环境更改在下次启动时生效。'
+                        : nav.settingsCategory === 'downloads'
+                          ? '管理下载文件与本地缓存。'
+                          : '应用信息、日志与诊断工具。'}
+                  </p>
                 </div>
                 {nav.settingsCategory === 'launch' && (
                   <>
@@ -1057,10 +1226,24 @@ function Shell({ services }: { services: Services }) {
                       <>
                         <JavaPanel service={services.native} />
                         <MemoryPanel service={services.native} />
+                        <IsolationPanel service={services.native} />
                       </>
                     )}
                     <section className="card">
                       <h2>启动行为</h2>
+                      <label className="toggle-row">
+                        <span>选中实例后自动检查 Mod 依赖</span>
+                        <input
+                          aria-label="自动检查 Mod 依赖"
+                          type="checkbox"
+                          checked={preferences.autoModCheck !== false}
+                          onChange={(event) =>
+                            services.preferences.update({
+                              autoModCheck: event.target.checked,
+                            })
+                          }
+                        />
+                      </label>
                       <label className="toggle-row">
                         <span>允许双击实例启动（默认关闭）</span>
                         <input
@@ -1117,9 +1300,6 @@ function Shell({ services }: { services: Services }) {
                     >
                       恢复默认强调色
                     </button>
-                    <p className="hint">
-                      立即预览并保存。文字和按钮会调整明暗，保持清晰；背景图片与错误、警告的含义保持独立。
-                    </p>
                     <label className="file-setting">
                       实例页背景{available ? '（保存到本机）' : '（本地预览）'}
                       <input
@@ -1143,8 +1323,8 @@ function Shell({ services }: { services: Services }) {
                       </button>
                     )}
                     <p className="hint">
-                      PNG、JPEG 或 WebP，最多 10 MiB / 1600 万像素；保存时转换为
-                      PNG。{backgroundBusy ? '正在读取或保存背景…' : ''}
+                      PNG / JPEG / WebP，最大 10 MiB。
+                      {backgroundBusy ? '正在保存…' : ''}
                     </p>
                     <div
                       className="appearance-background-preview"
@@ -1183,9 +1363,6 @@ function Shell({ services }: { services: Services }) {
                         }
                       />
                     </label>
-                    <p className="hint">
-                      外观调整立即生效，偏好写入本机存储，保存失败时上方会提示。减少动态效果关闭时，仍遵循系统的减少动画偏好。
-                    </p>
                     <label className="native-label">
                       界面缩放
                       <select
@@ -1229,7 +1406,7 @@ function Shell({ services }: { services: Services }) {
                     <section className="card">
                       <h2>下载与缓存</h2>
                       <p>
-                        当前采用已验证的有限并发、重试、哈希校验、缓存复用与取消。并发和重试次数暂不开放修改。
+                        下载支持自动重试、文件校验和缓存复用，可在任务中查看进度或取消。
                       </p>
                       {state && (
                         <p className="data-root">数据目录：{state.dataRoot}</p>
@@ -1276,7 +1453,7 @@ function Shell({ services }: { services: Services }) {
               </div>
             )}
             {view === 'download' && (
-              <div className="workspace-page">
+              <div className="workspace-page download-page">
                 {nav.downloadCategory === 'vanilla' ? (
                   <NativeWorkspace
                     compact
@@ -1286,7 +1463,6 @@ function Shell({ services }: { services: Services }) {
                 ) : (
                   <>
                     <div className="library-page-heading">
-                      <span>CONTENT</span>
                       <h1>{category}</h1>
                       <p>
                         {nav.downloadCategory === 'modpack'
@@ -1340,8 +1516,16 @@ function Shell({ services }: { services: Services }) {
                 )}
               </div>
             )}
+            {view === 'extensions' && <ExtensionsPanel services={services} />}
           </div>
           <footer className="workspace-taskbar">
+            {running ? (
+              <RefreshCw size={14} />
+            ) : task?.status === 'failed' ? (
+              <AlertTriangle size={14} />
+            ) : (
+              <Check size={14} />
+            )}
             <span>
               {running
                 ? task?.pid
@@ -1352,10 +1536,39 @@ function Shell({ services }: { services: Services }) {
                   : task?.status === 'cancelled'
                     ? '任务已取消'
                     : task?.status === 'succeeded'
-                      ? '任务已完成'
+                      ? task.message || '任务已完成'
                       : '没有正在进行的任务'}
             </span>
-            <button onClick={() => setTasks(true)}>查看任务</button>
+            {running && !task?.pid && (
+              <div className="taskbar-progress" aria-label="当前任务进度">
+                {task && task.total > 0 ? (
+                  <>
+                    <progress
+                      aria-label="任务进度"
+                      value={task.completed}
+                      max={task.total}
+                    />
+                    <small>
+                      {Math.round(
+                        Math.min(1, task.completed / task.total) * 100,
+                      )}
+                      % · {task.completed}/{task.total}
+                    </small>
+                  </>
+                ) : (
+                  <>
+                    <progress aria-label="正在确定任务总量" />
+                    <small>正在处理…</small>
+                  </>
+                )}
+              </div>
+            )}
+            {localScan && (
+              <button onClick={() => setLocalImportOpen(true)}>
+                查看扫描结果
+              </button>
+            )}
+            <button onClick={() => setTasks(true)}>任务与日志</button>
           </footer>
         </main>
       </div>
@@ -1367,9 +1580,99 @@ function Shell({ services }: { services: Services }) {
           />
         </Modal>
       )}
+      {pickedPack && (
+        <Modal title="导入本地整合包" onClose={() => setPickedPack(null)}>
+          <PackInspector
+            service={services.native}
+            initialPreview={pickedPack}
+            onStarted={() => {
+              setPickedPack(null);
+              setTasks(true);
+            }}
+          />
+        </Modal>
+      )}
+      {localImportOpen && (
+        <Modal
+          title="扫描/导入本地版本"
+          onClose={() => setLocalImportOpen(false)}
+        >
+          <LocalVersionImport
+            service={services.native}
+            initialScan={localScan}
+            onScan={setLocalScan}
+          />
+        </Modal>
+      )}
+      {checksOpen && selected && (
+        <Modal
+          title={`启动检查 · ${selected.name}`}
+          onClose={() => setChecksOpen(false)}
+        >
+          <LaunchChecks
+            report={checks.report}
+            error={checks.error}
+            busy={checks.busy}
+            stale={checks.stale}
+            canLaunch={canLaunch}
+            onRefresh={() => void checks.refresh()}
+            onLaunch={() => {
+              launchPending.current = false;
+              setChecksOpen(false);
+              void run(() => services.native.launch(selected.id));
+            }}
+            onFind={() => {
+              setChecksOpen(false);
+              change({ section: 'download', downloadCategory: 'mod' });
+            }}
+            onLogs={() => {
+              setChecksOpen(false);
+              setTasks(true);
+            }}
+          />
+        </Modal>
+      )}
       {tasks && (
         <Modal title="任务与日志" onClose={() => setTasks(false)}>
           <p role="status">{task?.message || '没有正在进行的任务。'}</p>
+          <ol className="task-steps">
+            {task?.steps?.map((step, index) => (
+              <li key={index}>
+                <strong>第 {index + 1} 步</strong>
+                <span>{step.message}</span>
+                {step.outcome === 'fallback' ? (
+                  <span>来源不可用，已切换镜像</span>
+                ) : step.done ? (
+                  <span>完成 · 100%</span>
+                ) : step.total > 0 ? (
+                  <>
+                    <progress value={step.completed} max={step.total} />
+                    <span>
+                      {Math.min(
+                        100,
+                        Math.floor((step.completed / step.total) * 100),
+                      )}
+                      % · {step.completed}/{step.total}
+                    </span>
+                  </>
+                ) : (
+                  <span>
+                    {task.status === 'running' ? '正在确定总量…' : task.status}
+                  </span>
+                )}
+              </li>
+            ))}
+          </ol>
+          {localScan && (
+            <button
+              onClick={() => {
+                setTasks(false);
+                setLocalImportOpen(true);
+              }}
+            >
+              查看扫描结果并选择导入
+            </button>
+          )}
           {task && task.total > 0 && !task.pid && (
             <progress
               aria-label="游戏任务进度"

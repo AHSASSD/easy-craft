@@ -31,6 +31,7 @@ pub struct Entry {
 }
 #[derive(Clone)]
 enum Source {
+    Local(PathBuf),
     Download { url: String, sha1: String },
     Archive(usize),
 }
@@ -56,6 +57,9 @@ pub struct Origin {
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Plan {
+    pub recommended_memory_mb: Option<u32>,
+    pub forge_version: String,
+    pub curse_files: Vec<(u64, u64)>,
     pub token: String,
     pub name: String,
     pub pack_version: String,
@@ -82,7 +86,7 @@ fn path(value: &str) -> Result<()> {
     {
         return Err("整合包路径无效或使用了保留的启动器/世界锁文件名".into());
     }
-    model::safe_path(Path::new("C:/EasyCraftPackValidation"), value).map(|_| ())
+    model::validate_relative_path(value)
 }
 fn text(value: &Value, key: &str, max: usize) -> Result<String> {
     value[key]
@@ -117,11 +121,67 @@ fn parse(input: Arc<Input>, preview: &mut packs::PackPreview) -> Result<Plan> {
     file.rewind().map_err(|_| "无法读取整合包快照")?;
     let archive_sha512 = resource_install::sum(&input.path)?;
     let mut zip = zip::ZipArchive::new(file).map_err(|_| "整合包快照无效")?;
+    let is_curse = preview.kind == "CurseForge ZIP";
     let index = zip
-        .by_name("modrinth.index.json")
+        .by_name(if is_curse {
+            "manifest.json"
+        } else {
+            "modrinth.index.json"
+        })
         .map_err(|_| "缺少 Modrinth 清单")?;
-    let value: Value =
+    let mut value: Value =
         serde_json::from_reader(index.take(2 * 1024 * 1024 + 1)).map_err(|_| "整合包清单无效")?;
+    let mut forge_version = String::new();
+    let recommended_memory_mb = if is_curse {
+        value["minecraft"]["recommendedRam"]
+            .as_u64()
+            .filter(|v| (512..=16384).contains(v))
+            .map(|v| v as u32)
+    } else {
+        None
+    };
+    let mut curse_files = vec![];
+    if is_curse {
+        if value["manifestVersion"] != 1
+            || value["manifestType"] != "minecraftModpack"
+            || value["overrides"] != "overrides"
+        {
+            return Err("不支持的 CurseForge 清单或 overrides 目录".into());
+        }
+        let loaders = value["minecraft"]["modLoaders"]
+            .as_array()
+            .filter(|v| v.len() == 1)
+            .ok_or("整合包必须声明一个加载器")?;
+        forge_version = loaders[0]["id"]
+            .as_str()
+            .and_then(|v| v.strip_prefix("forge-"))
+            .filter(|v| crate::forge::valid_loader(v))
+            .ok_or("此 CurseForge 加载器尚未支持")?
+            .into();
+        if value["minecraft"]["version"] != "1.12.2" {
+            return Err("CurseForge Forge 安装目前先支持 1.12.2 旧格式安装器".into());
+        }
+        for file in value["files"]
+            .as_array()
+            .filter(|v| v.len() <= 1000)
+            .ok_or("文件列表超限")?
+        {
+            if file["required"] != false {
+                curse_files.push((
+                    file["projectID"]
+                        .as_u64()
+                        .filter(|v| *v > 0)
+                        .ok_or("项目 ID 无效")?,
+                    file["fileID"]
+                        .as_u64()
+                        .filter(|v| *v > 0)
+                        .ok_or("文件 ID 无效")?,
+                ));
+            }
+        }
+        value = serde_json::json!({"formatVersion":1,"game":"minecraft","name":value["name"],"versionId":value["version"],"dependencies":{"minecraft":value["minecraft"]["version"]},"files":[]});
+        preview.warnings.push("CurseForge 文件将从官方公开接口获取；网站接口可能变化。缺失文件将中止，不跳过必需模组。".into());
+    }
     if value["formatVersion"] != 1 || value["game"] != "minecraft" {
         return Err("不支持的整合包格式".into());
     }
@@ -276,6 +336,9 @@ fn parse(input: Arc<Input>, preview: &mut packs::PackPreview) -> Result<Plan> {
     drop(zip);
     drop(guard);
     Ok(Plan {
+        recommended_memory_mb,
+        forge_version,
+        curse_files,
         token: uuid::Uuid::new_v4().to_string(),
         name,
         pack_version,
@@ -314,7 +377,7 @@ pub fn inspect(root: &Path, reader: impl Read) -> Result<packs::PackPreview> {
     file.rewind().map_err(|_| "整合包快照读取失败")?;
     let mut preview = packs::preview_reader(file)?;
     drop(guard);
-    if preview.kind == "MRPACK" {
+    if ["MRPACK", "CurseForge ZIP"].contains(&preview.kind.as_str()) {
         match parse(input, &mut preview) {
             Ok(plan) => preview.install = Some(plan),
             Err(error) => preview.warnings.push(format!("不可安装：{error}")),
@@ -605,7 +668,10 @@ pub fn recover(root: &Path, instances: &[Instance]) -> Result<Vec<String>> {
     Ok(warnings)
 }
 pub fn begin(root: &Path, plan: &Plan, instance: Instance) -> Result<Transaction> {
-    if !uuid(&plan.token) || !uuid(&instance.id) {
+    begin_instance(root, &plan.token, instance)
+}
+pub fn begin_instance(root: &Path, token: &str, instance: Instance) -> Result<Transaction> {
+    if !uuid(token) || !uuid(&instance.id) {
         return Err("整合包事务标识无效".into());
     }
     let directory = model::safe_path(root, &format!("instances/{}", instance.id))?;
@@ -613,7 +679,7 @@ pub fn begin(root: &Path, plan: &Plan, instance: Instance) -> Result<Transaction
         .map_err(|_| "无法创建暂存父目录")?;
     fs::create_dir(&directory).map_err(|_| "暂存目录已存在，未覆盖")?;
     let transaction = Transaction {
-        token: plan.token.clone(),
+        token: token.into(),
         instance,
         identity: resource_install::file_identity(&directory)?,
         files: BTreeMap::new(),
@@ -625,12 +691,12 @@ pub fn begin(root: &Path, plan: &Plan, instance: Instance) -> Result<Transaction
     }
     Ok(transaction)
 }
-fn copy(
+pub(crate) fn copy(
     root: &Path,
     transaction: &mut Transaction,
     relative: &str,
     reader: impl Read,
-    expected: Option<&Entry>,
+    expected: Option<(u64, &str)>,
     cancel: &CancellationToken,
 ) -> Result<()> {
     let directory = transaction.directory(root, false)?;
@@ -659,7 +725,7 @@ fn copy(
             }
             size += count as u64;
             if size > crate::file_picker::MAX_FILE
-                || expected.is_some_and(|entry| size > entry.size)
+                || expected.is_some_and(|(expected_size, _)| size > expected_size)
             {
                 return Err("暂存文件大小超过声明".into());
             }
@@ -669,7 +735,7 @@ fn copy(
             digest.update(&bytes[..count]);
         }
         let sum = format!("{:x}", digest.finalize());
-        if expected.is_some_and(|entry| entry.size != size || entry.sha512 != sum) {
+        if expected.is_some_and(|(expected_size, hash)| expected_size != size || hash != sum) {
             return Err("整合包文件大小或 SHA-512 不一致".into());
         }
         output.sync_all().map_err(|_| "暂存文件同步失败")?;
@@ -698,6 +764,81 @@ pub fn check_selection(plan: &Plan, selected: &[String]) -> Result<()> {
     }
     Ok(())
 }
+fn curse_recovery(root: &Path, project: u64, file: u64) -> Result<Option<Value>> {
+    // Immutable compatibility receipt: the retired website record still has its exact CDN artifact.
+    // https://mediafilez.forgecdn.net/files/3404/975/lootbags-2.5.8.7.jar
+    // Verified during Mercury installation; never substitute another release or skip a required file.
+    if (project, file) == (386143, 3404975) {
+        return Ok(Some(serde_json::json!({
+            "id":3404975, "projectId":386143,
+            "fileName":"lootbags-2.5.8.7.jar", "fileLength":302653,
+            "sha1":"762294ef3baf7a09d9d875e6218895fa51b89d43"
+        })));
+    }
+    let path = model::safe_path(root, &format!("pack-recovery/{project}-{file}.json"))?;
+    if !path.exists() {
+        return Ok(None);
+    }
+    if !path.is_file() || fs::metadata(&path).map_err(|_| "补录记录不可读")?.len() > 4096 {
+        return Err("补录记录过大或不是文件".into());
+    }
+    serde_json::from_slice(&fs::read(path).map_err(|_| "补录记录不可读")?)
+        .map(Some)
+        .map_err(|_| "补录记录无效".into())
+}
+pub async fn resolve_curse(host: &Host, plan: &mut Plan, cancel: &CancellationToken) -> Result<()> {
+    use futures_util::{stream, StreamExt};
+    let count = plan.curse_files.len();
+    host.progress("pack-mods", "解析并下载 CurseForge 必需模组", 0, count);
+    let jobs=stream::iter(plan.curse_files.clone()).map(|(project,file)| async move {
+        let metadata_path=format!("pack-cache/meta-{project}-{file}.json");
+        let cached=model::safe_path(&host.root,&metadata_path)?;
+        let saved=if fs::metadata(&cached).is_ok_and(|m|m.len()<=128*1024){fs::read(&cached).ok().and_then(|bytes|serde_json::from_slice::<Value>(&bytes).ok())}else{None};
+        let recovery = curse_recovery(&host.root,project,file)?;
+        let raw=match saved {Some(value)=>value,None=>{let value=match crate::pack_download::json(host,&format!("https://www.curseforge.com/api/v1/mods/{project}/files/{file}"),cancel).await { Ok(value)=>value, Err(_) if !cancel.is_cancelled() && recovery.is_some()=>Value::Null, Err(error)=>return Err(error) };if !value["data"].is_null(){fs::create_dir_all(cached.parent().ok_or("缓存路径无效")?).map_err(|_|"无法创建元数据缓存")?;model::save_json(&host.root,&metadata_path,&value)?;}value}};
+        let mut row=raw["data"].clone();
+        let mut recovery_hash=None;
+        if row.is_null(){
+            row=recovery.ok_or_else(||format!("CurseForge 必需文件已无法获取：项目 {project} / 文件 {file}；尚无已验证的恢复信息，未跳过或替换版本。"))?;
+            recovery_hash=Some(row["sha1"].as_str().filter(|v|model::valid_sha1(v)).ok_or("补录缺少 SHA-1")?.to_string());
+        }
+        if row["id"]!=file || row["projectId"]!=project {return Err("CurseForge 文件归属不符".into());}
+        let name=text(&row,"fileName",240)?; path(&name)?; if name.contains('/') || ![".jar",".zip"].iter().any(|suffix|name.to_ascii_lowercase().ends_with(suffix)) {return Err(format!("不支持的整合包资源格式：{name}"));}
+        let size=row["fileLength"].as_u64().filter(|v|*v>0&&*v<=512*1024*1024).ok_or("Mod 文件大小无效")?;
+        let destination=format!("pack-cache/curseforge-{project}-{file}.data");
+        let url=if recovery_hash.is_some(){let mut url=reqwest::Url::parse(&format!("https://mediafilez.forgecdn.net/files/{}/{}/",file/1000,file%1000)).map_err(|_|"CDN 地址无效")?;url.path_segments_mut().map_err(|_|"CDN 地址无效")?.pop_if_empty().push(&name);url.to_string()}else{format!("https://www.curseforge.com/api/v1/mods/{project}/files/{file}/download")};
+        let cached=crate::pack_download::fetch(host,&url,&destination,Some(size),cancel).await?;
+        let recovered = recovery_hash.is_some();
+        if let Some(hash)=recovery_hash {if !net::matches(&cached,&hash,Some(size))?{return Err("恢复的历史文件 SHA-1 不符，未安装".into());}}
+        let sha512=resource_install::sum(&cached)?;
+        let directory=if name.to_ascii_lowercase().ends_with(".jar"){"mods"}else{let mut zip=zip::ZipArchive::new(File::open(&cached).map_err(|_|"缓存不可读")?).map_err(|_|"资源归档无效")?;if zip.by_name("pack.mcmeta").is_ok(){"resourcepacks"}else if zip.file_names().any(|name|name.is_ok_and(|name|name.starts_with("shaders/"))){"shaderpacks"}else{return Err(format!("无法确认 ZIP 资源安装目录：{name}"));}};
+        Ok::<_,String>(Entry{path:format!("{directory}/{name}"),size,sha512,optional:false,source:if recovered {"CurseForge 历史文件恢复（固定文件 ID、大小与已验证 SHA-1）"}else{"CurseForge 官方公开下载（未提供发布者哈希，本地 SHA-512 固定缓存）"}.into(),data:Source::Local(cached)})
+    }).buffer_unordered(6);
+    tokio::pin!(jobs);
+    let mut completed = 0;
+    while let Some(entry) = jobs.next().await {
+        let entry = entry?;
+        if plan
+            .files
+            .iter()
+            .any(|v| v.path.eq_ignore_ascii_case(&entry.path))
+        {
+            return Err("整合包下载目标重名，未覆盖".into());
+        }
+        plan.files.push(entry);
+        completed += 1;
+        host.progress(
+            "pack-mods",
+            &format!("下载并检查 Mod：{completed}/{count}"),
+            completed,
+            count,
+        );
+    }
+    if plan.files.iter().map(|v| v.size).sum::<u64>() > LIMIT {
+        return Err("整合包超过 1 GiB 安装边界".into());
+    }
+    Ok(())
+}
 pub async fn stage(
     host: &Host,
     plan: &Plan,
@@ -721,6 +862,14 @@ pub async fn stage(
         );
         let relative = format!("game/{}", entry.path);
         match &entry.data {
+            Source::Local(path) => copy(
+                &host.root,
+                transaction,
+                &relative,
+                File::open(path).map_err(|_| "整合包缓存不可读")?,
+                Some((entry.size, &entry.sha512)),
+                cancel,
+            )?,
             Source::Download { url, sha1 } => {
                 let cached = net::resource_download(
                     &host.client,
@@ -739,7 +888,7 @@ pub async fn stage(
                     transaction,
                     &relative,
                     File::open(cached).map_err(|_| "无法读取整合包缓存")?,
-                    Some(entry),
+                    Some((entry.size, &entry.sha512)),
                     cancel,
                 )?;
             }
@@ -754,7 +903,7 @@ pub async fn stage(
                     transaction,
                     &relative,
                     file,
-                    Some(entry),
+                    Some((entry.size, &entry.sha512)),
                     cancel,
                 )?;
             }
@@ -771,11 +920,13 @@ pub async fn stage(
         None,
         cancel,
     )?;
-    resource_install::validate_pack_mods(
-        &host.root,
-        &model::safe_path(&directory, "game")?,
-        &transaction.instance,
-    )?;
+    if plan.forge_version.is_empty() {
+        resource_install::validate_pack_mods(
+            &host.root,
+            &model::safe_path(&directory, "game")?,
+            &transaction.instance,
+        )?;
+    }
     Ok(())
 }
 pub fn publish(
@@ -941,8 +1092,70 @@ mod tests {
         fs::create_dir_all(&root).unwrap();
         root
     }
+    #[test]
+    fn recovery_receipt_is_exact_and_unknown_files_are_not_guessed() {
+        let root = root();
+        let receipt = curse_recovery(&root, 386143, 3404975).unwrap().unwrap();
+        assert_eq!(receipt["projectId"], 386143);
+        assert_eq!(receipt["id"], 3404975);
+        assert_eq!(receipt["fileName"], "lootbags-2.5.8.7.jar");
+        assert!(curse_recovery(&root, 386143, 3404976).unwrap().is_none());
+        assert!(curse_recovery(&root, 999999, 3404975).unwrap().is_none());
+        fs::create_dir_all(root.join("pack-recovery")).unwrap();
+        fs::write(root.join("pack-recovery/42-43.json"), b"corrupt").unwrap();
+        assert!(curse_recovery(&root, 42, 43).is_err());
+    }
+    #[tokio::test]
+    #[ignore = "Downloads the exact retired CurseForge artifact from the official CDN"]
+    async fn retired_curse_file_recovers_without_user_receipt() {
+        let root = root();
+        let host = Host::new(root.clone()).unwrap();
+        let mut plan = inspect(&root, archive(&manifest(), &[]).as_slice())
+            .unwrap()
+            .install
+            .unwrap();
+        plan.curse_files = vec![(386143, 3404975)];
+        assert!(!root.join("pack-recovery").exists());
+        resolve_curse(&host, &mut plan, &CancellationToken::new())
+            .await
+            .unwrap();
+        let file = plan
+            .files
+            .iter()
+            .find(|v| v.path == "mods/lootbags-2.5.8.7.jar")
+            .unwrap();
+        assert_eq!(file.size, 302653);
+        let Source::Local(path) = &file.data else {
+            panic!("Missing verified local artifact")
+        };
+        assert!(net::matches(
+            path,
+            "762294ef3baf7a09d9d875e6218895fa51b89d43",
+            Some(file.size)
+        )
+        .unwrap());
+        assert!(!root.join("pack-recovery").exists());
+    }
     fn manifest() -> Value {
         json!({"formatVersion":1,"game":"minecraft","name":"EC transaction fixture","versionId":"1.0.0","dependencies":{"minecraft":"1.21.1"},"files":[]})
+    }
+    #[test]
+    fn curseforge_preview_freezes_exact_file_ids_loader_and_overrides() {
+        let root = root();
+        let mut zip = zip::ZipWriter::new(Cursor::new(vec![]));
+        let options = zip::write::SimpleFileOptions::default();
+        zip.start_file("manifest.json", options).unwrap();
+        zip.write_all(serde_json::to_vec(&json!({"manifestType":"minecraftModpack","manifestVersion":1,"name":"CF fixture","version":"1","overrides":"overrides","minecraft":{"version":"1.12.2","modLoaders":[{"id":"forge-14.23.5.2860","primary":true}]},"files":[{"projectID":42,"fileID":123,"required":true},{"projectID":44,"fileID":125,"required":false}]})).unwrap().as_slice()).unwrap();
+        zip.start_file("overrides/config/test.cfg", options)
+            .unwrap();
+        zip.write_all(b"synthetic fixture").unwrap();
+        let preview = inspect(&root, zip.finish().unwrap().into_inner().as_slice()).unwrap();
+        let plan = preview.install.unwrap();
+        assert_eq!(plan.forge_version, "14.23.5.2860");
+        assert_eq!(plan.curse_files, vec![(42, 123)]);
+        assert_eq!(plan.files.len(), 1);
+        assert_eq!(plan.files[0].path, "config/test.cfg");
+        assert!(!root.join("instances").exists());
     }
     fn archive(manifest: &Value, files: &[(&str, &[u8])]) -> Vec<u8> {
         let mut zip = zip::ZipWriter::new(Cursor::new(vec![]));
@@ -966,6 +1179,7 @@ mod tests {
             fabric_version: String::new(),
             fabric_sha1: String::new(),
             launch: Default::default(),
+            local: None,
         }
     }
     fn download(path: &str, env: Value) -> Value {

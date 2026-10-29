@@ -21,6 +21,7 @@ export function AccountPanel({
   const [skinMessage, setSkinMessage] = useState('');
   const [copyMessage, setCopyMessage] = useState('');
   const [websiteMessage, setWebsiteMessage] = useState('');
+  const [configOpen, setConfigOpen] = useState(false);
   async function openOfficialWebsite() {
     setWebsiteMessage('');
     await service.openLogin();
@@ -42,6 +43,12 @@ export function AccountPanel({
   async function useAccount() {
     const current = service.snapshot().state;
     if (!current) throw new Error('账户服务尚未连接');
+    if (mode === 'microsoft' && !current.account && !clientId.trim()) {
+      setConfigOpen(true);
+      throw new Error(
+        '此开发版本尚未配置 Microsoft 登录，请在高级登录配置中填写应用 Client ID。',
+      );
+    }
     await service.saveSettings({
       ...current.settings,
       launchMode: mode,
@@ -117,22 +124,37 @@ export function AccountPanel({
                   ? `已授权：${state.account.name}`
                   : '在 Microsoft 官方网页完成授权，密码不会交给启动器。'}
               </p>
+              <p className="hint">
+                点击下方登录按钮，在浏览器中输入设备码并授权，然后返回这里。
+              </p>
+              {!state?.account && (
+                <ol className="login-steps">
+                  <li>获取设备码</li>
+                  <li>微软官网输入设备码并授权</li>
+                  <li>返回启动器，自动载入账户</li>
+                </ol>
+              )}
+              {!clientId.trim() && !state?.account && (
+                <p className="notice">
+                  当前开发版尚未配置 Easy Craft 自有 Client
+                  ID。官网入口可打开，但获取有效设备码需先完成下方高级登录配置。
+                </p>
+              )}
               <button
                 type="button"
                 onClick={() => void run(openOfficialWebsite)}
               >
-                打开微软官方登录网站
+                打开 Microsoft 官方授权页
               </button>
-              <p className="hint">
-                启动登录后会自动打开系统浏览器，按提示输入设备码并授权；仅在网站登录不会自动授权启动器。
-              </p>
-              <details open={!clientId}>
-                <summary>Microsoft 登录配置</summary>
+              <details
+                open={configOpen}
+                onToggle={(event) => setConfigOpen(event.currentTarget.open)}
+              >
+                <summary>高级登录配置</summary>
                 <label>
                   应用 Client ID
                   <input
                     aria-label="Microsoft 应用 Client ID"
-                    required
                     value={clientId}
                     onChange={(event) => setClientId(event.target.value)}
                   />

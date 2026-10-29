@@ -148,6 +148,8 @@ async fn instance_overrides_migrate_persist_clear_and_reject_stale_or_external_c
     assert!(host.status().instances[0].launch.is_empty());
     let memory = model::LaunchOverrides {
         java_path: None,
+        game_isolation: None,
+        window_mode: None,
         memory: Some(model::MemoryOverride {
             memory_mode: model::MemoryMode::Manual,
             memory_mb: 1536,
@@ -213,6 +215,8 @@ fn resolved_instance_settings_preserve_identity_and_only_apply_explicit_override
     let overrides = model::LaunchOverrides {
         java_path: Some("instance java".into()),
         memory: None,
+        game_isolation: None,
+        window_mode: None,
     };
     let resolved = overrides.resolve(&settings);
     assert_eq!(resolved.java_path, "instance java");
@@ -226,6 +230,129 @@ fn resolved_instance_settings_preserve_identity_and_only_apply_explicit_override
             .java_path,
         "global java"
     );
+}
+#[tokio::test]
+async fn game_isolation_preserves_legacy_data_shares_only_when_explicit_and_survives_restart() {
+    let root = root();
+    let legacy = |id: &str| json!({"id":id,"name":id,"version":"1.21.1","manifestSha1":"a".repeat(40),"javaMajor":21});
+    model::save_json(
+        &root,
+        "instances.json",
+        &json!([legacy("one"), legacy("two")]),
+    )
+    .unwrap();
+    for id in ["one", "two"] {
+        let game = root.join(format!("instances/{id}/game"));
+        fs::create_dir_all(game.join("saves")).unwrap();
+        fs::write(game.join("options.txt"), id).unwrap();
+    }
+    let host = host::Host::new(root.clone()).unwrap();
+    assert!(host.status().settings.isolate_new_instances);
+    let mut global = host.status().settings;
+    global.isolate_new_instances = false;
+    host.save_settings(global).await.unwrap();
+    // Changing the new-install default must never relocate an existing legacy game.
+    for id in ["one", "two"] {
+        assert_eq!(
+            host.instance_files(id, |game| Ok(
+                fs::read_to_string(game.join("options.txt")).unwrap()
+            ))
+            .unwrap(),
+            id
+        );
+    }
+    let original = model::LaunchOverrides {
+        memory: Some(model::MemoryOverride {
+            memory_mode: model::MemoryMode::Manual,
+            memory_mb: 1536,
+            optimize_memory: false,
+        }),
+        ..Default::default()
+    };
+    host.save_instance_launch("one".into(), Default::default(), original.clone())
+        .await
+        .unwrap();
+    let shared = model::LaunchOverrides {
+        game_isolation: Some(false),
+        ..original.clone()
+    };
+    host.save_instance_launch("one".into(), original.clone(), shared.clone())
+        .await
+        .unwrap();
+    assert_eq!(
+        host.status().instances[0].game_path(&root).unwrap(),
+        root.join("shared-game")
+    );
+    host.instance_files("one", |game| {
+        fs::write(game.join("options.txt"), "shared").map_err(|e| e.to_string())
+    })
+    .unwrap();
+    assert_eq!(
+        fs::read_to_string(root.join("instances/one/game/options.txt")).unwrap(),
+        "one"
+    );
+    assert_eq!(
+        host.instance_files("two", |game| Ok(fs::read_to_string(
+            game.join("options.txt")
+        )
+        .unwrap()))
+            .unwrap(),
+        "two"
+    );
+    assert!(host
+        .save_instance_launch("one".into(), original.clone(), original.clone())
+        .await
+        .unwrap_err()
+        .contains("配置已变化"));
+    let token = host
+        .begin_upload("pending.zip".into(), 10, crate::file_upload::Target::Pack)
+        .unwrap();
+    assert!(host
+        .save_instance_launch("one".into(), shared.clone(), original.clone())
+        .await
+        .unwrap_err()
+        .contains("当前任务"));
+    host.abort_upload(&token);
+    let shared_two = model::LaunchOverrides {
+        game_isolation: Some(false),
+        ..Default::default()
+    };
+    host.save_instance_launch("two".into(), Default::default(), shared_two)
+        .await
+        .unwrap();
+    assert_eq!(
+        host.instance_files("two", |game| Ok(fs::read_to_string(
+            game.join("options.txt")
+        )
+        .unwrap()))
+            .unwrap(),
+        "shared"
+    );
+    drop(host);
+    let host = host::Host::new(root.clone()).unwrap();
+    assert!(!host.status().settings.isolate_new_instances);
+    assert_eq!(host.status().instances[0].launch, shared);
+    host.save_instance_launch("one".into(), shared, original)
+        .await
+        .unwrap();
+    assert_eq!(
+        host.instance_files("one", |game| Ok(fs::read_to_string(
+            game.join("options.txt")
+        )
+        .unwrap()))
+            .unwrap(),
+        "one"
+    );
+    assert_eq!(
+        fs::read_to_string(root.join("shared-game/options.txt")).unwrap(),
+        "shared"
+    );
+    assert_eq!(
+        fs::read_to_string(root.join("instances/two/game/options.txt")).unwrap(),
+        "two"
+    );
+    drop(host);
+    fs::remove_dir_all(root).unwrap();
 }
 #[test]
 fn fabric_coordinates_are_bounded_and_cannot_escape_cache() {
@@ -521,6 +648,7 @@ fn offline_and_microsoft_arguments_stay_distinct() {
         fabric_version: String::new(),
         fabric_sha1: String::new(),
         launch: Default::default(),
+        local: None,
     };
     let mut settings = host.status().settings;
     settings.launch_mode = model::LaunchMode::Offline;
@@ -545,6 +673,42 @@ fn offline_and_microsoft_arguments_stay_distinct() {
     assert!(args.windows(2).any(|pair| pair == ["--userType", "msa"]));
     assert!(args.contains(&settings.client_id));
     assert!(args.contains(&"test-online-token".into()));
+    let mut prepared = prepared;
+    let mut instance = instance;
+    prepared.metadata["arguments"]["game"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!("--fullscreen"));
+    for (mode, expected) in [
+        (None, 0),
+        (Some(model::WindowMode::Fullscreen), 1),
+        (Some(model::WindowMode::Inherit), 1),
+    ] {
+        instance.launch.window_mode = mode;
+        let args =
+            minecraft::command_args(&host, &instance, &prepared, &profile, "0", &settings).unwrap();
+        assert_eq!(
+            args.iter().filter(|v| *v == "--fullscreen").count(),
+            expected
+        );
+    }
+    instance.java_major = 8;
+    prepared.metadata["mainClass"] = json!("cpw.mods.modlauncher.Launcher");
+    instance.launch.window_mode = None;
+    let args =
+        minecraft::command_args(&host, &instance, &prepared, &profile, "0", &settings).unwrap();
+    assert_eq!(
+        args.iter()
+            .filter(|v| *v == "-Dfml.earlyprogresswindow=false")
+            .count(),
+        1
+    );
+    instance.launch.window_mode = Some(model::WindowMode::Inherit);
+    let args =
+        minecraft::command_args(&host, &instance, &prepared, &profile, "0", &settings).unwrap();
+    assert!(!args
+        .iter()
+        .any(|v| v.starts_with("-Dfml.earlyprogresswindow=")));
 }
 #[test]
 fn data_directory_is_exclusive_and_unlocks_on_shutdown() {

@@ -3,18 +3,25 @@
 mod appearance;
 mod auth;
 mod backup_retention;
+mod browse_cache;
 mod cache;
 mod content;
+mod curseforge;
 mod fabric;
 mod file_guard;
 mod file_picker;
 mod file_upload;
+mod forge;
 mod host;
+mod local_import;
+mod local_launch;
 mod memory;
 mod minecraft;
+mod mod_check;
 mod model;
 mod modpack;
 mod net;
+mod pack_download;
 mod packs;
 mod resource_install;
 mod resources;
@@ -26,6 +33,18 @@ use host::Host;
 use model::Result;
 use std::sync::Arc;
 use tauri::State;
+
+#[tauri::command]
+async fn native_mod_check(
+    host: State<'_, Arc<Host>>,
+    id: String,
+    force: Option<bool>,
+) -> Result<resource_install::ModCheck> {
+    let host = host.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || host.mod_check(&id, force.unwrap_or(false)))
+        .await
+        .map_err(|_| "启动检查未完成".to_string())?
+}
 
 #[tauri::command]
 async fn native_resource_plan(
@@ -40,8 +59,22 @@ async fn native_resource_plan(
         .await
 }
 #[tauri::command]
-fn native_resource_install(host: State<'_, Arc<Host>>, token: String) -> Result<()> {
-    host.start_resource_install(token)
+async fn native_curseforge_plan(
+    host: State<'_, Arc<Host>>,
+    id: String,
+    project: String,
+    version: String,
+    filename: String,
+) -> Result<resource_install::Plan> {
+    host.curseforge_plan(id, project, version, filename).await
+}
+#[tauri::command]
+fn native_resource_install(
+    host: State<'_, Arc<Host>>,
+    token: String,
+    acknowledge_issues: Option<bool>,
+) -> Result<()> {
+    host.start_resource_install(token, acknowledge_issues.unwrap_or(false))
 }
 #[tauri::command]
 async fn native_world_datapacks(
@@ -88,7 +121,18 @@ async fn native_resource_search(
     offset: u64,
     category: Option<String>,
     index: Option<String>,
+    source: Option<resources::Source>,
 ) -> Result<resources::Search> {
+    if source == Some(resources::Source::Curseforge) {
+        return curseforge::search(
+            kind,
+            &query,
+            &game_version,
+            offset,
+            index.as_deref().unwrap_or("relevance"),
+        )
+        .await;
+    }
     resources::filtered_search(
         kind,
         &query,
@@ -104,8 +148,37 @@ async fn native_resource_categories(kind: resources::Kind) -> Result<Vec<String>
     resources::categories(kind).await
 }
 #[tauri::command]
-fn native_open_resource(kind: resources::Kind, project: String) -> Result<()> {
-    let url = resources::website(kind, &project)?;
+async fn native_resource_save(
+    window: tauri::WebviewWindow,
+    host: State<'_, Arc<Host>>,
+    project: String,
+    version: String,
+    filename: String,
+) -> Result<bool> {
+    let owner = window.hwnd().map_err(|_| "无法读取窗口")?.0 as isize;
+    let directory = tauri::async_runtime::spawn_blocking(move || {
+        file_picker::pick_directory_named(owner, "选择资源保存文件夹（仅保存，不自动安装或启用）")
+    })
+    .await
+    .map_err(|_| "文件夹选择失败")??;
+    let Some(directory) = directory else {
+        return Ok(false);
+    };
+    host.save_resource(&directory, &project, &version, &filename)
+        .await?;
+    Ok(true)
+}
+#[tauri::command]
+async fn native_open_resource(
+    kind: resources::Kind,
+    project: String,
+    source: Option<resources::Source>,
+) -> Result<()> {
+    let url = if source == Some(resources::Source::Curseforge) {
+        curseforge::website(&project).await?
+    } else {
+        resources::website(kind, &project)?
+    };
     std::process::Command::new("explorer.exe")
         .arg(url)
         .spawn()
@@ -117,8 +190,39 @@ async fn native_resource_detail(
     project: String,
     kind: resources::Kind,
     game_version: String,
+    all_versions: Option<bool>,
+    source: Option<resources::Source>,
 ) -> Result<resources::Detail> {
-    resources::detail(&project, kind, &game_version).await
+    if source == Some(resources::Source::Curseforge) {
+        return curseforge::detail(&project, kind).await;
+    }
+    if all_versions.unwrap_or(false) {
+        resources::detail_with_scope(&project, kind, &game_version, true).await
+    } else {
+        resources::detail(&project, kind, &game_version).await
+    }
+}
+#[tauri::command]
+async fn native_forge_versions(
+    host: State<'_, Arc<Host>>,
+    game: String,
+) -> Result<forge::Versions> {
+    forge::versions(&host, &game).await
+}
+#[tauri::command]
+async fn native_fabric_games(host: State<'_, Arc<Host>>) -> Result<Vec<String>> {
+    fabric::games(&host).await
+}
+#[tauri::command]
+async fn native_fabric_catalog(
+    host: State<'_, Arc<Host>>,
+    version: String,
+) -> Result<fabric::LoaderCatalog> {
+    fabric::loader_catalog(&host, &version, &tokio_util::sync::CancellationToken::new()).await
+}
+#[tauri::command]
+fn native_forge_download(host: State<'_, Arc<Host>>, game: String, loader: String) -> Result<()> {
+    host.start_forge_download(game, loader)
 }
 
 #[tauri::command]
@@ -174,6 +278,33 @@ async fn native_content_import(
     .map_err(|_| "资源导入任务失败".to_string())?
 }
 #[tauri::command]
+async fn native_mod_pick_plan(
+    window: tauri::WebviewWindow,
+    host: State<'_, Arc<Host>>,
+    id: String,
+) -> Result<Option<resource_install::Plan>> {
+    let owner = window.hwnd().map_err(|_| "无法读取窗口")?.0 as isize;
+    let host = host.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let Some((name, input)) = file_picker::pick(owner, &["jar"])? else {
+            return Ok(None);
+        };
+        host.local_mod_plan(&id, &name, input).map(Some)
+    })
+    .await
+    .map_err(|_| "本地 Mod 选择或预检失败".to_string())?
+}
+#[tauri::command]
+async fn native_mod_upload_finish(
+    host: State<'_, Arc<Host>>,
+    token: String,
+) -> Result<resource_install::Plan> {
+    let host = host.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || host.finish_mod_upload(&token))
+        .await
+        .map_err(|_| "本地 Mod 预检失败".to_string())?
+}
+#[tauri::command]
 async fn native_content_pick(
     window: tauri::WebviewWindow,
     host: State<'_, Arc<Host>>,
@@ -224,6 +355,19 @@ async fn native_content_image(
     })
     .await
     .map_err(|_| "截图读取任务失败".to_string())?
+}
+#[tauri::command]
+async fn native_instance_folder_open(
+    host: State<'_, Arc<Host>>,
+    id: String,
+    folder: String,
+) -> Result<()> {
+    let host = host.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        host.instance_files(&id, |root| content::open_folder(root, &folder))
+    })
+    .await
+    .map_err(|_| "文件夹打开任务失败".to_string())?
 }
 #[tauri::command]
 async fn native_content_open(
@@ -497,6 +641,29 @@ async fn native_pack_pick(
     .map_err(|_| "压缩包检查任务失败".to_string())?
 }
 #[tauri::command]
+async fn native_local_scan_pick(
+    window: tauri::WebviewWindow,
+    host: State<'_, Arc<Host>>,
+) -> Result<Option<local_import::Preview>> {
+    let owner = window.hwnd().map_err(|_| "无法读取窗口")?.0 as isize;
+    let host = host.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        file_picker::pick_directory(owner)?
+            .map(|path| host.scan_local(&path))
+            .transpose()
+    })
+    .await
+    .map_err(|_| "本地扫描任务失败".to_string())?
+}
+#[tauri::command]
+fn native_local_import(
+    host: State<'_, Arc<Host>>,
+    token: String,
+    selected: Vec<local_import::Selection>,
+) -> Result<()> {
+    host.inner().clone().start_local_import(token, selected)
+}
+#[tauri::command]
 fn native_pack_install(
     host: State<'_, Arc<Host>>,
     token: String,
@@ -517,6 +684,10 @@ async fn native_pack_online(
 #[tauri::command]
 async fn native_versions(host: State<'_, Arc<Host>>) -> Result<Vec<model::Version>> {
     minecraft::versions(&host, &tokio_util::sync::CancellationToken::new()).await
+}
+#[tauri::command]
+async fn native_version_catalog(host: State<'_, Arc<Host>>) -> Result<Vec<model::Version>> {
+    minecraft::version_catalog(&host, &tokio_util::sync::CancellationToken::new()).await
 }
 #[tauri::command]
 async fn native_settings(host: State<'_, Arc<Host>>, settings: model::Settings) -> Result<()> {
@@ -603,6 +774,7 @@ fn native_open_login(host: State<'_, Arc<Host>>) -> Result<()> {
 }
 
 fn main() {
+    curseforge::initialize();
     let state = host::default_root()
         .and_then(Host::new)
         .unwrap_or_else(|error| startup_error(&error));
@@ -621,11 +793,15 @@ fn main() {
             native_status,
             native_instance_rename,
             native_content,
+            native_mod_check,
             native_content_toggle,
             native_content_import,
             native_content_pick,
+            native_mod_pick_plan,
+            native_mod_upload_finish,
             native_content_image,
             native_content_open,
+            native_instance_folder_open,
             native_worlds,
             native_world,
             native_world_save,
@@ -649,17 +825,26 @@ fn main() {
             native_file_upload_finish,
             native_file_upload_abort,
             native_pack_pick,
+            native_local_scan_pick,
+            native_local_import,
             native_pack_install,
             native_pack_online,
             native_resource_search,
             native_resource_categories,
+            native_resource_save,
             native_open_resource,
             native_resource_detail,
             native_resource_plan,
+            native_curseforge_plan,
             native_resource_install,
             native_world_datapacks,
             native_world_datapacks_open,
             native_versions,
+            native_forge_versions,
+            native_fabric_games,
+            native_fabric_catalog,
+            native_forge_download,
+            native_version_catalog,
             native_settings,
             native_memory,
             native_memory_optimize,

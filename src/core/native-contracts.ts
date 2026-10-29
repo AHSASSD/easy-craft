@@ -7,12 +7,24 @@ export type NativeSettings = {
   optimizeMemory: boolean;
   launchMode: 'microsoft' | 'offline';
   offlineName: string;
+  isolateNewInstances?: boolean;
 };
 export type LaunchOverrides = {
+  windowMode?: 'windowed' | 'fullscreen' | 'inherit';
+  gameIsolation?: boolean;
   javaPath?: string;
   memory?: Pick<NativeSettings, 'memoryMode' | 'memoryMb' | 'optimizeMemory'>;
 };
 export type NativeInstance = {
+  local?: {
+    root: string;
+    versionDirectory: string;
+    gameDirectory: string;
+    clientJar: string;
+    sourceKey: string;
+    loader: 'vanilla' | 'fabric' | 'forge' | 'neoforge';
+    loaderVersion: string;
+  };
   id: string;
   name: string;
   version: string;
@@ -23,6 +35,15 @@ export type NativeInstance = {
   launch?: LaunchOverrides;
 };
 export type NativeTask = {
+  pendingInstance?: string | null;
+  steps?: {
+    outcome?: 'fallback' | null;
+    phase: string;
+    message: string;
+    completed: number;
+    total: number;
+    done: boolean;
+  }[];
   status: 'idle' | 'running' | 'succeeded' | 'failed' | 'cancelled';
   phase: string;
   message: string;
@@ -41,12 +62,27 @@ export type NativeState = {
   loginCode: DeviceCode | null;
 };
 export type NativeSnapshot = {
+  modRevision?: number;
   available: boolean;
   state: NativeState | null;
   error: string;
   avatar: string | null;
 };
 export type WorldEntry = { id: string; name: string };
+export type ModCheck = {
+  instanceId: string;
+  issues: string[];
+  unchecked: string[];
+  details?: {
+    checkedAt: number;
+    scope: string;
+    complete: boolean;
+    scannedFiles: number;
+    parsedFiles: number;
+    reusedFiles: number;
+    elapsedMs: number;
+  };
+};
 export type CacheGroup =
   'resources' | 'packFiles' | 'packArchives' | 'fileInputs' | 'packInputs';
 export type CacheSummary = {
@@ -107,7 +143,35 @@ export type ConfigBackupPreview = {
 };
 export type ResourceKind =
   'mod' | 'resourcepack' | 'shader' | 'datapack' | 'modpack';
+export type ResourceSource = 'modrinth' | 'curseforge';
+export type LocalVersionCandidate = {
+  contentIndexed?: boolean;
+  contentRoots?: string[];
+  worlds?: number;
+  sourceIsolation?: boolean;
+  id: string;
+  name: string;
+  gameVersion: string;
+  loader: string;
+  directory: string;
+  gameDirectory: string;
+  supported: boolean;
+  duplicate: boolean;
+  files: number;
+  bytes: number;
+  issues: string[];
+  warnings: string[];
+};
+export type LocalVersionScan = {
+  token: string;
+  directory: string;
+  candidates: LocalVersionCandidate[];
+  warnings: string[];
+};
 export type ResourceHit = {
+  downloads?: number | null;
+  updated?: string | null;
+  gameVersions?: string[];
   iconUrl?: string | null;
   id: string;
   title: string;
@@ -120,6 +184,10 @@ export type ResourceSearch = {
   offset: number;
 };
 export type ResourceVersion = {
+  gameVersions?: string[];
+  published?: string | null;
+  downloads?: number | null;
+  versionType?: string | null;
   id: string;
   name: string;
   number: string;
@@ -140,6 +208,7 @@ export type ResourceDetail = {
   versions: ResourceVersion[];
 };
 export type ResourcePlan = {
+  local?: boolean;
   token: string;
   instanceId: string;
   gameVersion: string;
@@ -155,6 +224,7 @@ export type ResourcePlan = {
     action: 'add' | 'keep';
   }[];
   warnings: string[];
+  preflight?: ModCheck | null;
 };
 export type ContentKind =
   'mods' | 'resourcepacks' | 'shaderpacks' | 'screenshots';
@@ -209,6 +279,9 @@ export type PackPreview = {
   install?: PackInstallPlan;
 };
 export type PackInstallPlan = {
+  recommendedMemoryMb?: number | null;
+  forgeVersion?: string;
+  curseFiles?: [number, number][];
   token: string;
   name: string;
   packVersion: string;
@@ -231,6 +304,25 @@ export type MemoryInfo = {
   reserveMb: number;
 };
 export interface NativeService extends Observable<NativeSnapshot> {
+  fabricGames(): Promise<string[]>;
+  fabricCatalog(
+    version: string,
+  ): Promise<{ versions: string[]; recommended: string | null }>;
+  forgeVersions(game: string): Promise<{
+    recommended: string | null;
+    latest: string | null;
+    versions: string[];
+    gameVersions: string[];
+  }>;
+  downloadForge(game: string, loader: string): Promise<void>;
+  previewModFile(id: string, file: File): Promise<ResourcePlan>;
+  pickModPlan(id: string): Promise<ResourcePlan | null>;
+  modCheck(id: string, force?: boolean): Promise<ModCheck>;
+  saveResource(
+    project: string,
+    version: string,
+    filename: string,
+  ): Promise<boolean>;
   cacheSummary(): Promise<CacheSummary>;
   prepareCache(groups: CacheGroup[]): Promise<CachePlan>;
   clearCache(token: string): Promise<CacheReport>;
@@ -242,21 +334,28 @@ export interface NativeService extends Observable<NativeSnapshot> {
     version: string,
     filename: string,
     worldId?: string,
+    source?: ResourceSource,
+    project?: string,
   ): Promise<ResourcePlan>;
-  installResources(token: string): Promise<void>;
+  installResources(token: string, acknowledgeIssues?: boolean): Promise<void>;
   searchResources(
     kind: ResourceKind,
     query: string,
     gameVersion: string,
     offset: number,
-    filters?: { category: string; index: string },
+    filters?: { category: string; index: string; source?: ResourceSource },
   ): Promise<ResourceSearch>;
   resourceCategories(kind: ResourceKind): Promise<string[]>;
-  openResource(kind: ResourceKind, project: string): Promise<void>;
+  openResource(
+    kind: ResourceKind,
+    project: string,
+    source?: ResourceSource,
+  ): Promise<void>;
   resourceDetail(
     project: string,
     kind: ResourceKind,
     gameVersion: string,
+    options?: { source?: ResourceSource; allVersions?: boolean },
   ): Promise<ResourceDetail>;
   content(id: string, kind: ContentKind): Promise<ContentEntry[]>;
   toggleContent(
@@ -275,6 +374,16 @@ export interface NativeService extends Observable<NativeSnapshot> {
   importContentFile(id: string, kind: ContentKind, file: File): Promise<void>;
   contentImage(id: string, file: string): Promise<string>;
   openContent(id: string, kind?: ContentKind): Promise<void>;
+  openFolder(
+    id: string,
+    folder:
+      | 'game'
+      | 'mods'
+      | 'saves'
+      | 'screenshots'
+      | 'resourcepacks'
+      | 'shaderpacks',
+  ): Promise<void>;
   renameInstance(id: string, name: string): Promise<void>;
   refresh(fresh?: boolean): Promise<void>;
   worlds(id: string): Promise<WorldEntry[]>;
@@ -306,10 +415,17 @@ export interface NativeService extends Observable<NativeSnapshot> {
   saveAvatar(bytes: number[]): Promise<void>;
   background(bytes?: number[]): Promise<string | null>;
   versions(): Promise<string[]>;
-  versionCatalog(): Promise<{ id: string; releaseTime: string }[]>;
+  versionCatalog(): Promise<
+    { id: string; releaseTime: string; type?: string }[]
+  >;
   previewPack(bytes: number[]): Promise<PackPreview>;
   previewPackFile(file: File): Promise<PackPreview>;
   pickPack(): Promise<PackPreview | null>;
+  scanLocalVersions(): Promise<LocalVersionScan | null>;
+  importLocalVersions(
+    token: string,
+    selected: { id: string; name: string; mode?: 'reference' | 'copy' }[],
+  ): Promise<void>;
   previewOnlinePack(
     project: string,
     version: string,

@@ -16,6 +16,9 @@ pub const CHUNK: usize = 1024 * 1024;
 #[serde(tag = "kind", rename_all = "camelCase", deny_unknown_fields)]
 pub enum Target {
     Pack,
+    ModPreview {
+        id: String,
+    },
     Content {
         id: String,
         #[serde(rename = "contentKind")]
@@ -58,6 +61,7 @@ impl Upload {
         let extension = name.to_ascii_lowercase();
         let valid = match &target {
             Target::Pack => extension.ends_with(".zip") || extension.ends_with(".mrpack"),
+            Target::ModPreview { .. } => extension.ends_with(".jar"),
             Target::Content {
                 content_kind: content::Kind::Mods,
                 ..

@@ -1,6 +1,6 @@
 # 官方插件 API 1.0.0
 
-V0.2 新增 official.vanilla，提供 native@1.0.0 服务。其契约位于 src/core/native-contracts.ts，封装原生状态、官方清单、设置、Java、设备登录、安装、启动与取消。原生桥接本身也是可信打包模块；浏览器明确拒绝原生操作。四个官方插件共享原有生命周期机制，API 版本仍为 1.0.0。
+V0.2 新增 official.vanilla，提供 native@1.0.0 服务。其契约位于 src/core/native-contracts.ts，封装原生状态、官方清单、设置、Java、设备登录、安装、启动与取消。2026-10-26 的 UI 改造新增 official.layout，共五个官方插件共享原有生命周期机制，API 版本仍为 1.0.0。原生桥接本身也是可信打包模块；浏览器明确拒绝原生操作。
 
 NativeService 的公共状态没有访问令牌或刷新令牌；认证与进程安全校验在 Rust 重复执行，不能依赖 UI 禁用按钮来授权启动。
 
@@ -50,5 +50,43 @@ Phase 0 仅接收由源码装配的 Plugin 对象，没有扫描插件目录、�
 事件监听器应同步、短小且自行处理业务错误；异步任务应通过服务与 AbortSignal 管理，不在事件回调中创建不受控后台任务。
 
 ## 版本与安全
+
+### 官方布局与启动检查（2026-10-26）
+
+`src/plugins/official/layout.json` 配置官方导航顺序、概览区块顺序以及经典／紧凑排版参数。修改源码中的文件后需要重新构建；当前不读取外部布局文件，也未开放第三方页面执行。宿主继续管理账号、实例、任务与恢复入口。
+
+`NativeService.modCheck(id, force?)` 对应只读的 `native_mod_check`，返回 `{ instanceId, issues, unchecked, details? }`。`force: true` 绕过解析与报告缓存；默认核对文件清单及大小、时间属性后增量读取。`details` 包含检查时间、范围、完整性、归档数、重读数、复用数与耗时。宿主内缓存有界、仅存声明，重启后失效。Fabric 复用安装约束求解；Forge/NeoForge 核对 TOML 与已声明的内嵌 Mod。复杂 Maven 限定版本、桥接和动态服务身份等明确列入未完成范围，不能用没有问题等同全面通过。原版中的 JAR 也会提示核对加载器。检查不授权文件修改，不会自动安装、升级或禁用模组。
+
+UI 在选择实例后防抖检查，相关内容变更后更新，返回应用时节制复核；切换实例子页不再触发扫描。启动前做轻量确认并复用未变化报告；检查中提供“直接启动”，警告仍提供“仍然启动”。设置可关闭选中后的自动检查。旧响应不会覆盖新实例。未提供操作系统实时目录监听、立即终止已开始的原生检查或自动修复计划。调用者必须验证报告的 instanceId，并验证当前检查上下文。
+
+`openFolder(id, folder)` 使用宿主当前生效的隔离/共享目录。`folder` 仅允许 `game/mods/saves/screenshots/resourcepacks/shaderpacks`，不接受任意路径。缺失目录返回可读错误，不自动创建目录。
+
+### Mod 安装前预检（2026-10-26）
+
+`NativeService.planResources()` 对 Fabric Mod 先解析固定的在线安装计划、下载到缓存并验证文件，再把新增与已启用模组一起检查。返回的 `ResourcePlan.preflight` 使用 `{ instanceId, issues, unchecked }`，确认前不写入目标实例。
+
+本地 JAR 通过 `previewModFile(id, file)`（流式上传）或 `pickModPlan(id)`（原生文件选择器，取消返回 null）生成同样的计划，`local: true` 表示本地来源，不代表 Modrinth 项目。仅接受 Fabric JAR；资源包、光影与截图流程保持原有契约。
+
+UI 显示问题后由玩家选择；有问题时必须明确勾选，再调用 `installResources(token, true)`。未确认会拒绝，但保留该计划供玩家确认。安装器只放行冻结报告中已确认的声明问题，继续检查实例内容快照、缓存哈希、同名覆盖、任务互斥和事务提交，确认不能绕过这些保护。计划十分钟内有效。
+
+Fabric 安装预检现在汇总支持范围内同一候选方案的多个声明问题；不能求解的格式仍返回错误，`unchecked` 解释未知文件、运行时冲突和 Java／加载器资料的未确认范围。在线资源解析无法构造一致计划时仍返回错误；本地预检不自动根据任意 Mod ID 搜索或下载依赖，也不升级、禁用或删除旧模组。原有底层导入接口保留兼容性，应用中的 Mod 选择、文件输入和拖入入口均使用新的预检流程。此能力由已打包的官方原生服务提供，尚未开放外部 JS 插件执行。
+
+### 下载来源与 Forge 安装器（2026-10-26）
+
+资源查询可选择 `source: 'curseforge'`（目前仅 Fabric Mod），未指定时仍为 Modrinth。`resourceDetail(project, kind, gameVersion, { allVersions: true })` 用于跨 Minecraft 大版本浏览；实际安装继续验证准确目标版本。`planResources` 可携带 CurseForge 来源和项目 ID，原生层固定项目／文件归属、下载地址和哈希，再返回同样的预检计划。授权密钥只在宿主读取，不进入服务契约。
+
+`forgeVersions(game)` 返回官方推荐／最新安装器版本，`downloadForge(game, loader)` 启动可取消的下载校验任务。该能力不生成 Forge 实例，不能据此宣称 Forge 已可启动。详细限制与验收见 [Forge／CurseForge 记录](FORGE_CURSEFORGE_2026-10-26.md)。
+
+下载目录联动新增 `fabricGames()` 与 `fabricCatalog(game)`；后者返回全部加载器版本及稳定推荐项，保留旧 `fabricVersions(game)` 的稳定列表语义。`forgeVersions(game)` 还返回 Maven 目录中的 `versions` 和受支持的 `gameVersions`。UI 只采纳当前类型／游戏的响应，版本选择不自动触发安装。见 [目录联动记录](DOWNLOAD_CATALOGS_2026-10-26.md)。
+
+### 整合包安装与资源保存（2026-10-28）
+
+整合包预览的 `install` 新增可选 `forgeVersion`、`curseFiles`（固定的项目 ID / 文件 ID 对）与 `recommendedMemoryMb`。除既有 MRPACK 原版/Fabric 外，新增 CurseForge 1.12.2 / Forge 清单包安装；安装器需要处理器时准确拒绝，不扩大为现代 Forge/NeoForge 通用安装支持。必需文件不能自动跳过。历史文件缺失可使用绑定 ID、文件名、大小和 SHA-1 的内置恢复记录或本地补录；没有已验证记录则中止。当前已内置水星迫降所需的 `386143 / 3404975` 恢复信息，正常用户不再需要手动补录，见 [后续修复](PACK_IMPORT_FIX_2026-10-28.md)。公开接口未给发布者哈希时仅说明本地 SHA-512 缓存固定。
+
+`NativeStatus.task` 可含 `pendingInstance` 和最多 32 个 `steps`（阶段、消息、已完成/总数、完成状态与可选 fallback 状态）。仅提交实例后移除待安装行；失败行保留任务入口。阶段百分比来自计数，不等于全任务耗时百分比。
+
+`NativeService.saveResource(project, version, filename)` 经原生文件夹选择器保存指定 Modrinth 文件，取消返回 `false`；固定归属与 SHA-1/SHA-512，拒绝覆盖，不安装依赖或自动启用。当前不提供 CurseForge 保存模式。真实安装及限制见 [水星迫降验收记录](MERCURY_PACK_AND_RESOURCE_TARGET_2026-10-28.md)。
+
+### 执行约束
 
 服务契约版本与插件发布版本独立。API 兼容只采用精确匹配。权限是官方模块约束，不是 JS 沙箱。不要把外部源码作为 Plugin 对象载入；正式 SDK 需另行设计隔离、权限审核、签名和故障隔离。

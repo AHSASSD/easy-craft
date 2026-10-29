@@ -28,7 +28,7 @@ test('official plugins start in contract dependency order and reload without res
     );
     expect(kernel.getService('themes').listThemes()).toHaveLength(2);
     expect(await kernel.getService('instances').list()).toHaveLength(3);
-    expect(kernel.inspect().pages).toHaveLength(1);
+    expect(kernel.inspect().pages).toHaveLength(2);
     await kernel.stop();
     expect(kernel.inspect()).toEqual({
       plugins: [],

@@ -32,11 +32,13 @@ struct Inner {
     upload_token: Option<String>,
     cache_plan: Option<crate::cache::Plan>,
     backup_plan: Option<crate::backup_retention::Plan>,
+    local_scan: Option<crate::local_import::Scan>,
 }
 pub struct Host {
     _lock: fs::File,
     pub root: PathBuf,
     pub client: reqwest::Client,
+    mod_checks: Mutex<crate::mod_check::Cache>,
     inner: Mutex<Inner>,
 }
 #[derive(Serialize)]
@@ -51,6 +53,99 @@ pub struct Status {
     pub login_code: Option<DeviceCode>,
 }
 impl Host {
+    pub async fn save_resource(
+        &self,
+        directory: &Path,
+        project: &str,
+        version: &str,
+        filename: &str,
+    ) -> Result<()> {
+        crate::resources::id(project)?;
+        crate::resources::id(version)?;
+        if filename.contains(['/', '\\'])
+            || ![".zip", ".jar", ".mrpack"]
+                .iter()
+                .any(|suffix| filename.to_ascii_lowercase().ends_with(suffix))
+        {
+            return Err("不支持的资源文件名".into());
+        }
+        let target = model::safe_path(directory, filename)?;
+        if target.exists() {
+            return Err("目标同名文件已存在，未覆盖".into());
+        }
+        let cancel = self.begin_task("下载选定资源到文件夹")?;
+        let result = async {
+            self.progress("resource-export", "读取固定资源版本及校验信息", 0, 1);
+            let value = net::resource_json(
+                &self.client,
+                &format!("https://api.modrinth.com/v2/version/{version}"),
+                &cancel,
+            )
+            .await?;
+            if value["project_id"] != project || value["id"] != version {
+                return Err("资源版本归属不符".into());
+            }
+            let file = value["files"]
+                .as_array()
+                .ok_or("缺少文件列表")?
+                .iter()
+                .find(|file| file["filename"] == filename)
+                .ok_or("版本中不存在此文件")?;
+            let sha1 = file["hashes"]["sha1"]
+                .as_str()
+                .filter(|v| model::valid_sha1(v))
+                .ok_or("SHA-1 无效")?;
+            let sha512 = file["hashes"]["sha512"]
+                .as_str()
+                .filter(|v| v.len() == 128 && v.bytes().all(|v| v.is_ascii_hexdigit()))
+                .ok_or("SHA-512 无效")?;
+            let size = file["size"]
+                .as_u64()
+                .filter(|v| *v <= 512 * 1024 * 1024)
+                .ok_or("资源超过 512 MiB")?;
+            let cached = net::resource_download(
+                &self.client,
+                &self.root,
+                &net::Artifact {
+                    url: file["url"].as_str().ok_or("文件地址缺失")?.into(),
+                    path: format!("cache/resource-export/{sha512}.bin"),
+                    sha1: sha1.into(),
+                    size: Some(size),
+                },
+                &cancel,
+            )
+            .await?;
+            if crate::resource_install::sum(&cached)? != sha512 {
+                return Err("SHA-512 校验失败".into());
+            }
+            if cancel.is_cancelled() {
+                return Err("保存已取消".into());
+            }
+            let mut source = fs::File::open(cached).map_err(|_| "缓存不可读")?;
+            let mut output = fs::OpenOptions::new()
+                .create_new(true)
+                .write(true)
+                .open(&target)
+                .map_err(|_| "目标存在或无法写入，未覆盖")?;
+            let copied =
+                std::io::copy(&mut source, &mut output).and_then(|n| output.sync_all().map(|_| n));
+            drop(output);
+            if copied.ok() != Some(size) {
+                let _ = fs::remove_file(&target);
+                return Err("资源保存失败，暂存文件已清理".into());
+            }
+            self.progress(
+                "resource-export-committed",
+                "资源已保存；尚未安装或启用",
+                1,
+                1,
+            );
+            Ok(())
+        }
+        .await;
+        self.finish(result.clone(), &cancel);
+        result
+    }
     pub fn new(root: PathBuf) -> Result<Arc<Self>> {
         fs::create_dir_all(&root).map_err(|_| "无法创建 Easy Craft 数据目录")?;
         let root = root
@@ -85,6 +180,7 @@ impl Host {
         let instances: Vec<Instance> = model::load_json(&root, "instances.json")?;
         if instances.iter().any(|item| {
             !model::valid_id(&item.id)
+                || item.local.as_ref().is_some_and(|v| v.validate().is_err())
                 || item.launch.validate().is_err()
                 || !model::valid_id(&item.version)
                 || !model::valid_sha1(&item.manifest_sha1)
@@ -101,6 +197,7 @@ impl Host {
             _lock: lock,
             root,
             client: net::client()?,
+            mod_checks: Mutex::new(crate::mod_check::Cache::default()),
             inner: Mutex::new(Inner {
                 settings,
                 instances,
@@ -138,6 +235,7 @@ impl Host {
                 upload_token: None,
                 cache_plan: None,
                 backup_plan: None,
+                local_scan: None,
             }),
         }))
     }
@@ -156,6 +254,144 @@ impl Host {
             login_code: inner.login.as_ref().map(Pending::public),
         }
     }
+    pub fn scan_local(&self, directory: &Path) -> Result<crate::local_import::Preview> {
+        let cancel = self.begin_task("只读扫描本地版本")?;
+        let result = crate::local_import::scan(self, directory, &cancel);
+        let public = match result {
+            Ok(scan) => {
+                let preview = scan.preview.clone();
+                self.inner.lock().map_err(|_| "宿主状态不可用")?.local_scan = Some(scan);
+                Ok(preview)
+            }
+            Err(error) => Err(error),
+        };
+        self.finish(public.as_ref().map(|_| ()).map_err(Clone::clone), &cancel);
+        if let Ok(preview) = &public {
+            let mut inner = self.inner.lock().map_err(|_| "宿主状态不可用")?;
+            if inner.task.status == "succeeded" {
+                let available = preview
+                    .candidates
+                    .iter()
+                    .filter(|v| v.supported && !v.duplicate)
+                    .count();
+                let duplicates = preview.candidates.iter().filter(|v| v.duplicate).count();
+                let summary = format!("扫描完成：发现 {} 个版本，可导入 {} 个，已导入 {} 个，不支持或异常 {} 个；尚未导入，请查看扫描结果并确认。", preview.candidates.len(),available,duplicates,preview.candidates.len()-available-duplicates);
+                inner.task.phase = "local-scan-complete".into();
+                inner.task.message = summary.clone();
+                inner.task.completed = preview.candidates.len();
+                inner.task.total = preview.candidates.len();
+                inner
+                    .task
+                    .logs
+                    .push(format!("只读扫描目录：{}", preview.directory));
+                inner.task.logs.push(summary);
+                for candidate in preview.candidates.iter().take(190) {
+                    inner.task.logs.push(format!(
+                        "{} · {} · {}",
+                        candidate.name,
+                        if candidate.supported {
+                            if candidate.duplicate {
+                                "已导入"
+                            } else {
+                                "可导入"
+                            }
+                        } else {
+                            "不可导入"
+                        },
+                        candidate.issues.join("；")
+                    ));
+                }
+                inner
+                    .task
+                    .logs
+                    .extend(preview.warnings.iter().take(7).cloned());
+                if preview.candidates.len() > 190 {
+                    inner
+                        .task
+                        .logs
+                        .push("其余版本结果请在扫描结果面板查看。".into());
+                }
+            }
+        } else if let Err(error) = &public {
+            self.log(error, &[]);
+        }
+        public
+    }
+    pub fn start_local_import(
+        self: &Arc<Self>,
+        token: String,
+        selected: Vec<crate::local_import::Selection>,
+    ) -> Result<()> {
+        let scan = {
+            let mut inner = self.inner.lock().map_err(|_| "宿主状态不可用")?;
+            if inner.cancel.is_some() || inner.auth_cancel.is_some() {
+                return Err("请先结束当前任务或登录".into());
+            }
+            let scan = inner.local_scan.as_ref().ok_or("请先扫描本地版本")?;
+            crate::local_import::selections(scan, &token, &selected)?;
+            inner.local_scan.take().ok_or("扫描结果已失效")?
+        };
+        let cancel = self.begin_task("准备导入本地版本；已完成实例保留，失败实例回滚")?;
+        let host = self.clone();
+        tauri::async_runtime::spawn(async move {
+            let result = async {
+                for (index, selection) in selected.iter().enumerate() {
+                    host.progress(
+                        "local-prepare",
+                        &format!(
+                            "导入第 {}/{} 个：{}",
+                            index + 1,
+                            selected.len(),
+                            selection.name
+                        ),
+                        index,
+                        selected.len(),
+                    );
+                    let ready =
+                        crate::local_import::prepare(&host, &scan, selection, &cancel).await?;
+                    let publish = (|| -> Result<()> {
+                        let mut inner = host.inner.lock().map_err(|_| "宿主状态不可用")?;
+                        inner.instances = crate::modpack::publish(
+                            &host.root,
+                            &ready.transaction,
+                            &inner.instances,
+                            &cancel,
+                        )?;
+                        inner.task.phase = "pack-committed".into();
+                        inner.task.logs.push(format!(
+                            "已导入 {}（{}），源目录保持不变",
+                            ready.instance.name, ready.instance.version
+                        ));
+                        Ok(())
+                    })();
+                    if let Err(error) = publish {
+                        let cleanup = crate::modpack::rollback(&host.root, &ready.transaction);
+                        return Err(match cleanup {
+                            Ok(()) => error,
+                            Err(e) => format!("{error}；暂存数据保留：{e}"),
+                        });
+                    }
+                }
+                Ok(())
+            }
+            .await;
+            if result.is_ok() {
+                host.progress(
+                    "local-import-committed",
+                    &format!(
+                        "已成功导入 {} 个本地版本，游戏库已更新；源目录保持不变。",
+                        selected.len()
+                    ),
+                    selected.len(),
+                    selected.len(),
+                );
+            } else if let Err(error) = &result {
+                host.log(error, &[]);
+            }
+            host.finish(result, &cancel);
+        });
+        Ok(())
+    }
     pub fn instance_files<T>(
         &self,
         id: &str,
@@ -165,14 +401,39 @@ impl Host {
         if inner.cancel.is_some() {
             return Err("请先结束游戏或当前任务，再编辑配置".into());
         }
-        if !inner.instances.iter().any(|item| item.id == id) {
-            return Err("本地实例不存在".into());
-        }
-        let root = model::safe_path(&self.root, &format!("instances/{id}/game"))?;
+        let instance = inner
+            .instances
+            .iter()
+            .find(|item| item.id == id)
+            .ok_or("本地实例不存在")?;
+        let root = instance.game_path(&self.root)?;
         if !root.is_dir() {
             return Err("实例游戏目录不存在".into());
         }
         operation(&root)
+    }
+    pub fn mod_check(&self, id: &str, force: bool) -> Result<crate::resource_install::ModCheck> {
+        // Parsing is read-only. Never hold the task/state mutex while opening JARs.
+        let instance = {
+            let inner = self.inner.lock().map_err(|_| "宿主状态不可用")?;
+            if inner.cancel.is_some() {
+                return Err("游戏或任务运行中，检查暂缓；仍可查看旧报告".into());
+            }
+            inner
+                .instances
+                .iter()
+                .find(|item| item.id == id)
+                .cloned()
+                .ok_or("实例不存在")?
+        };
+        let root = instance.game_path(&self.root)?;
+        if !root.is_dir() {
+            return Err("实例游戏目录不存在".into());
+        }
+        self.mod_checks
+            .lock()
+            .map_err(|_| "检查缓存不可用")?
+            .check(&self.root, &root, &instance, force)
     }
     pub fn rename_instance(&self, id: &str, name: &str) -> Result<()> {
         let name = name.trim();
@@ -195,6 +456,43 @@ impl Host {
     }
     pub fn progress(&self, phase: &str, message: &str, completed: usize, total: usize) {
         let mut inner = self.inner.lock().expect("host state poisoned");
+        if inner
+            .task
+            .steps
+            .last()
+            .is_some_and(|step| step.phase != phase)
+        {
+            if let Some(last) = inner.task.steps.last_mut() {
+                last.done = true;
+                if phase == "pack-forge-mirror" {
+                    last.done = false;
+                    last.outcome = Some("fallback".into());
+                }
+            }
+        }
+        if inner
+            .task
+            .steps
+            .last()
+            .is_none_or(|step| step.phase != phase)
+        {
+            if inner.task.steps.len() >= 32 {
+                inner.task.steps.remove(0);
+            }
+            inner.task.steps.push(model::TaskStep {
+                outcome: None,
+                phase: phase.into(),
+                message: message.into(),
+                completed,
+                total,
+                done: false,
+            });
+        }
+        if let Some(step) = inner.task.steps.last_mut() {
+            step.message = message.into();
+            step.completed = completed;
+            step.total = total;
+        }
         inner.task.phase = phase.into();
         inner.task.message = message.into();
         inner.task.completed = completed;
@@ -279,8 +577,19 @@ impl Host {
         if item.launch != expected {
             return Err("实例配置已变化，请放弃修改并重新读取后再保存".into());
         }
+        let previous_isolated = item.isolated();
         item.launch = launch;
+        let directory_changed = previous_isolated != item.isolated();
+        if item.local.is_none() {
+            fs::create_dir_all(item.game_path(&self.root)?).map_err(|_| "无法创建所选游戏目录")?;
+        } else if directory_changed && !item.game_path(&self.root)?.is_dir() {
+            return Err("原安装目录不可用，未修改隔离设置".into());
+        }
         model::save_json(&self.root, "instances.json", &instances)?;
+        if directory_changed {
+            inner.resource_plan = None;
+            inner.backup_plan = None;
+        }
         inner.instances = instances;
         Ok(())
     }
@@ -303,9 +612,20 @@ impl Host {
         Self::finish_locked(&mut inner, result, cancel);
     }
     fn finish_locked(inner: &mut Inner, result: Result<()>, cancel: &CancellationToken) {
+        if result.is_ok() && !cancel.is_cancelled() {
+            if let Some(step) = inner.task.steps.last_mut() {
+                step.done = true;
+            }
+        }
         let committed = result.is_ok()
-            && ["file-committed", "resources-committed", "pack-committed"]
-                .contains(&inner.task.phase.as_str());
+            && [
+                "file-committed",
+                "resource-export-committed",
+                "resources-committed",
+                "pack-committed",
+                "local-import-committed",
+            ]
+            .contains(&inner.task.phase.as_str());
         let cancelled = cancel.is_cancelled() && !committed;
         inner.task.status = if cancelled {
             "cancelled"
@@ -326,6 +646,11 @@ impl Host {
             .into()
         } else {
             result.err().unwrap_or_else(|| {
+                if ["local-import-committed", "resource-export-committed"]
+                    .contains(&inner.task.phase.as_str())
+                {
+                    return inner.task.message.clone();
+                }
                 if inner.task.phase == "pack-checked" {
                     "归档检查完成；尚未安装。"
                 } else if inner.task.phase == "cache-planned" {
@@ -524,6 +849,17 @@ impl Host {
         size: u64,
         target: crate::file_upload::Target,
     ) -> Result<String> {
+        if let crate::file_upload::Target::ModPreview { id } = &target {
+            if !self
+                .status()
+                .instances
+                .iter()
+                .any(|item| &item.id == id && !item.fabric_version.is_empty())
+            {
+                return Err("本地模组预检需要 Fabric 实例".into());
+            }
+            self.instance_files(id, |_| Ok(()))?;
+        }
         if let crate::file_upload::Target::Content { id, content_kind } = &target {
             let state = self.status();
             if *content_kind == crate::content::Kind::Mods
@@ -600,6 +936,9 @@ impl Host {
         let result = (|| -> Result<Option<crate::packs::PackPreview>> {
             let reader = upload.reader()?;
             match target {
+                crate::file_upload::Target::ModPreview { .. } => {
+                    Err("本地模组请先生成预检计划".into())
+                }
                 crate::file_upload::Target::Pack => {
                     let preview = crate::modpack::inspect(&self.root, reader)?;
                     let mut inner = self.inner.lock().map_err(|_| "宿主状态不可用")?;
@@ -613,7 +952,13 @@ impl Host {
                     Ok(Some(preview))
                 }
                 crate::file_upload::Target::Content { id, content_kind } => {
-                    let root = model::safe_path(&self.root, &format!("instances/{id}/game"))?;
+                    let instance = self
+                        .status()
+                        .instances
+                        .into_iter()
+                        .find(|v| v.id == id)
+                        .ok_or("实例已变化")?;
+                    let root = instance.game_path(&self.root)?;
                     if !root.is_dir() {
                         return Err("实例游戏目录已变化，未导入文件".into());
                     }
@@ -632,6 +977,87 @@ impl Host {
         self.finish(result.as_ref().map(|_| ()).map_err(Clone::clone), &cancel);
         if cancel.is_cancelled() && !matches!(result, Ok(None)) {
             return Err("文件接收或检查已取消".into());
+        }
+        result
+    }
+    pub fn local_mod_plan(
+        &self,
+        id: &str,
+        name: &str,
+        input: impl std::io::Read,
+    ) -> Result<crate::resource_install::Plan> {
+        let status = self.status();
+        let instance = status
+            .instances
+            .iter()
+            .find(|item| item.id == id)
+            .ok_or("实例不存在")?;
+        let java_path = instance.launch.resolve(&status.settings).java_path;
+        let plan = self.instance_files(id, |root| {
+            crate::resource_install::prepare_local(
+                &self.root,
+                root,
+                instance,
+                java_path.clone(),
+                name,
+                input,
+                &CancellationToken::new(),
+            )
+        })?;
+        let mut inner = self.inner.lock().map_err(|_| "宿主状态不可用")?;
+        if inner.cancel.is_some() || inner.auth_cancel.is_some() {
+            return Err("已有游戏、任务或登录进行中，预检计划未保存".into());
+        }
+        inner.resource_plan = Some(plan.clone());
+        Ok(plan)
+    }
+    pub fn finish_mod_upload(&self, token: &str) -> Result<crate::resource_install::Plan> {
+        let (mut upload, id) = {
+            let mut inner = self.inner.lock().map_err(|_| "宿主状态不可用")?;
+            if inner.upload_token.as_deref() != Some(token) {
+                return Err("文件接收令牌无效或已取消".into());
+            }
+            let pending = inner.upload.as_ref().ok_or("文件正在检查或已结束")?;
+            let crate::file_upload::Target::ModPreview { id } = &pending.target else {
+                return Err("此文件不是 Mod 预检请求".into());
+            };
+            let id = id.clone();
+            (inner.upload.take().ok_or("文件已结束")?, id)
+        };
+        let cancel = upload.cancel.clone();
+        let name = upload.name.clone();
+        self.progress("file-inspect", "正在进行本地 Mod 安装预检", 0, 0);
+        let result = (|| {
+            let status = self.status();
+            let instance = status
+                .instances
+                .iter()
+                .find(|item| item.id == id)
+                .ok_or("实例不存在")?;
+            let root = instance.game_path(&self.root)?;
+            if !root.is_dir() {
+                return Err("实例游戏目录已变化".into());
+            }
+            let plan = crate::resource_install::prepare_local(
+                &self.root,
+                &root,
+                instance,
+                instance.launch.resolve(&status.settings).java_path,
+                &name,
+                upload.reader()?,
+                &cancel,
+            )?;
+            let mut inner = self.inner.lock().map_err(|_| "宿主状态不可用")?;
+            if cancel.is_cancelled() {
+                return Err("Mod 预检已取消".into());
+            }
+            inner.resource_plan = Some(plan.clone());
+            inner.task.phase = "file-checked".into();
+            Ok(plan)
+        })();
+        self.finish(result.as_ref().map(|_| ()).map_err(Clone::clone), &cancel);
+        if cancel.is_cancelled() {
+            return Err("Mod 预检已取消".into());
         }
         result
     }
@@ -659,7 +1085,58 @@ impl Host {
         inner.resource_plan = Some(plan.clone());
         Ok(plan)
     }
-    pub fn start_resource_install(self: &Arc<Self>, token: String) -> Result<()> {
+    pub async fn curseforge_plan(
+        &self,
+        id: String,
+        project: String,
+        version: String,
+        filename: String,
+    ) -> Result<crate::resource_install::Plan> {
+        let instance = self
+            .status()
+            .instances
+            .into_iter()
+            .find(|i| i.id == id)
+            .ok_or("实例不存在")?;
+        let plan = tokio::time::timeout(
+            std::time::Duration::from_secs(180),
+            crate::resource_install::prepare_curseforge(
+                self, instance, &project, &version, &filename,
+            ),
+        )
+        .await
+        .map_err(|_| "CurseForge 预检超时")??;
+        let mut inner = self.inner.lock().map_err(|_| "宿主状态不可用")?;
+        if inner.cancel.is_some() || inner.auth_cancel.is_some() {
+            return Err("已有任务或登录进行中，请重新预览".into());
+        }
+        inner.resource_plan = Some(plan.clone());
+        Ok(plan)
+    }
+    pub fn start_forge_download(self: &Arc<Self>, game: String, loader: String) -> Result<()> {
+        let cancel = self.begin_task("准备下载 Forge 官方安装器")?;
+        let host = self.clone();
+        tauri::async_runtime::spawn(async move {
+            let result = crate::forge::download(&host, &game, &loader, &cancel).await;
+            if let Ok(path) = &result {
+                host.log(
+                    &format!(
+                        "Forge 安装器下载并校验完成：{}；未执行、未创建可启动实例。",
+                        path.display()
+                    ),
+                    &[],
+                );
+                host.progress("forge-downloaded", "Forge 安装器已下载，尚未执行安装", 1, 1);
+            }
+            host.finish(result.map(|_| ()), &cancel);
+        });
+        Ok(())
+    }
+    pub fn start_resource_install(
+        self: &Arc<Self>,
+        token: String,
+        acknowledge_issues: bool,
+    ) -> Result<()> {
         let plan = {
             let mut inner = self.inner.lock().map_err(|_| "宿主状态不可用")?;
             if inner.cancel.is_some() || inner.auth_cancel.is_some() {
@@ -672,7 +1149,14 @@ impl Host {
             {
                 return Err("安装计划无效或已被替换，请重新预览".into());
             }
-            inner.resource_plan.take().ok_or("安装计划不可用")?
+            let mut plan = inner
+                .resource_plan
+                .as_ref()
+                .ok_or("安装计划不可用")?
+                .clone();
+            plan.approve_issues(acknowledge_issues)?;
+            inner.resource_plan = None;
+            plan
         };
         let status = self.status();
         let target = status
@@ -680,8 +1164,10 @@ impl Host {
             .iter()
             .find(|item| item.id == plan.instance_id)
             .ok_or("目标实例不存在")?;
-        if plan.java_path != target.launch.resolve(&status.settings).java_path {
-            return Err("Java 配置已变化，请重新生成安装计划".into());
+        if plan.java_path != target.launch.resolve(&status.settings).java_path
+            || plan.game_isolation != target.isolated()
+        {
+            return Err("Java 配置或游戏目录已变化，请重新生成安装计划".into());
         }
         let cancel = self.begin_task("准备资源安装")?;
         let host = self.clone();
@@ -702,8 +1188,7 @@ impl Host {
                     .iter()
                     .find(|item| item.id == plan.instance_id)
                     .ok_or("安装目标已变化")?;
-                let root =
-                    model::safe_path(&host.root, &format!("instances/{}/game", instance.id))?;
+                let root = instance.game_path(&host.root)?;
                 crate::resource_install::commit(&root, instance, &plan, &paths, &cancel)?;
                 inner.task.phase = "resources-committed".into();
                 inner.task.completed = plan.files.len();
@@ -782,11 +1267,20 @@ impl Host {
             inner.pack_plan.take().ok_or("整合包计划不可用")?
         };
         let cancel = self.begin_task("准备整合包新实例")?;
+        self.inner
+            .lock()
+            .map_err(|_| "宿主不可用")?
+            .task
+            .pending_instance = Some(name.clone());
         let host = self.clone();
         tauri::async_runtime::spawn(async move {
             let mut transaction = None;
             let result = async {
-                let (instance, _) = host
+                let mut plan = plan;
+                if !plan.curse_files.is_empty() {
+                    crate::modpack::resolve_curse(&host, &mut plan, &cancel).await?;
+                }
+                let (mut instance, prepared) = host
                     .prepare_instance(
                         plan.game_version.clone(),
                         name,
@@ -796,17 +1290,59 @@ impl Host {
                             Some(plan.fabric_version.clone())
                         },
                         &cancel,
+                        !plan.forge_version.is_empty(),
                     )
                     .await?;
+                instance.launch.game_isolation = Some(true);
+                let profile = if !plan.forge_version.is_empty() {
+                    let profile = crate::pack_download::legacy_forge(
+                        &host,
+                        &plan.game_version,
+                        &plan.forge_version,
+                        &prepared.metadata,
+                        &cancel,
+                    )
+                    .await?;
+                    use sha1::Digest;
+                    let bytes = serde_json::to_vec(&profile).map_err(|_| "配置序列化失败")?;
+                    instance.manifest_sha1 = sha1::Sha1::digest(&bytes)
+                        .iter()
+                        .map(|b| format!("{b:02x}"))
+                        .collect();
+                    instance.local = Some(model::LocalInstallation {
+                        root: host.root.to_string_lossy().into(),
+                        version_directory: format!("instances/{}/game", instance.id),
+                        game_directory: format!("instances/{}/game", instance.id),
+                        client_jar: format!("versions/{}/client.jar", instance.version),
+                        source_key: uuid::Uuid::new_v4().simple().to_string().repeat(2),
+                        loader: "forge".into(),
+                        loader_version: plan.forge_version.clone(),
+                    });
+                    Some(bytes)
+                } else {
+                    None
+                };
                 transaction = Some(crate::modpack::begin(&host.root, &plan, instance)?);
                 let transaction = transaction.as_mut().ok_or("整合包事务不可用")?;
+                if let Some(profile) = profile {
+                    crate::modpack::copy(
+                        &host.root,
+                        transaction,
+                        "local-profile.json",
+                        profile.as_slice(),
+                        None,
+                        &cancel,
+                    )?;
+                }
                 crate::modpack::stage(&host, &plan, transaction, &selected, &cancel).await?;
+                host.progress("pack-publish", "提交完整实例到游戏库", 0, 1);
                 let mut inner = host.inner.lock().map_err(|_| "宿主状态不可用")?;
                 inner.instances =
                     crate::modpack::publish(&host.root, transaction, &inner.instances, &cancel)?;
                 inner.task.phase = "pack-committed".into();
                 inner.task.completed = plan.files.len();
                 inner.task.total = plan.files.len();
+                inner.task.pending_instance = None;
                 Ok(())
             }
             .await;
@@ -863,13 +1399,20 @@ impl Host {
         name: String,
         loader: Option<String>,
         cancel: &CancellationToken,
+        legacy: bool,
     ) -> Result<(Instance, minecraft::Prepared)> {
-        let entry = minecraft::versions(self, cancel)
+        let entry = minecraft::version_catalog(self, cancel)
             .await?
             .into_iter()
-            .find(|entry| entry.id == version)
-            .ok_or("官方清单中找不到该正式版本")?;
-        let prepared = minecraft::prepare(self, &entry, cancel).await?;
+            .find(|entry| {
+                entry.id == version && ["release", "snapshot"].contains(&entry.kind.as_str())
+            })
+            .ok_or("找不到可安装的官方版本；远古版本的旧式安装尚未支持")?;
+        let prepared = if legacy {
+            minecraft::prepare_legacy_pack(self, &entry, cancel).await?
+        } else {
+            minecraft::prepare(self, &entry, cancel).await?
+        };
         let fabric_sha1 = if let Some(loader) = &loader {
             self.progress("fabric", "下载并校验 Fabric 加载器", 0, 1);
             crate::fabric::install(self, &version, loader, cancel).await?
@@ -880,6 +1423,7 @@ impl Host {
             return Err("操作已取消".into());
         }
         let instance = Instance {
+            local: None,
             id: uuid::Uuid::new_v4().to_string(),
             name: name.trim().into(),
             version,
@@ -887,7 +1431,10 @@ impl Host {
             java_major: prepared.java_major,
             fabric_version: loader.unwrap_or_default(),
             fabric_sha1,
-            launch: Default::default(),
+            launch: model::LaunchOverrides {
+                game_isolation: Some(self.status().settings.isolate_new_instances),
+                ..Default::default()
+            },
         };
         Ok((instance, prepared))
     }
@@ -898,13 +1445,15 @@ impl Host {
         loader: Option<String>,
         cancel: &CancellationToken,
     ) -> Result<()> {
-        let (instance, prepared) = self.prepare_instance(version, name, loader, cancel).await?;
+        let (instance, prepared) = self
+            .prepare_instance(version, name, loader, cancel, false)
+            .await?;
         minecraft::extract_natives(
             &prepared.native_archives,
             &self.root,
             &format!("instances/{}/natives", instance.id),
         )?;
-        let game = model::safe_path(&self.root, &format!("instances/{}/game", instance.id))?;
+        let game = instance.game_path(&self.root)?;
         fs::create_dir_all(game).map_err(|_| "无法创建隔离实例目录")?;
         if cancel.is_cancelled() {
             return Err("操作已取消".into());
@@ -965,7 +1514,12 @@ impl Host {
             &format!("本次游戏最大堆内存：{} MB", settings.memory_mb),
             &[],
         );
-        let java = minecraft::probe_java(&settings.java_path).await?;
+        let java = if instance.local.is_some() && instance.launch.java_path.is_none() {
+            crate::local_launch::java_for(&instance, &settings.java_path, &self.root).await?
+        } else {
+            minecraft::probe_java(&settings.java_path).await?
+        };
+        settings.java_path = java.path.clone();
         if !java.is_64_bit || java.major != instance.java_major {
             return Err(format!(
                 "该实例需要 64 位 Java {}，当前为 Java {}",
@@ -987,8 +1541,12 @@ impl Host {
             kind: "release".into(),
             release_time: String::new(),
         };
-        let mut prepared = minecraft::prepare(self, &entry, cancel).await?;
-        if !instance.fabric_version.is_empty() {
+        let mut prepared = if instance.local.is_some() {
+            crate::local_launch::prepare(self, &instance, cancel)?
+        } else {
+            minecraft::prepare(self, &entry, cancel).await?
+        };
+        if instance.local.is_none() && !instance.fabric_version.is_empty() {
             crate::fabric::prepare(self, &instance, &mut prepared, cancel).await?;
         }
         minecraft::extract_natives(
@@ -1001,12 +1559,19 @@ impl Host {
         if cancel.is_cancelled() {
             return Err("操作已取消".into());
         }
+        let (process_args, _argument_file) =
+            crate::local_launch::command_arguments(&self.root, &instance, &args)?;
+        let mode = instance.launch.window_mode.unwrap_or_default();
+        if let Some(backup) = crate::worlds::prepare_window(&instance.game_path(&self.root)?, mode)?
+        {
+            self.log(&format!("已在创建游戏窗口前应用 {mode:?} 模式；仅修改 options.txt 全屏项，备份：{backup}"), &[]);
+        }
+        if cancel.is_cancelled() {
+            return Err("操作已取消".into());
+        }
         let mut child = Command::new(&settings.java_path)
-            .args(&args)
-            .current_dir(model::safe_path(
-                &self.root,
-                &format!("instances/{}/game", instance.id),
-            )?)
+            .args(&process_args)
+            .current_dir(instance.game_path(&self.root)?)
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
             .kill_on_drop(true)

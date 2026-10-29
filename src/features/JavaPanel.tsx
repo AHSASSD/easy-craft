@@ -92,12 +92,23 @@ export function JavaPanel({
             <label>
               <input
                 type="checkbox"
-                aria-label="继承全局 Java"
+                aria-label={
+                  instance?.local ? '自动匹配本机 Java' : '继承全局 Java'
+                }
                 checked={!custom}
                 onChange={(event) => edit(value, !event.target.checked)}
               />
-              继承全局 Java
+              {instance?.local
+                ? '自动匹配本机 Java（优先全局配置）'
+                : '继承全局 Java'}
             </label>
+          )}
+          {instance?.local && !custom && (
+            <p>
+              全局 Java
+              不匹配时，在常见本机运行时目录查找所需版本；可关闭自动匹配，手动指定此实例的
+              Java。
+            </p>
           )}
           <label className="native-label">
             Java 可执行文件

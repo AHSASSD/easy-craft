@@ -1,7 +1,7 @@
 use crate::model::{self, Result};
 use serde::Serialize;
 use serde_json::Value;
-use std::{collections::HashSet, io::Read, path::Path};
+use std::{collections::HashSet, io::Read};
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -18,7 +18,7 @@ pub struct PackPreview {
     pub install: Option<crate::modpack::Plan>,
 }
 fn check_path(path: &str) -> Result<()> {
-    model::safe_path(Path::new("C:/EasyCraftArchivePreview"), path).map(|_| ())
+    model::validate_relative_path(path)
 }
 #[cfg(test)]
 pub fn preview(bytes: &[u8]) -> Result<PackPreview> {
@@ -29,9 +29,15 @@ pub fn preview(bytes: &[u8]) -> Result<PackPreview> {
     preview_reader(std::io::Cursor::new(bytes))
 }
 pub(crate) fn preview_reader<R: Read + std::io::Seek>(input: R) -> Result<PackPreview> {
+    preview_bounded(input, 10000)
+}
+pub(crate) fn preview_resource_reader<R: Read + std::io::Seek>(input: R) -> Result<PackPreview> {
+    preview_bounded(input, 100000)
+}
+fn preview_bounded<R: Read + std::io::Seek>(input: R, max_entries: usize) -> Result<PackPreview> {
     let mut zip = zip::ZipArchive::new(input).map_err(|_| "不是有效的 ZIP / MRPACK 文件")?;
-    if zip.len() > 10000 {
-        return Err("整合包条目超过 10000 项上限".into());
+    if zip.len() > max_entries {
+        return Err(format!("压缩包条目超过 {max_entries} 项上限"));
     }
     let mut result = PackPreview {
         kind: "ZIP".into(),
@@ -173,10 +179,37 @@ pub(crate) fn preview_reader<R: Read + std::io::Seek>(input: R) -> Result<PackPr
                 result.kind = "CurseForge ZIP".into();
                 result
                     .warnings
-                    .push("已识别 CurseForge 清单；其下载 API 与安装尚未接入".into());
+                    .push("已识别 CurseForge 清单；可安装范围与文件来源以安装预览为准".into());
             }
         }
     }
     result.warnings.push("此次仅检查压缩包目录和索引，没有解压到实例、下载或执行内容；安装需另行确认，目录检查不能证明 Mod 安全。".into());
     Ok(result)
+}
+
+#[cfg(test)]
+mod resource_archive_tests {
+    use super::*;
+    use std::io::{Cursor, Write};
+    #[test]
+    fn resource_entry_budget_does_not_relax_pack_or_path_boundaries() {
+        let mut zip = zip::ZipWriter::new(Cursor::new(vec![]));
+        for i in 0..10001 {
+            zip.start_file(
+                format!("assets/test/{i}.txt"),
+                zip::write::SimpleFileOptions::default(),
+            )
+            .unwrap();
+            zip.write_all(b"x").unwrap();
+        }
+        let bytes = zip.finish().unwrap().into_inner();
+        assert!(preview_reader(Cursor::new(&bytes)).is_err());
+        assert_eq!(
+            preview_resource_reader(Cursor::new(bytes)).unwrap().files,
+            10001
+        );
+        for name in ["../escape", "C:/escape", "foo/CON.txt", "foo/bar."] {
+            assert!(model::validate_relative_path(name).is_err());
+        }
+    }
 }

@@ -10,6 +10,22 @@ export function officialPlugins(
   return [
     {
       manifest: {
+        id: 'official.layout',
+        version: '1.0.0',
+        apiVersion: '1.0.0',
+        requires: {},
+        provides: {},
+        permissions: ['pages'],
+      },
+      setup(ctx) {
+        ctx.registerPage({
+          id: 'official.layout.workspace',
+          title: '官方工作区布局',
+        });
+      },
+    },
+    {
+      manifest: {
         id: 'official.vanilla',
         version: '0.2.0',
         apiVersion: '1.0.0',

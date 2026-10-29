@@ -1,5 +1,9 @@
 # Forge 与 CurseForge 探测记录
 
+2026-10-29 当前进度：已支持 1.12.2 / Forge CurseForge 整合包安装，水星迫降启动问题及修复见 [真实启动记录](MERCURY_LAUNCH_FIX_2026-10-29.md)。以下段落保留原日期的历史状态。
+
+2026-10-26 更新：应用内已接入 Forge 官方安装器下载与校验（完整 Forge 实例安装／启动仍未实现）；CurseForge Fabric Mod 查询、依赖计划和安装预检代码已接入，但缺少有效 API Key，真实公网安装未验收。当前状态与测试见 [本轮实施记录](FORGE_CURSEFORGE_2026-10-26.md)。以下为 2026-10-25 的历史探测结果。
+
 日期：2026-10-25。使用工作区独立 `.native/source-probe`，未修改日常实例、账户或世界。复现：`node scripts/probe-launcher-sources.mjs`；每次会重新探测并更新该目录下 report.json，不保证未来网络返回相同。
 
 ## Forge

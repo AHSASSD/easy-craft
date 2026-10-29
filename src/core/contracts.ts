@@ -18,12 +18,14 @@ export type Preferences = {
   sidebarWidth: number;
   selectedId: string;
   doubleClickLaunch: boolean;
+  autoModCheck?: boolean;
   developerEnabled: boolean;
   sort: 'name' | 'recent';
   backgroundShade?: number;
   reduceMotion?: boolean;
   uiScale?: (typeof uiScales)[number];
   accentColor?: string;
+  layout?: 'default' | 'compact';
   navigation?: Navigation;
 };
 export type ThemeDefinition = {

@@ -34,6 +34,20 @@ pub fn maven_path(name: &str) -> Result<String> {
     ))
 }
 pub async fn versions(host: &Host, game: &str, cancel: &CancellationToken) -> Result<Vec<String>> {
+    Ok(loader_catalog(host, game, cancel).await?.stable_versions)
+}
+#[derive(serde::Serialize)]
+pub struct LoaderCatalog {
+    pub versions: Vec<String>,
+    pub recommended: Option<String>,
+    #[serde(skip)]
+    stable_versions: Vec<String>,
+}
+pub async fn loader_catalog(
+    host: &Host,
+    game: &str,
+    cancel: &CancellationToken,
+) -> Result<LoaderCatalog> {
     if !model::valid_id(game) {
         return Err("无效 Minecraft 版本".into());
     }
@@ -43,14 +57,45 @@ pub async fn versions(host: &Host, game: &str, cancel: &CancellationToken) -> Re
         cancel,
     )
     .await?;
-    Ok(value
+    let rows = value
         .as_array()
-        .ok_or("Fabric 版本响应无效")?
+        .filter(|rows| rows.len() <= 5000)
+        .ok_or("Fabric 版本响应无效")?;
+    let stable_versions: Vec<_> = rows
         .iter()
         .filter(|item| item["loader"]["stable"] == true)
         .filter_map(|item| item["loader"]["version"].as_str())
+        .filter(|version| valid_version(version))
+        .map(str::to_string)
+        .collect();
+    let recommended = stable_versions.first().cloned();
+    let versions = rows
+        .iter()
+        .filter_map(|item| item["loader"]["version"].as_str())
         .filter(|item| valid_version(item))
         .map(str::to_owned)
+        .collect();
+    Ok(LoaderCatalog {
+        versions,
+        recommended,
+        stable_versions,
+    })
+}
+pub async fn games(host: &Host) -> Result<Vec<String>> {
+    let value = net::get_json(
+        &host.client,
+        "https://meta.fabricmc.net/v2/versions/game",
+        &CancellationToken::new(),
+    )
+    .await?;
+    Ok(value
+        .as_array()
+        .filter(|rows| rows.len() <= 10000)
+        .ok_or("Fabric 游戏版本目录无效")?
+        .iter()
+        .filter_map(|row| row["version"].as_str())
+        .filter(|game| model::valid_id(game))
+        .map(str::to_string)
         .collect())
 }
 fn validate_profile(value: &Value, game: &str, loader: &str) -> Result<()> {
@@ -84,6 +129,15 @@ pub async fn install(
     loader: &str,
     cancel: &CancellationToken,
 ) -> Result<String> {
+    install_with_sources(host, game, loader, cancel, &[]).await
+}
+pub async fn install_with_sources(
+    host: &Host,
+    game: &str,
+    loader: &str,
+    cancel: &CancellationToken,
+    sources: &[std::path::PathBuf],
+) -> Result<String> {
     if !model::valid_id(game) || !valid_version(loader) {
         return Err("无效 Fabric 安装版本".into());
     }
@@ -116,7 +170,7 @@ pub async fn install(
             .await?
         };
         lib["sha1"] = Value::String(hash.clone());
-        net::download(
+        net::download_from_local(
             &host.client,
             &host.root,
             &Artifact {
@@ -125,6 +179,7 @@ pub async fn install(
                 size: lib["size"].as_u64(),
                 path: format!("libraries/{path}"),
             },
+            sources,
             cancel,
         )
         .await?;

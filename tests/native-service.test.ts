@@ -8,14 +8,20 @@ import {
   render,
   screen,
   waitFor,
+  act,
 } from '@testing-library/react';
 import { AccountPanel } from '../src/features/AccountPanel';
+import { LaunchChecks } from '../src/features/LaunchChecks';
 import { MemoryPanel } from '../src/features/MemoryPanel';
+import { IsolationPanel } from '../src/features/IsolationPanel';
+import { WindowPanel } from '../src/features/WindowPanel';
 import { WorldSettingsPanel } from '../src/features/WorldSettingsPanel';
 import { JavaPanel } from '../src/features/JavaPanel';
 import { ContentPanel } from '../src/features/ContentPanel';
 import { ResourceBrowser } from '../src/features/ResourceBrowser';
 import { NativeWorkspace } from '../src/features/NativeWorkspace';
+import { LocalVersionImport } from '../src/features/LocalVersionImport';
+import { AddInstanceMenu } from '../src/features/AddInstanceMenu';
 import { PackInspector } from '../src/features/PackInspector';
 import { CachePanel } from '../src/features/CachePanel';
 import { BackupRetention } from '../src/features/BackupRetention';
@@ -66,6 +72,355 @@ const state = (): NativeState => ({
   loginPending: false,
   loginCode: null,
 });
+test('window mode persists independently without losing Java, memory or isolation overrides', async () => {
+  const current = state();
+  current.instances = [
+    {
+      id: 'one',
+      name: 'One',
+      version: '1.16.5',
+      manifestSha1: 'a'.repeat(40),
+      javaMajor: 8,
+      fabricVersion: '',
+      fabricSha1: '',
+      launch: {
+        javaPath: 'E:/java8/bin/java.exe',
+        gameIsolation: true,
+        memory: { memoryMode: 'manual', memoryMb: 1536, optimizeMemory: false },
+      },
+    },
+  ];
+  const call = vi.fn(
+    async (command: string, args?: Record<string, unknown>) => {
+      if (command === 'native_instance_launch_settings')
+        current.instances[0].launch = args!
+          .launch as NativeState['instances'][number]['launch'];
+      return structuredClone(current);
+    },
+  );
+  const service = createNativeService(true, call as typeof invoke);
+  await service.refresh();
+  render(createElement(WindowPanel, { service, instanceId: 'one' }));
+  const selector = screen.getByRole('combobox', {
+    name: '启动显示方式',
+  }) as HTMLSelectElement;
+  expect(selector.value).toBe('windowed');
+  fireEvent.change(selector, { target: { value: 'fullscreen' } });
+  fireEvent.click(screen.getByRole('button', { name: '保存启动窗口设置' }));
+  await waitFor(() =>
+    expect(current.instances[0].launch?.windowMode).toBe('fullscreen'),
+  );
+  await screen.findByText(/启动窗口设置已保存/);
+  expect(current.instances[0].launch?.javaPath).toContain('java8');
+  expect(current.instances[0].launch?.gameIsolation).toBe(true);
+  expect(current.instances[0].launch?.memory?.memoryMb).toBe(1536);
+  fireEvent.change(selector, { target: { value: 'inherit' } });
+  fireEvent.click(screen.getByRole('button', { name: '保存启动窗口设置' }));
+  await waitFor(() =>
+    expect(current.instances[0].launch?.windowMode).toBe('inherit'),
+  );
+  expect(
+    validNativeState({
+      ...current,
+      instances: [
+        { ...current.instances[0], launch: { windowMode: 'mystery' } },
+      ],
+    }),
+  ).toBe(false);
+  expect(
+    validNativeState({
+      ...current,
+      instances: [
+        { ...current.instances[0], launch: { windowMode: ['windowed'] } },
+      ],
+    }),
+  ).toBe(false);
+  service.stop();
+});
+test('isolation controls preserve other launch overrides and only explicitly change the selected directory', async () => {
+  const current = state();
+  current.instances = [
+    {
+      id: 'one',
+      name: 'One',
+      version: '1.21.1',
+      manifestSha1: 'a'.repeat(40),
+      javaMajor: 21,
+      fabricVersion: '',
+      fabricSha1: '',
+      launch: {
+        memory: { memoryMode: 'manual', memoryMb: 1536, optimizeMemory: false },
+      },
+    },
+  ];
+  const call = vi.fn(
+    async (command: string, args?: Record<string, unknown>) => {
+      if (command === 'native_instance_launch_settings')
+        current.instances[0].launch = args!
+          .launch as NativeState['instances'][number]['launch'];
+      if (command === 'native_settings')
+        current.settings = args!.settings as NativeState['settings'];
+      return structuredClone(current);
+    },
+  );
+  const service = createNativeService(true, call as typeof invoke);
+  await service.refresh();
+  const view = render(
+    createElement(IsolationPanel, { service, instanceId: 'one' }),
+  );
+  expect(
+    (screen.getByRole('checkbox', { name: '此版本隔离' }) as HTMLInputElement)
+      .checked,
+  ).toBe(true);
+  fireEvent.click(screen.getByRole('checkbox', { name: '此版本隔离' }));
+  expect(screen.getByText(/应用后目录.*shared-game/)).toBeTruthy();
+  fireEvent.click(screen.getByRole('button', { name: '保存隔离设置' }));
+  await waitFor(() =>
+    expect(current.instances[0].launch?.gameIsolation).toBe(false),
+  );
+  expect(current.instances[0].launch?.memory?.memoryMb).toBe(1536);
+  await screen.findByText(/游戏目录设置已保存/);
+  fireEvent.click(screen.getByRole('checkbox', { name: '此版本隔离' }));
+  fireEvent.click(screen.getByRole('button', { name: '保存隔离设置' }));
+  await waitFor(() =>
+    expect(current.instances[0].launch?.gameIsolation).toBe(true),
+  );
+  view.unmount();
+  render(createElement(IsolationPanel, { service }));
+  fireEvent.click(screen.getByRole('checkbox', { name: '默认版本隔离' }));
+  fireEvent.click(screen.getByRole('button', { name: '保存隔离设置' }));
+  await waitFor(() => expect(current.settings.isolateNewInstances).toBe(false));
+  expect(current.instances[0].launch?.gameIsolation).toBe(true);
+  expect(
+    validNativeState({
+      ...current,
+      settings: { ...current.settings, isolateNewInstances: 'yes' },
+    }),
+  ).toBe(false);
+  expect(
+    validNativeState({
+      ...current,
+      instances: [
+        { ...current.instances[0], launch: { gameIsolation: 'yes' } },
+      ],
+    }),
+  ).toBe(false);
+  service.stop();
+});
+test('instance add menu supports keyboard, escape, outside click and distinct import actions', async () => {
+  const onPack = vi.fn(),
+    onLocal = vi.fn();
+  render(createElement(AddInstanceMenu, { disabled: false, onPack, onLocal }));
+  const trigger = screen.getByRole('button', { name: '添加游戏实例' });
+  fireEvent.keyDown(trigger, { key: 'ArrowDown' });
+  expect(document.activeElement).toBe(
+    screen.getByRole('menuitem', { name: '导入本地整合包' }),
+  );
+  fireEvent.keyDown(document.activeElement!, { key: 'ArrowDown' });
+  expect(document.activeElement).toBe(
+    screen.getByRole('menuitem', { name: '扫描/导入本地版本' }),
+  );
+  fireEvent.keyDown(document.activeElement!, { key: 'Escape' });
+  expect(screen.queryByRole('menu')).toBeNull();
+  expect(document.activeElement).toBe(trigger);
+  fireEvent.click(trigger);
+  fireEvent.click(screen.getByRole('menuitem', { name: '导入本地整合包' }));
+  expect(onPack).toHaveBeenCalledTimes(1);
+  fireEvent.click(trigger);
+  fireEvent.click(screen.getByRole('menuitem', { name: '扫描/导入本地版本' }));
+  expect(onLocal).toHaveBeenCalledTimes(1);
+  fireEvent.click(trigger);
+  fireEvent.pointerDown(document.body);
+  expect(screen.queryByRole('menu')).toBeNull();
+});
+
+test('local version picker handles cancel and invalid scans and defaults to explicit reference registration without forced network consent', async () => {
+  const candidate = {
+    id: 'local-one',
+    name: 'Local',
+    gameVersion: '1.21.1',
+    loader: '原版',
+    directory: 'D:/MC/versions/Local',
+    gameDirectory: 'D:/MC',
+    supported: true,
+    duplicate: false,
+    files: 2,
+    bytes: 10,
+    issues: [],
+    warnings: [],
+  };
+  let response: unknown = null;
+  const call = vi.fn(async (command: string) => {
+    if (command === 'native_local_scan_pick') return response;
+    if (command === 'native_local_import') return null;
+    return state();
+  });
+  const service = createNativeService(true, call as typeof invoke);
+  render(createElement(LocalVersionImport, { service }));
+  fireEvent.click(screen.getByRole('button', { name: '选择目录并扫描' }));
+  await waitFor(() =>
+    expect(
+      (
+        screen.getByRole('button', {
+          name: '选择目录并扫描',
+        }) as HTMLButtonElement
+      ).disabled,
+    ).toBe(false),
+  );
+  expect(screen.queryByRole('alert')).toBeNull();
+  response = {
+    token: 'token',
+    directory: 'D:/MC',
+    candidates: [
+      candidate,
+      {
+        ...candidate,
+        id: 'bad',
+        name: 'Forge',
+        supported: false,
+        issues: ['Forge 尚不支持'],
+      },
+      { ...candidate, id: 'duplicate', name: 'Duplicate', duplicate: true },
+    ],
+    warnings: [],
+  };
+  fireEvent.click(screen.getByRole('button', { name: '选择目录并扫描' }));
+  await screen.findByLabelText('导入 Local');
+  expect(screen.getByText('扫描完成，尚未导入')).toBeTruthy();
+  expect(
+    call.mock.calls.some(([command]) => command === 'native_local_import'),
+  ).toBe(false);
+  expect(
+    (screen.getByLabelText('导入 Forge') as HTMLInputElement).disabled,
+  ).toBe(true);
+  expect(
+    (screen.getByLabelText('导入 Duplicate') as HTMLInputElement).disabled,
+  ).toBe(true);
+  fireEvent.click(screen.getByLabelText('导入 Local'));
+  expect(
+    (
+      screen.getByRole('button', {
+        name: '导入选中的 1 个版本',
+      }) as HTMLButtonElement
+    ).disabled,
+  ).toBe(false);
+  fireEvent.change(screen.getByRole('textbox', { name: '筛选扫描版本' }), {
+    target: { value: 'does-not-exist' },
+  });
+  expect(screen.queryByRole('checkbox', { name: '导入 Local' })).toBeNull();
+  expect(
+    screen.getByRole('button', { name: '导入选中的 1 个版本' }),
+  ).toBeTruthy();
+  fireEvent.change(screen.getByRole('textbox', { name: '筛选扫描版本' }), {
+    target: { value: '' },
+  });
+  expect(
+    (screen.getByRole('checkbox', { name: '导入 Local' }) as HTMLInputElement)
+      .checked,
+  ).toBe(true);
+  fireEvent.change(screen.getByLabelText('实例名称 Local'), {
+    target: { value: 'Renamed local' },
+  });
+  expect(screen.queryByLabelText('确认本地版本导入范围')).toBeNull();
+  expect(
+    (
+      screen.getByRole('combobox', {
+        name: '本地版本添加方式',
+      }) as HTMLSelectElement
+    ).value,
+  ).toBe('reference');
+  fireEvent.click(screen.getByRole('button', { name: '导入选中的 1 个版本' }));
+  await waitFor(() =>
+    expect(call).toHaveBeenCalledWith('native_local_import', {
+      token: 'token',
+      selected: [{ id: 'local-one', name: 'Renamed local', mode: 'reference' }],
+    }),
+  );
+  response = { token: 'invalid', candidates: [{}] };
+  await expect(service.scanLocalVersions()).rejects.toThrow(
+    '本地版本扫描响应无效',
+  );
+  service.stop();
+});
+
+test('a reopened scan keeps its candidates and makes the explicit import step visible', async () => {
+  const current = state();
+  const service = createNativeService(
+    true,
+    vi.fn(async () => structuredClone(current)) as typeof invoke,
+  );
+  await service.refresh();
+  render(
+    createElement(LocalVersionImport, {
+      service,
+      initialScan: {
+        token: 'saved',
+        directory: 'C:/MC',
+        candidates: [
+          {
+            id: 'one',
+            name: '1.21.1',
+            gameVersion: '1.21.1',
+            loader: '原版',
+            directory: 'C:/MC/versions/1.21.1',
+            gameDirectory: 'C:/MC',
+            supported: true,
+            duplicate: false,
+            files: 0,
+            bytes: 0,
+            worlds: 2,
+            contentIndexed: false,
+            contentRoots: ['saves', 'mods', 'options.txt'],
+            issues: [],
+            warnings: [],
+          },
+        ],
+        warnings: [],
+      },
+    }),
+  );
+  expect(screen.getByText('扫描完成，尚未导入')).toBeTruthy();
+  expect(
+    screen.getByText(/直接添加不遍历内容，启动时核对必要依赖位置/),
+  ).toBeTruthy();
+  fireEvent.click(
+    screen.getByRole('button', { name: '选择可导入版本（最多 32 个）' }),
+  );
+  expect(
+    (screen.getByRole('checkbox', { name: '导入 1.21.1' }) as HTMLInputElement)
+      .checked,
+  ).toBe(true);
+  expect(
+    (
+      screen.getByRole('button', {
+        name: '导入选中的 1 个版本',
+      }) as HTMLButtonElement
+    ).disabled,
+  ).toBe(false);
+  service.stop();
+});
+
+test('local import dialog exposes progress and cancellation without closing the modal', async () => {
+  const current = state();
+  current.task.status = 'running';
+  current.task.message = '只读扫描本地版本';
+  current.task.total = 1;
+  const call = vi.fn(async (command: string) => {
+    if (command === 'native_cancel') current.task.status = 'cancelled';
+    return structuredClone(current);
+  });
+  const service = createNativeService(true, call as typeof invoke);
+  await service.refresh();
+  render(createElement(LocalVersionImport, { service }));
+  expect(screen.getByText(/只读扫描本地版本/)).toBeTruthy();
+  fireEvent.click(screen.getByRole('button', { name: '取消当前任务' }));
+  await waitFor(() =>
+    expect(screen.queryByRole('button', { name: '取消当前任务' })).toBeNull(),
+  );
+  expect(call).toHaveBeenCalledWith('native_cancel', undefined);
+  service.stop();
+});
+
 test('native file picking accepts cancellation, validates previews and does not report an import on cancel', async () => {
   const preview = {
     kind: 'MRPACK',
@@ -150,9 +505,21 @@ test('pack installation previews optional files and sends only the frozen token,
   });
   const service = createNativeService(true, call as typeof invoke);
   await service.refresh();
-  render(createElement(PackInspector, { service }));
+  const onStarted = vi.fn();
+  render(createElement(PackInspector, { service, onStarted }));
   fireEvent.click(screen.getByRole('button', { name: /从电脑选择/ }));
   await screen.findByLabelText('整合包新实例名称');
+  response = null;
+  fireEvent.click(screen.getByRole('button', { name: /从电脑选择/ }));
+  await waitFor(() =>
+    expect(
+      (screen.getByRole('button', { name: /从电脑选择/ }) as HTMLButtonElement)
+        .disabled,
+    ).toBe(false),
+  );
+  expect(
+    (screen.getByLabelText('整合包新实例名称') as HTMLInputElement).value,
+  ).toBe('Pack fixture');
   expect(
     (
       screen.getByLabelText(
@@ -166,6 +533,7 @@ test('pack installation previews optional files and sends only the frozen token,
   });
   fireEvent.click(screen.getByRole('button', { name: '确认变更并安装整合包' }));
   await screen.findByText('整合包安装任务已开始，请查看底部任务状态。');
+  expect(onStarted).toHaveBeenCalledTimes(1);
   expect(call).toHaveBeenCalledWith('native_pack_install', {
     token: plan.token,
     name: 'My pack',
@@ -176,6 +544,23 @@ test('pack installation previews optional files and sends only the frozen token,
     install: { ...plan, files: [{ ...plan.files[0], path: '../outside.jar' }] },
   };
   await expect(service.pickPack()).rejects.toThrow('整合包预览响应无效');
+  response = {
+    ...preview,
+    install: {
+      ...plan,
+      forgeVersion: '14.23.5.2860',
+      curseFiles: [[42, 123]],
+      recommendedMemoryMb: 8192,
+    },
+  };
+  expect((await service.pickPack())?.install?.recommendedMemoryMb).toBe(8192);
+  for (const fields of [
+    { curseFiles: [[42, 0]] },
+    { recommendedMemoryMb: 999999 },
+  ]) {
+    response = { ...preview, install: { ...plan, ...fields } };
+    await expect(service.pickPack()).rejects.toThrow('整合包预览响应无效');
+  }
   service.stop();
 });
 test('online packs verify source binding and require a separate installation confirmation', async () => {
@@ -217,7 +602,7 @@ test('online packs verify source binding and require a separate installation con
   expect(
     call.mock.calls.some(([command]) => command === 'native_pack_install'),
   ).toBe(false);
-  fireEvent.click(screen.getByText('确认变更并安装整合包'));
+  fireEvent.click(screen.getByRole('button', { name: '确认变更并安装整合包' }));
   await waitFor(() =>
     expect(call).toHaveBeenCalledWith('native_pack_install', {
       token: preview.install.token,
@@ -307,7 +692,9 @@ test('modpack browser selects archives over readmes and drops the prior preview 
   );
   expect(screen.getAllByLabelText('整合包安全检查')).toHaveLength(1);
   fireEvent.click(screen.getByText('搜索资源'));
-  fireEvent.click(await screen.findByText('查看 Pack fixture'));
+  fireEvent.click(
+    await screen.findByRole('button', { name: '查看 Pack fixture' }),
+  );
   await screen.findByLabelText('在线整合包归档文件');
   expect(
     (screen.getByLabelText('在线整合包归档文件') as HTMLSelectElement).value,
@@ -360,7 +747,7 @@ test('resource browse loads real-service results by default and forwards categor
       onFilter,
     }),
   );
-  await screen.findByText('查看 Search fixture');
+  await screen.findByRole('button', { name: '查看 Search fixture' });
   fireEvent.click(screen.getByLabelText('在线资源分类'));
   await screen.findByRole('option', { name: '性能优化 · optimization' });
   expect(call).toHaveBeenCalledWith('native_resource_search', {
@@ -388,7 +775,7 @@ test('resource browse loads real-service results by default and forwards categor
     }),
   );
   await waitFor(() => expect(screen.queryByText(/筛选已修改/)).toBeNull());
-  fireEvent.click(screen.getByText('在 Modrinth 查看 ↗'));
+  fireEvent.click(screen.getAllByRole('button', { name: 'Modrinth' }).at(-1)!);
   await waitFor(() =>
     expect(call).toHaveBeenCalledWith('native_open_resource', {
       kind: 'mod',
@@ -396,6 +783,9 @@ test('resource browse loads real-service results by default and forwards categor
     }),
   );
   fireEvent.click(screen.getByText('重置条件'));
+  expect(
+    call.mock.calls.some(([command]) => command === 'native_resource_detail'),
+  ).toBe(false);
   expect(onFilter).toHaveBeenCalledWith('', '1.21.1');
   expect(screen.getByLabelText('在线资源分类').textContent).toBe('全部分类');
   service.stop();
@@ -455,10 +845,20 @@ test('Microsoft login opens the official browser after a device code and allows 
 
 test('official version rows load automatically and selection does not start installation', async () => {
   const call = vi.fn(async (command: string) =>
-    command === 'native_versions'
+    command === 'native_version_catalog'
       ? [
           { id: '1.21.1', releaseTime: '2024-08-08T12:00:00Z' },
           { id: '1.20.1', releaseTime: '2023-06-12T12:00:00Z' },
+          {
+            id: '24w14a',
+            type: 'snapshot',
+            releaseTime: '2024-04-03T12:00:00Z',
+          },
+          {
+            id: 'a1.2.6',
+            type: 'old_alpha',
+            releaseTime: '2010-12-03T12:00:00Z',
+          },
         ]
       : state(),
   );
@@ -480,6 +880,558 @@ test('official version rows load automatically and selection does not start inst
   expect(
     call.mock.calls.some(([command]) => command === 'native_install'),
   ).toBe(false);
+  fireEvent.click(
+    screen.getByRole('button', { name: '选择最新预览版 24w14a' }),
+  );
+  expect(screen.getByRole('combobox', { name: '原版版本' }).textContent).toBe(
+    '24w14a',
+  );
+  fireEvent.change(screen.getByLabelText('筛选官方版本列表'), {
+    target: { value: 'a1.2.6' },
+  });
+  fireEvent.click(screen.getByRole('button', { name: /a1\.2\.6.*选择安装/ }));
+  expect(
+    (
+      screen.getByRole('button', {
+        name: '下载并安装原版',
+      }) as HTMLButtonElement
+    ).disabled,
+  ).toBe(true);
+  expect(
+    screen.getByText('此远古版本仅供浏览，旧式安装与启动尚未支持。'),
+  ).toBeTruthy();
+  service.stop();
+});
+
+test('game and loader catalogs follow the selected source and discard incompatible selections', async () => {
+  const call = vi.fn(async (command: string) => {
+    if (command === 'native_version_catalog')
+      return [
+        { id: '1.21.1', type: 'release', releaseTime: '2024-08-08T12:00:00Z' },
+        { id: '1.20.1', type: 'release', releaseTime: '2023-06-12T12:00:00Z' },
+        { id: '24w14a', type: 'snapshot', releaseTime: '2024-04-03T12:00:00Z' },
+      ];
+    if (command === 'native_forge_versions')
+      return {
+        recommended: '52.1.20',
+        latest: '52.1.20',
+        versions: ['52.1.20', '52.1.19'],
+        gameVersions: ['1.21.1'],
+      };
+    if (command === 'native_fabric_games') return ['1.20.1'];
+    if (command === 'native_fabric_catalog')
+      return { versions: ['0.16.14', '0.16.13'], recommended: '0.16.14' };
+    return state();
+  });
+  const service = createNativeService(true, call as typeof invoke);
+  await service.refresh();
+  render(
+    createElement(NativeWorkspace, {
+      service,
+      onAccount: vi.fn(),
+      compact: true,
+    }),
+  );
+  fireEvent.click(
+    await screen.findByRole('button', { name: '选择最新预览版 24w14a' }),
+  );
+  fireEvent.change(screen.getByLabelText('真实实例加载器'), {
+    target: { value: 'forge' },
+  });
+  await screen.findByRole('button', { name: /Forge 52\.1\.19.*选择此版本/ });
+  expect(screen.getByRole('combobox', { name: '原版版本' }).textContent).toBe(
+    '1.21.1',
+  );
+  expect(screen.queryByText('浏览官方版本')).toBeNull();
+  fireEvent.click(
+    screen.getByRole('button', { name: /Forge 52\.1\.19.*选择此版本/ }),
+  );
+  expect((screen.getByLabelText('Forge 版本') as HTMLInputElement).value).toBe(
+    '52.1.19',
+  );
+  fireEvent.change(screen.getByLabelText('真实实例加载器'), {
+    target: { value: 'fabric' },
+  });
+  await screen.findByRole('button', { name: /Fabric 0\.16\.14.*已选择/ });
+  expect(screen.getByRole('combobox', { name: '原版版本' }).textContent).toBe(
+    '1.20.1',
+  );
+  expect(screen.queryByRole('region', { name: 'Forge 可下载版本' })).toBeNull();
+  expect(call).toHaveBeenCalledWith('native_fabric_catalog', {
+    version: '1.20.1',
+  });
+  expect(
+    call.mock.calls.some(
+      ([command]) =>
+        command === 'native_install' || command === 'native_forge_download',
+    ),
+  ).toBe(false);
+  fireEvent.change(screen.getByLabelText('真实实例加载器'), {
+    target: { value: 'vanilla' },
+  });
+  expect(screen.getByText('浏览官方版本')).toBeTruthy();
+  service.stop();
+});
+
+test('resource rows retain real metadata and version selection changes the frozen installation request', async () => {
+  const current = state();
+  current.instances = [
+    {
+      id: 'instance',
+      name: '版本选择测试',
+      version: '1.21.1',
+      manifestSha1: 'a'.repeat(40),
+      javaMajor: 21,
+      fabricVersion: '0.16.14',
+      fabricSha1: 'b'.repeat(40),
+    },
+  ];
+  const versions = ['Ver12345', 'Ver54321'].map((id, index) => ({
+    id,
+    name: `候选版本 ${index + 1}`,
+    number: `${index + 1}.0`,
+    environment: 'client_only',
+    loaders: ['fabric'],
+    gameVersions: ['1.21.1'],
+    published: '2026-10-20T12:00:00Z',
+    downloads: 321,
+    versionType: 'release',
+    files: [{ filename: `${id}.jar`, size: 100, sha1: 'a'.repeat(40) }],
+    dependencies: [],
+  }));
+  const call = vi.fn(async (command: string) => {
+    if (command === 'native_resource_search')
+      return {
+        hits: [
+          {
+            id: 'Proj1234',
+            title: '元数据示例',
+            description: '简短说明',
+            author: 'Author',
+            downloads: 12345,
+            updated: '2026-10-20T12:00:00Z',
+            gameVersions: ['1.21.1'],
+          },
+        ],
+        total: 1,
+        offset: 0,
+      };
+    if (command === 'native_resource_detail')
+      return {
+        id: 'Proj1234',
+        title: '元数据示例',
+        description: '',
+        body: '',
+        versions,
+      };
+    if (command === 'native_versions') return [{ id: '1.21.1' }];
+    if (command === 'native_resource_categories') return [];
+    if (command === 'native_resource_plan') throw new Error('停止于预检请求');
+    return structuredClone(current);
+  });
+  const service = createNativeService(true, call as typeof invoke);
+  await service.refresh();
+  render(
+    createElement(ResourceBrowser, {
+      service,
+      kind: 'mod',
+      query: '',
+      gameVersion: '1.21.1',
+      onFilter: vi.fn(),
+      selectedId: 'instance',
+    }),
+  );
+  await screen.findByText('元数据示例');
+  expect(screen.getByText('Modrinth · Author')).toBeTruthy();
+  expect(screen.getByText('1.2万 次下载')).toBeTruthy();
+  fireEvent.click(screen.getByRole('button', { name: '查看 元数据示例' }));
+  await screen.findByRole('region', { name: '可下载资源版本' });
+  fireEvent.click(
+    screen.getByRole('button', { name: /候选版本 2.*选择此版本/ }),
+  );
+  expect(
+    (screen.getByLabelText('在线资源兼容版本') as HTMLSelectElement).value,
+  ).toBe('Ver54321');
+  fireEvent.click(screen.getByText('选择安装位置'));
+  fireEvent.click(screen.getByRole('button', { name: '预览安装变更' }));
+  await waitFor(() =>
+    expect(call).toHaveBeenCalledWith('native_resource_plan', {
+      id: 'instance',
+      kind: 'mod',
+      version: 'Ver54321',
+      filename: 'Ver54321.jar',
+      worldId: null,
+    }),
+  );
+  await screen.findByRole('alert');
+  expect(
+    call.mock.calls.some(([command]) => command === 'native_resource_install'),
+  ).toBe(false);
+  service.stop();
+});
+
+test('current-game versions become usable before history finishes and keep the chosen file', async () => {
+  const versions = ['Quick111', 'Quick222', 'Old11111'].map((id, index) => ({
+    id,
+    name: id,
+    number: '1',
+    environment: 'unknown',
+    loaders: ['fabric'],
+    gameVersions: [index === 2 ? '1.20.1' : '1.21.1'],
+    files: [{ filename: `${id}.jar`, size: 10, sha1: 'a'.repeat(40) }],
+    dependencies: [],
+  }));
+  const detail = {
+    id: 'Proj1234',
+    title: 'Progressive',
+    description: '',
+    body: '',
+    versions,
+  };
+  let finish!: (value: unknown) => void;
+  const history = new Promise((resolve) => {
+    finish = resolve;
+  });
+  const call = vi.fn(
+    async (command: string, args?: Record<string, unknown>) => {
+      if (command === 'native_resource_search')
+        return {
+          hits: [
+            {
+              id: detail.id,
+              title: detail.title,
+              description: '',
+              author: 'Fixture',
+            },
+          ],
+          total: 1,
+          offset: 0,
+        };
+      if (command === 'native_resource_detail')
+        return args?.allVersions
+          ? history
+          : { ...detail, versions: versions.slice(0, 2) };
+      if (command === 'native_versions') return [{ id: '1.21.1' }];
+      if (command === 'native_resource_categories') return [];
+      return state();
+    },
+  );
+  const service = createNativeService(true, call as typeof invoke);
+  render(
+    createElement(ResourceBrowser, {
+      service,
+      kind: 'mod',
+      query: '',
+      gameVersion: '1.21.1',
+      onFilter: vi.fn(),
+    }),
+  );
+  fireEvent.click(
+    await screen.findByRole('button', { name: '查看 Progressive' }),
+  );
+  const choice = await screen.findByRole('button', {
+    name: /Quick222.*选择此版本/,
+  });
+  expect((choice as HTMLButtonElement).disabled).toBe(false);
+  fireEvent.click(choice);
+  expect(
+    screen.getByText('其他游戏版本正在后台加载，当前版本可直接选择。'),
+  ).toBeTruthy();
+  await act(async () => finish(detail));
+  await screen.findByRole('button', { name: /Minecraft 1\.20.*展开/ });
+  expect(
+    (screen.getByLabelText('在线资源兼容版本') as HTMLSelectElement).value,
+  ).toBe('Quick222');
+  expect(screen.getByText(/Quick222.jar ·/)).toBeTruthy();
+  fireEvent.click(screen.getByRole('button', { name: '返回搜索结果' }));
+  expect(
+    screen.queryByText('其他游戏版本正在后台加载，当前版本可直接选择。'),
+  ).toBeNull();
+  service.stop();
+});
+
+test('history failure is retryable, late results cannot reopen a closed detail, and a warm full catalog wins', async () => {
+  const version = {
+    id: 'Quick111',
+    name: 'Quick',
+    number: '1',
+    environment: 'unknown',
+    loaders: ['fabric'],
+    gameVersions: ['1.21.1'],
+    files: [{ filename: 'quick.jar', size: 10, sha1: 'a'.repeat(40) }],
+    dependencies: [],
+  };
+  const detail = {
+    id: 'Proj1234',
+    title: 'Retryable',
+    description: '',
+    body: '',
+    versions: [version],
+  };
+  let finish!: (value: unknown) => void;
+  const retry = new Promise((resolve) => {
+    finish = resolve;
+  });
+  let fullCalls = 0;
+  let quickCalls = 0;
+  const call = vi.fn(
+    async (command: string, args?: Record<string, unknown>) => {
+      if (command === 'native_resource_search')
+        return {
+          hits: [
+            {
+              id: detail.id,
+              title: detail.title,
+              description: '',
+              author: 'Fixture',
+            },
+          ],
+          total: 1,
+          offset: 0,
+        };
+      if (command === 'native_resource_detail') {
+        if (!args?.allVersions) {
+          if (++quickCalls === 1) return detail;
+          return new Promise(() => {});
+        }
+        fullCalls++;
+        if (fullCalls === 1) throw 'history temporarily unavailable';
+        if (fullCalls === 2) return retry;
+        return detail;
+      }
+      if (command === 'native_versions') return [{ id: '1.21.1' }];
+      if (command === 'native_resource_categories') return [];
+      return state();
+    },
+  );
+  const service = createNativeService(true, call as typeof invoke);
+  render(
+    createElement(ResourceBrowser, {
+      service,
+      kind: 'mod',
+      query: '',
+      gameVersion: '1.21.1',
+      onFilter: vi.fn(),
+    }),
+  );
+  fireEvent.click(
+    await screen.findByRole('button', { name: '查看 Retryable' }),
+  );
+  fireEvent.click(
+    await screen.findByRole('button', { name: '重试加载其他版本' }),
+  );
+  expect(
+    (screen.getByRole('button', { name: /Quick.*已选择/ }) as HTMLButtonElement)
+      .disabled,
+  ).toBe(false);
+  fireEvent.click(screen.getByRole('button', { name: '返回搜索结果' }));
+  await act(async () => finish(detail));
+  expect(screen.queryByRole('region', { name: '可下载资源版本' })).toBeNull();
+  fireEvent.click(screen.getByRole('button', { name: '查看 Retryable' }));
+  await screen.findByRole('region', { name: '可下载资源版本' });
+  expect(
+    screen.queryByText('其他游戏版本正在后台加载，当前版本可直接选择。'),
+  ).toBeNull();
+  expect(fullCalls).toBe(3);
+  service.stop();
+});
+
+test('release filters share concurrent and repeated loads, expire, and retry invalid responses', async () => {
+  const clock = vi.spyOn(Date, 'now').mockReturnValue(1000);
+  let rows: unknown = [{ id: '1.21.1' }];
+  const call = vi.fn(async () => rows);
+  const service = createNativeService(true, call as typeof invoke);
+  try {
+    const [a, b] = await Promise.all([service.versions(), service.versions()]);
+    a.push('mutated');
+    expect(b).toEqual(['1.21.1']);
+    expect(await service.versions()).toEqual(['1.21.1']);
+    expect(call).toHaveBeenCalledTimes(1);
+    clock.mockReturnValue(301001);
+    rows = { invalid: true };
+    await expect(service.versions()).rejects.toThrow('版本清单格式无效');
+    rows = [{ id: '1.21.2' }];
+    expect(await service.versions()).toEqual(['1.21.2']);
+    expect(call).toHaveBeenCalledTimes(3);
+    service.stop();
+    await expect(service.versions()).rejects.toThrow('原版服务已停止');
+  } finally {
+    service.stop();
+    clock.mockRestore();
+  }
+});
+
+test('resource details hide search and group actual versions by Minecraft series', async () => {
+  const versions = ['1.21.1', '1.20.1'].map((game, index) => ({
+    id: `Version${index}`,
+    name: `Release ${game}`,
+    number: '1',
+    environment: 'unknown',
+    loaders: ['fabric'],
+    gameVersions: [game],
+    files: [{ filename: 'mod.jar', size: 10, sha1: 'a'.repeat(40) }],
+    dependencies: [],
+  }));
+  const call = vi.fn(async (command: string) => {
+    if (command === 'native_resource_search')
+      return {
+        hits: [
+          {
+            id: 'Proj1234',
+            title: 'Grouped',
+            description: '',
+            author: 'Author',
+          },
+        ],
+        total: 1,
+        offset: 0,
+      };
+    if (command === 'native_resource_detail')
+      return {
+        id: 'Proj1234',
+        title: 'Grouped',
+        description: '',
+        body: '',
+        versions,
+      };
+    if (command === 'native_versions') return [{ id: '1.21.1' }];
+    if (command === 'native_resource_categories') return [];
+    return state();
+  });
+  const service = createNativeService(true, call as typeof invoke);
+  await service.refresh();
+  render(
+    createElement(ResourceBrowser, {
+      service,
+      kind: 'mod',
+      query: '',
+      gameVersion: '1.21.1',
+      onFilter: vi.fn(),
+    }),
+  );
+  fireEvent.click(await screen.findByRole('button', { name: '查看 Grouped' }));
+  await screen.findByRole('region', { name: '可下载资源版本' });
+  expect(screen.queryByLabelText('搜索在线资源')).toBeNull();
+  expect(
+    screen
+      .getByRole('button', { name: /Minecraft 1\.21.*收起/ })
+      .getAttribute('aria-expanded'),
+  ).toBe('true');
+  fireEvent.click(
+    screen.getByRole('button', { name: /Minecraft 1\.20.*展开/ }),
+  );
+  expect(
+    screen.getByRole('button', { name: /Release 1\.20\.1.*选择此版本/ }),
+  ).toBeTruthy();
+  expect(call).toHaveBeenCalledWith('native_resource_detail', {
+    project: 'Proj1234',
+    kind: 'mod',
+    gameVersion: '1.21.1',
+    allVersions: true,
+  });
+  fireEvent.click(screen.getByRole('button', { name: '返回搜索结果' }));
+  expect(screen.getByLabelText('搜索在线资源')).toBeTruthy();
+  service.stop();
+});
+
+test('CurseForge requests retain source identity and never expose a key to the frontend', async () => {
+  const call = vi.fn(async (command: string) => {
+    if (command === 'native_resource_search')
+      return { hits: [], total: 0, offset: 0 };
+    if (command === 'native_curseforge_plan')
+      return Promise.reject('未配置 CurseForge API Key');
+    return state();
+  });
+  const service = createNativeService(true, call as typeof invoke);
+  await service.searchResources('mod', 'test', '1.21.1', 0, {
+    category: '',
+    index: 'downloads',
+    source: 'curseforge',
+  });
+  expect(call).toHaveBeenCalledWith('native_resource_search', {
+    kind: 'mod',
+    query: 'test',
+    gameVersion: '1.21.1',
+    offset: 0,
+    category: '',
+    index: 'downloads',
+    source: 'curseforge',
+  });
+  await expect(
+    service.planResources(
+      'instance',
+      'mod',
+      '123',
+      'example.jar',
+      undefined,
+      'curseforge',
+      '42',
+    ),
+  ).rejects.toThrow('未配置 CurseForge API Key');
+  expect(call).toHaveBeenCalledWith('native_curseforge_plan', {
+    id: 'instance',
+    project: '42',
+    version: '123',
+    filename: 'example.jar',
+  });
+  expect(JSON.stringify(call.mock.calls)).not.toContain('x-api-key');
+  service.stop();
+});
+
+test('preflight reports stay bound to their instance and warnings never remove the continue action', async () => {
+  const report = {
+    instanceId: 'instance-a',
+    issues: ['缺少依赖 library-b'],
+    unchecked: ['运行时冲突尚未检查'],
+  };
+  const service = createNativeService(
+    true,
+    vi.fn(async () => report) as typeof invoke,
+  );
+  await expect(service.modCheck('instance-b')).rejects.toThrow(
+    '启动检查响应无效',
+  );
+  await expect(service.modCheck('instance-a')).resolves.toEqual(report);
+  const launch = vi.fn();
+  render(
+    createElement(LaunchChecks, {
+      report,
+      error: '部分检查失败',
+      busy: false,
+      canLaunch: true,
+      onRefresh: vi.fn(),
+      onLaunch: launch,
+      onFind: vi.fn(),
+      onLogs: vi.fn(),
+    }),
+  );
+  expect(screen.getByText('缺少依赖 library-b')).toBeTruthy();
+  fireEvent.click(screen.getByRole('button', { name: '仍然启动' }));
+  expect(launch).toHaveBeenCalledOnce();
+  expect(screen.queryByRole('button', { name: '一键修复' })).toBeNull();
+  service.stop();
+});
+test('saving a resource uses fixed version and native folder selection, cancellation installs nothing', async () => {
+  let result: unknown = false;
+  const call = vi.fn(async (command: string) =>
+    command === 'native_resource_save' ? result : state(),
+  );
+  const service = createNativeService(true, call as typeof invoke);
+  await expect(
+    service.saveResource('Proj1234', 'Vers1234', 'pack.zip'),
+  ).resolves.toBe(false);
+  expect(call).toHaveBeenCalledWith('native_resource_save', {
+    project: 'Proj1234',
+    version: 'Vers1234',
+    filename: 'pack.zip',
+  });
+  expect(
+    call.mock.calls.some(([name]) => name === 'native_resource_install'),
+  ).toBe(false);
+  result = { path: 'untrusted' };
+  await expect(
+    service.saveResource('Proj1234', 'Vers1234', 'pack.zip'),
+  ).rejects.toThrow('资源保存响应无效');
   service.stop();
 });
 
@@ -1200,6 +2152,7 @@ test('online install requires a native frozen plan and closed-game acknowledgeme
     token: '11111111-1111-4111-8111-111111111111',
     instanceId: 'instance',
     gameVersion: '1.21.1',
+    preflight: { instanceId: 'instance', issues: [], unchecked: ['静态检查'] },
     files: [
       {
         project: 'Proj1234',
@@ -1251,9 +2204,10 @@ test('online install requires a native frozen plan and closed-game acknowledgeme
     }),
   );
   fireEvent.click(screen.getByText('搜索资源'));
-  await screen.findByText('查看 Fixture');
-  fireEvent.click(screen.getByText('查看 Fixture'));
+  await screen.findByRole('button', { name: '查看 Fixture' });
+  fireEvent.click(screen.getByRole('button', { name: '查看 Fixture' }));
   await screen.findByLabelText('在线资源兼容版本');
+  fireEvent.click(screen.getByText('选择安装位置'));
   fireEvent.click(screen.getByText('预览安装变更'));
   await screen.findByLabelText('资源安装变更预览');
   expect((screen.getByText('确认安装资源') as HTMLButtonElement).disabled).toBe(
@@ -1421,8 +2375,9 @@ test('datapack browsing requires a concrete world and rejects a plan for another
     }),
   );
   fireEvent.click(screen.getByText('搜索资源'));
-  await screen.findByText('查看 Data Fixture');
-  fireEvent.click(screen.getByText('查看 Data Fixture'));
+  await screen.findByRole('button', { name: '查看 Data Fixture' });
+  fireEvent.click(screen.getByRole('button', { name: '查看 Data Fixture' }));
+  fireEvent.click(await screen.findByText('选择安装位置'));
   await screen.findByLabelText('数据包目标世界');
   expect((screen.getByText('预览安装变更') as HTMLButtonElement).disabled).toBe(
     true,
@@ -1454,6 +2409,177 @@ test('datapack browsing requires a concrete world and rejects a plan for another
   ).toBe(false);
   service.stop();
 });
+test('installation preview shows mod errors and requires explicit consent before still installing', async () => {
+  const current = state();
+  current.instances = [
+    {
+      id: 'instance',
+      name: '预检实例',
+      version: '1.21.1',
+      javaMajor: 21,
+      fabricVersion: '0.16.14',
+      fabricSha1: 'a'.repeat(40),
+      manifestSha1: 'b'.repeat(40),
+    },
+  ];
+  const plan = {
+    token: '11111111-1111-4111-8111-111111111111',
+    instanceId: 'instance',
+    gameVersion: '1.21.1',
+    warnings: [],
+    files: [
+      {
+        project: 'Proj1234',
+        version: 'Vers1234',
+        path: 'mods/example.jar',
+        size: 100,
+        sha1: 'a'.repeat(40),
+        sha512: 'b'.repeat(128),
+        action: 'add',
+      },
+    ],
+    preflight: {
+      instanceId: 'instance',
+      issues: ['example 需要 missing_lib >=2.0.0'],
+      unchecked: ['运行时冲突未检查'],
+    },
+  };
+  const call = vi.fn(async (command: string) => {
+    if (command === 'native_resource_search')
+      return {
+        hits: [
+          {
+            id: 'Proj1234',
+            title: 'Preflight Fixture',
+            description: 'Fixture',
+            author: 'Fixture',
+          },
+        ],
+        total: 1,
+        offset: 0,
+      };
+    if (command === 'native_resource_detail')
+      return {
+        id: 'Proj1234',
+        title: 'Preflight Fixture',
+        description: 'Fixture',
+        body: '',
+        versions: [
+          {
+            id: 'Vers1234',
+            name: 'v1',
+            number: '1',
+            environment: 'client_or_server',
+            loaders: ['fabric'],
+            files: [
+              { filename: 'example.jar', size: 100, sha1: 'a'.repeat(40) },
+            ],
+            dependencies: [],
+          },
+        ],
+      };
+    if (command === 'native_resource_plan') return plan;
+    return current;
+  });
+  const service = createNativeService(true, call as typeof invoke);
+  await service.refresh();
+  render(
+    createElement(ResourceBrowser, {
+      service,
+      kind: 'mod',
+      query: 'Fixture',
+      gameVersion: '1.21.1',
+      selectedId: 'instance',
+      onFilter: vi.fn(),
+    }),
+  );
+  fireEvent.click(screen.getByText('搜索资源'));
+  fireEvent.click(
+    await screen.findByRole('button', { name: '查看 Preflight Fixture' }),
+  );
+  fireEvent.click(await screen.findByText('选择安装位置'));
+  fireEvent.click(await screen.findByText('预览安装变更'));
+  await screen.findByText('example 需要 missing_lib >=2.0.0');
+  fireEvent.click(screen.getByLabelText('确认在线安装前游戏已关闭'));
+  const install = screen.getByRole('button', {
+    name: '仍然安装',
+  }) as HTMLButtonElement;
+  expect(install.disabled).toBe(true);
+  fireEvent.click(screen.getByLabelText('我已阅读预检问题，仍要安装'));
+  expect(install.disabled).toBe(false);
+  fireEvent.click(install);
+  await waitFor(() =>
+    expect(call).toHaveBeenCalledWith('native_resource_install', {
+      token: plan.token,
+      acknowledgeIssues: true,
+    }),
+  );
+  service.stop();
+});
+
+test('local mod selection previews errors without importing until the player confirms', async () => {
+  const current = state();
+  const plan = {
+    local: true,
+    token: '22222222-2222-4222-8222-222222222222',
+    instanceId: 'instance',
+    gameVersion: '1.21.1',
+    warnings: [],
+    files: [
+      {
+        project: 'local1234',
+        version: 'local5678',
+        path: 'mods/example.jar',
+        size: 100,
+        sha1: 'a'.repeat(40),
+        sha512: 'b'.repeat(128),
+        action: 'add',
+      },
+    ],
+    preflight: {
+      instanceId: 'instance',
+      issues: ['本地模组缺少 library_b'],
+      unchecked: ['运行时冲突未检查'],
+    },
+  };
+  const call = vi.fn(async (command: string) => {
+    if (command === 'native_content') return [];
+    if (command === 'native_mod_pick_plan') return plan;
+    return current;
+  });
+  const service = createNativeService(true, call as typeof invoke);
+  await service.refresh();
+  render(
+    createElement(ContentPanel, {
+      service,
+      id: 'instance',
+      kind: 'mods',
+      running: false,
+      onDownload: vi.fn(),
+      query: '',
+      onQuery: vi.fn(),
+    }),
+  );
+  fireEvent.click(screen.getByLabelText('确认内容修改前游戏已关闭'));
+  fireEvent.click(screen.getByRole('button', { name: /选择本地模组/ }));
+  await screen.findByRole('dialog', { name: '本地 Mod 安装预检' });
+  expect(screen.getByText('本地模组缺少 library_b')).toBeTruthy();
+  expect(
+    call.mock.calls.some(([name]) =>
+      ['native_content_pick', 'native_resource_install'].includes(name),
+    ),
+  ).toBe(false);
+  fireEvent.click(screen.getByLabelText('我已阅读预检问题，仍要安装'));
+  fireEvent.click(screen.getByRole('button', { name: '仍然安装' }));
+  await waitFor(() =>
+    expect(call).toHaveBeenCalledWith('native_resource_install', {
+      token: plan.token,
+      acknowledgeIssues: true,
+    }),
+  );
+  service.stop();
+});
+
 test('state-changing native operations refresh after an older in-flight poll', async () => {
   const current = state();
   let first = true;
@@ -1556,7 +2682,9 @@ test('resource browsing validates files, preserves results on network failure an
   expect(
     screen.getByRole('heading', { name: 'Resource Fixture' }),
   ).toBeTruthy();
-  fireEvent.click(screen.getByText('查看 Resource Fixture'));
+  fireEvent.click(
+    screen.getByRole('button', { name: '查看 Resource Fixture' }),
+  );
   await screen.findByText(/必需：Deps1234/);
   expect(
     screen.queryByText(
@@ -1630,6 +2758,61 @@ test('world controls read discovered rules and save only after the closed-game a
   fireEvent.click(save);
   await screen.findByText('已保存，原文件已备份：backup/level.dat');
   expect(world.gameRules.map((rule) => rule.value)).toEqual(['true', '6']);
+  service.stop();
+});
+test('world workspace reads only world data and clears the previous editor while changing selection', async () => {
+  const first: WorldSettings = {
+    revision: 'a'.repeat(40),
+    difficulty: 1,
+    difficultyLocked: false,
+    allowCommands: false,
+    hardcore: false,
+    gameMode: 0,
+    dayTime: '6000',
+    weather: 'clear',
+    gameRules: [],
+  };
+  let finish!: (value: WorldSettings) => void;
+  const second = new Promise<WorldSettings>((resolve) => {
+    finish = resolve;
+  });
+  const call = vi.fn(
+    async (command: string, args?: Record<string, unknown>) => {
+      if (command === 'native_worlds')
+        return [
+          { id: 'one', name: 'First' },
+          { id: 'two', name: 'Second' },
+        ];
+      if (command === 'native_world')
+        return args?.worldId === 'two' ? second : first;
+      if (command === 'native_options')
+        throw Error('Unrelated options must not be read');
+      return state();
+    },
+  );
+  const service = createNativeService(true, call as typeof invoke);
+  render(
+    createElement(WorldSettingsPanel, {
+      service,
+      id: 'instance',
+      running: false,
+      section: 'world',
+    }),
+  );
+  expect(
+    ((await screen.findByLabelText('世界难度')) as HTMLSelectElement).value,
+  ).toBe('1');
+  fireEvent.click(screen.getByRole('button', { name: /Second/ }));
+  await waitFor(() => expect(screen.queryByLabelText('世界难度')).toBeNull());
+  await act(async () =>
+    finish({ ...first, difficulty: 3, revision: 'b'.repeat(40) }),
+  );
+  expect(
+    ((await screen.findByLabelText('世界难度')) as HTMLSelectElement).value,
+  ).toBe('3');
+  expect(
+    call.mock.calls.some(([command]) => command === 'native_options'),
+  ).toBe(false);
   service.stop();
 });
 test('a delayed avatar response cannot replace the newly selected identity', async () => {

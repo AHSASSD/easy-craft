@@ -615,6 +615,60 @@ pub fn save_options(root: &Path, options: ClientOptions) -> Result<String> {
     let result = options_replacement(original.as_deref(), options)?;
     backed_write(root, "options.txt", original.as_deref(), &result)
 }
+// Apply before Java creates its window; avoid enumerating worlds or rewriting
+// unrelated sound, video and Mod settings when choosing the launch window mode.
+pub fn prepare_window(root: &Path, mode: model::WindowMode) -> Result<Option<String>> {
+    let fullscreen = match mode {
+        model::WindowMode::Windowed => false,
+        model::WindowMode::Fullscreen => true,
+        model::WindowMode::Inherit => return Ok(None),
+    };
+    let original = options_bytes(root)?;
+    let text = std::str::from_utf8(original.as_deref().unwrap_or_default()).map_err(|_| {
+        "窗口设置无法读取 options.txt 的 UTF-8 编码；原文件未修改，可选择跟随游戏设置"
+    })?;
+    let mut found = false;
+    let mut result = String::with_capacity(text.len() + 20);
+    for line in text.split_inclusive('\n') {
+        let plain = line.trim_end_matches(['\r', '\n']);
+        let prefix = if result.is_empty() && plain.starts_with('\u{feff}') {
+            "\u{feff}"
+        } else {
+            ""
+        };
+        if let Some(value) = plain
+            .strip_prefix(prefix)
+            .and_then(|v| v.strip_prefix("fullscreen:"))
+        {
+            if !["true", "false"].contains(&value) {
+                return Err(
+                    "现有全屏设置无效，原文件未修改；请检查 options.txt 或选择跟随游戏设置".into(),
+                );
+            }
+            found = true;
+            result.push_str(prefix);
+            result.push_str(if fullscreen {
+                "fullscreen:true"
+            } else {
+                "fullscreen:false"
+            });
+            result.push_str(&line[plain.len()..]);
+        } else {
+            result.push_str(line);
+        }
+    }
+    if !found && fullscreen {
+        let newline = if text.contains("\r\n") { "\r\n" } else { "\n" };
+        if !result.is_empty() && !result.ends_with('\n') {
+            result.push_str(newline);
+        }
+        result.push_str(&format!("fullscreen:true{newline}"));
+    }
+    if result.as_bytes() == original.as_deref().unwrap_or_default() {
+        return Ok(None);
+    }
+    backed_write(root, "options.txt", original.as_deref(), result.as_bytes()).map(Some)
+}
 fn options_replacement(original: Option<&[u8]>, options: ClientOptions) -> Result<Vec<u8>> {
     if !options.master_volume.is_finite()
         || !options.music_volume.is_finite()
@@ -1079,6 +1133,50 @@ mod tests {
         fs::create_dir_all(path.join("saves/世界 A")).unwrap();
         fs::write(path.join("saves/世界 A/level.dat"), gzip(&sample())).unwrap();
         path
+    }
+    #[test]
+    fn launch_window_changes_only_fullscreen_before_start_and_preserves_backup() {
+        let root = root();
+        let original = b"customMod:keep:colon\r\nfullscreen:true\r\nrenderDistance:128\r\noverrideWidth:0\r\nfullscreenResolution:2560x1600@165\r\n";
+        fs::write(root.join("options.txt"), original).unwrap();
+        assert!(prepare_window(&root, model::WindowMode::Inherit)
+            .unwrap()
+            .is_none());
+        assert_eq!(fs::read(root.join("options.txt")).unwrap(), original);
+        let backup = prepare_window(&root, model::WindowMode::Windowed)
+            .unwrap()
+            .unwrap();
+        assert_eq!(fs::read(&backup).unwrap(), original);
+        assert_eq!(
+            fs::read_to_string(root.join("options.txt")).unwrap(),
+            String::from_utf8_lossy(original).replace("fullscreen:true", "fullscreen:false")
+        );
+        assert!(prepare_window(&root, model::WindowMode::Windowed)
+            .unwrap()
+            .is_none());
+        assert!(!root.join("saves/世界 A/session.lock").exists());
+        prepare_window(&root, model::WindowMode::Fullscreen).unwrap();
+        assert_eq!(fs::read(root.join("options.txt")).unwrap(), original);
+        fs::write(root.join("options.txt"), b"fullscreen:invalid\nother:value").unwrap();
+        assert!(prepare_window(&root, model::WindowMode::Windowed).is_err());
+        assert_eq!(
+            fs::read(root.join("options.txt")).unwrap(),
+            b"fullscreen:invalid\nother:value"
+        );
+        assert!(prepare_window(&root, model::WindowMode::Inherit)
+            .unwrap()
+            .is_none());
+        fs::remove_file(root.join("options.txt")).unwrap();
+        assert!(prepare_window(&root, model::WindowMode::Windowed)
+            .unwrap()
+            .is_none());
+        assert!(!root.join("options.txt").exists());
+        prepare_window(&root, model::WindowMode::Fullscreen).unwrap();
+        assert_eq!(
+            fs::read(root.join("options.txt")).unwrap(),
+            b"fullscreen:true\n"
+        );
+        fs::remove_dir_all(root).unwrap();
     }
     #[test]
     fn difficulty_edit_preserves_every_other_nbt_byte_and_original_backup() {
