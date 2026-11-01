@@ -96,7 +96,6 @@ pub async fn search(
         ("gameId", "432"),
         ("classId", "6"),
         ("modLoaderType", "4"),
-        ("gameVersion", game),
         ("searchFilter", query),
         ("pageSize", "20"),
         ("index", &offset.to_string()),
@@ -111,6 +110,9 @@ pub async fn search(
         ),
         ("sortOrder", "desc"),
     ]);
+    if game != "all" {
+        url.query_pairs_mut().append_pair("gameVersion", game);
+    }
     let value = get(url
         .as_str()
         .strip_prefix("https://api.curseforge.com/v1/")

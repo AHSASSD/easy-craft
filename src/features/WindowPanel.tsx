@@ -1,6 +1,6 @@
 import { useState, useSyncExternalStore } from 'react';
 import type { LaunchOverrides, NativeService } from '../core/native-contracts';
-import { useEditor } from './UnsavedChanges';
+import { useAutoEditor } from './useAutoEditor';
 
 export function WindowPanel({
   service,
@@ -51,13 +51,22 @@ export function WindowPanel({
       setBusy(false);
     }
   }
-  useEditor({ dirty, save, discard });
+  const auto = useAutoEditor({
+    key: JSON.stringify([value, instance?.launch]),
+    dirty,
+    blocked: !!locked,
+    automatic: true,
+    save,
+    discard,
+  });
   return (
     <section
       className="card window-settings-card"
       aria-label="此版本的启动窗口"
     >
-      <h2>启动窗口 {dirty && <small>· 未保存</small>}</h2>
+      <h2>
+        启动窗口 <small>· {dirty ? '等待保存' : '自动保存'}</small>
+      </h2>
       <label className="native-label">
         启动显示方式
         <select
@@ -85,24 +94,15 @@ export function WindowPanel({
           的全屏项，修改前自动备份；跟随游戏设置时保持原文件。
         </p>
       </details>
-      <div className="window-setting-actions">
-        <button
-          disabled={locked || !dirty}
-          onClick={() =>
-            void save().catch((e) =>
-              setMessage(e instanceof Error ? e.message : '保存失败'),
-            )
-          }
-        >
-          保存启动窗口设置
-        </button>
-        {dirty && (
-          <button disabled={locked} onClick={discard}>
-            放弃窗口修改
-          </button>
-        )}
-      </div>
       {message && <p role="status">{message}</p>}
+      {auto.error && (
+        <p role="alert">
+          {auto.error}{' '}
+          <button onClick={() => void auto.retry().catch(() => {})}>
+            重试保存
+          </button>
+        </p>
+      )}
     </section>
   );
 }

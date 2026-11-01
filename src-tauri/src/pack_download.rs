@@ -108,11 +108,25 @@ pub async fn fetch(
     size: Option<u64>,
     cancel: &CancellationToken,
 ) -> Result<PathBuf> {
+    fetch_content(host, url, relative, size, false, cancel).await
+}
+pub async fn fetch_content(
+    host: &Host,
+    url: &str,
+    relative: &str,
+    size: Option<u64>,
+    opaque_jar: bool,
+    cancel: &CancellationToken,
+) -> Result<PathBuf> {
     let path = model::safe_path(&host.root, relative)?;
     if path.is_file()
         && size.is_some_and(|n| fs::metadata(&path).is_ok_and(|m| m.len() == n))
-        && crate::packs::preview_resource_reader(fs::File::open(&path).map_err(|_| "缓存不可读")?)
-            .is_ok()
+        && (if opaque_jar {
+            crate::packs::preview_mod_reader(fs::File::open(&path).map_err(|_| "缓存不可读")?)
+        } else {
+            crate::packs::preview_resource_reader(fs::File::open(&path).map_err(|_| "缓存不可读")?)
+        })
+        .is_ok()
     {
         return Ok(path);
     }
@@ -126,7 +140,11 @@ pub async fn fetch(
     if size.is_some_and(|n| data.len() as u64 != n) {
         return Err("下载大小与平台不符".into());
     }
-    crate::packs::preview_resource_reader(std::io::Cursor::new(&data))?;
+    if opaque_jar {
+        crate::packs::preview_mod_reader(std::io::Cursor::new(&data))?;
+    } else {
+        crate::packs::preview_resource_reader(std::io::Cursor::new(&data))?;
+    }
     fs::create_dir_all(path.parent().ok_or("缓存路径无效")?).map_err(|_| "无法创建缓存目录")?;
     let temp = path.with_extension(format!("{}.part", uuid::Uuid::new_v4()));
     let result = (|| {

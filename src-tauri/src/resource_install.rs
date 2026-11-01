@@ -625,7 +625,11 @@ async fn download_files(
             return Err("SHA-512 校验失败，未安装".into());
         }
         let input = fs::File::open(&path).map_err(|_| "缓存文件不可读")?;
-        crate::packs::preview_reader(input)?;
+        if matches!(plan.kind, resources::Kind::Mod) {
+            crate::packs::preview_mod_reader(input)?;
+        } else {
+            crate::packs::preview_resource_reader(input)?;
+        }
         let mut zip = zip::ZipArchive::new(fs::File::open(&path).map_err(|_| "缓存读取失败")?)
             .map_err(|_| "资源不是有效 ZIP")?;
         content::validate_archive(scope(plan.kind)?.0, &mut zip)?;
@@ -701,6 +705,18 @@ fn satisfies(version: &str, predicate: &Value) -> Result<bool> {
     let mut matched = true;
     for part in expression.split_whitespace() {
         let condition = part.replace(".x", ".*").replace(".X", ".*");
+        // Fabric ~ fixes major/minor; ^ fixes major even when major is zero.
+        // Unlike npm/semver ranges, an empty prerelease suffix is meaningful.
+        if let Some(bound) = condition.strip_prefix(['~', '^']) {
+            let (lower, lower_empty) = parsed_version(bound)?;
+            let order = version
+                .cmp_precedence(&lower)
+                .then_with(|| lower_empty.cmp(&empty));
+            matched &= !order.is_lt()
+                && version.major == lower.major
+                && (condition.starts_with('^') || version.minor == lower.minor);
+            continue;
+        }
         if !condition.contains('*') && !condition.starts_with(['~', '^']) {
             let operator = [">=", "<=", ">", "<", "="]
                 .into_iter()
@@ -744,7 +760,7 @@ pub(crate) fn mod_metadata<R: Read + std::io::Seek>(
         return Err("模组内置依赖超过校验上限".into());
     }
     let mut zip = zip::ZipArchive::new(input).map_err(|_| "模组 ZIP 无效")?;
-    if zip.len() > 20000 {
+    if zip.len() > crate::packs::MAX_RESOURCE_ENTRIES {
         return Err("模组归档条目超过检查上限".into());
     }
     let metadata = content::fabric_metadata(&mut zip)?;
@@ -816,7 +832,11 @@ pub(crate) fn bundled_metadata(cache: &Path, instance: &Instance) -> Result<Vec<
     }
     Ok(values.into_iter().map(|metadata| metadata.value).collect())
 }
-pub(crate) fn validate_pack_mods(cache: &Path, root: &Path, instance: &Instance) -> Result<()> {
+pub(crate) fn validate_pack_mods(
+    cache: &Path,
+    root: &Path,
+    instance: &Instance,
+) -> Result<Vec<String>> {
     let directory = model::safe_path(root, "mods")?;
     if directory.exists() {
         for entry in fs::read_dir(directory).map_err(|_| "无法读取整合包模组")? {
@@ -828,24 +848,50 @@ pub(crate) fn validate_pack_mods(cache: &Path, root: &Path, instance: &Instance)
             if !name.to_ascii_lowercase().ends_with(".jar") {
                 continue;
             }
-            if instance.fabric_version.is_empty() {
+            let forge = instance
+                .local
+                .as_ref()
+                .is_some_and(|local| ["forge", "neoforge"].contains(&local.loader.as_str()));
+            if instance.fabric_version.is_empty() && !forge {
                 return Err("整合包包含模组 JAR，但未声明已支持的 Fabric 加载器".into());
             }
             let file = model::safe_path(root, &format!("mods/{name}"))?;
-            crate::packs::preview_reader(fs::File::open(&file).map_err(|_| "无法读取模组")?)?;
+            crate::packs::preview_mod_reader(fs::File::open(&file).map_err(|_| "无法读取模组")?)
+                .map_err(|error| format!("mods/{name}：{error}"))?;
             let mut zip = zip::ZipArchive::new(fs::File::open(file).map_err(|_| "无法读取模组")?)
                 .map_err(|_| "模组不是有效 JAR")?;
-            content::validate_archive(content::Kind::Mods, &mut zip)?;
+            if !forge {
+                content::validate_archive(content::Kind::Mods, &mut zip)
+                    .map_err(|error| format!("mods/{name}：{error}"))?;
+            }
         }
     }
-    validate_mod_files(
+    if instance
+        .local
+        .as_ref()
+        .is_some_and(|local| ["forge", "neoforge"].contains(&local.loader.as_str()))
+    {
+        let report = crate::mod_check::Cache::default().check(cache, root, instance, true)?;
+        let mut messages = report.issues;
+        messages.extend(
+            report
+                .unchecked
+                .into_iter()
+                .map(|message| format!("未检查：{message}")),
+        );
+        return Ok(messages);
+    }
+    match assess_mod_files_report(
         root,
         instance,
         instance.java_major,
         &[],
         &[],
         &bundled_metadata(cache, instance)?,
-    )
+    ) {
+        Ok(issues) => Ok(issues),
+        Err(error) => Ok(vec![format!("模组依赖检查未完成：{}", error.message())]),
+    }
 }
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -1078,7 +1124,7 @@ pub fn preflight_install(
         {
             return Err("预检文件校验失败，未安装".into());
         }
-        crate::packs::preview_reader(fs::File::open(path).map_err(|_| "预检文件不可读")?)?;
+        crate::packs::preview_mod_reader(fs::File::open(path).map_err(|_| "预检文件不可读")?)?;
         let mut archive = zip::ZipArchive::new(fs::File::open(path).map_err(|_| "预检文件不可读")?)
             .map_err(|_| "预检文件不是有效 JAR")?;
         content::validate_archive(content::Kind::Mods, &mut archive)?;
@@ -1143,6 +1189,7 @@ impl From<&str> for ModFailure {
         Self::Invalid(message.into())
     }
 }
+#[cfg(test)]
 fn validate_mod_files(
     root: &Path,
     instance: &Instance,
@@ -1855,6 +1902,8 @@ mod tests {
     }
     fn instance() -> Instance {
         Instance {
+            version_folder: None,
+            storage_root: None,
             id: uuid::Uuid::new_v4().to_string(),
             name: "Fixture".into(),
             version: "1.21.1".into(),
@@ -2047,6 +2096,25 @@ mod tests {
         fs::write(dir.join("journal.json"), b"broken JSON").unwrap();
         assert!(recover(&root).is_err());
         assert!(dir.join("0.data").exists());
+    }
+    #[test]
+    fn asset_heavy_mods_use_resource_limits_while_pack_limits_stay_separate() {
+        use std::io::Write;
+        let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        let options = zip::write::SimpleFileOptions::default();
+        zip.start_file("fabric.mod.json", options).unwrap();
+        zip.write_all(br#"{"id":"asset_heavy","version":"1.0"}"#)
+            .unwrap();
+        for index in 0..20001 {
+            zip.start_file(format!("assets/fixture/{index}.txt"), options)
+                .unwrap();
+        }
+        let bytes = zip.finish().unwrap().into_inner();
+        assert!(crate::packs::preview_reader(std::io::Cursor::new(&bytes)).is_err());
+        crate::packs::preview_resource_reader(std::io::Cursor::new(&bytes)).unwrap();
+        let mut metadata = Vec::new();
+        mod_metadata(std::io::Cursor::new(bytes), &mut metadata, 0, &mut 0).unwrap();
+        assert_eq!(metadata[0].value["id"], "asset_heavy");
     }
     fn jar(metadata: Value, nested: Option<Vec<u8>>) -> Vec<u8> {
         let mut zip = zip::ZipWriter::new(Cursor::new(vec![]));
@@ -2302,6 +2370,10 @@ mod tests {
         assert!(!satisfies("1.21.2", &json!("1.21.1")).unwrap());
         assert!(!satisfies("1.21.1", &json!("1.21")).unwrap());
         assert!(satisfies("1.21.1", &json!(">=1.21- <1.21.2-")).unwrap());
+        assert!(satisfies("1.21.1", &json!("~1.21- <1.21.2-")).unwrap());
+        assert!(!satisfies("1.21.2-alpha.1", &json!("~1.21- <1.21.2-")).unwrap());
+        assert!(satisfies("0.5.0", &json!("^0.1-")).unwrap());
+        assert!(!satisfies("1.0.0", &json!("^0.1-")).unwrap());
         assert!(!satisfies("1.21.2-alpha.1", &json!(">=1.21- <1.21.2-")).unwrap());
         assert!(satisfies("1.21.0-alpha.1", &json!(">1.21- <1.21")).unwrap());
         assert!(satisfies("21", &json!([">=25", ">=21"])).unwrap());

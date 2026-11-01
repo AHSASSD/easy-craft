@@ -10,7 +10,6 @@ export function BackupRetention({
   id,
   worldId,
   disabled,
-  closed,
   dirty,
   onDone,
 }: {
@@ -18,7 +17,6 @@ export function BackupRetention({
   id: string;
   worldId?: string;
   disabled: boolean;
-  closed: boolean;
   dirty: boolean;
   onDone(): Promise<void>;
 }) {
@@ -28,7 +26,7 @@ export function BackupRetention({
   const [confirmed, setConfirmed] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
-  const locked = disabled || busy || !closed || dirty;
+  const locked = disabled || busy || dirty;
   async function run(action: () => Promise<void>) {
     setBusy(true);
     setError('');
@@ -71,9 +69,7 @@ export function BackupRetention({
           ))}
         </select>
       </label>
-      {(!closed || dirty) && (
-        <p className="hint">检查前请确认游戏已关闭，并保存或放弃当前修改。</p>
-      )}
+      {dirty && <p className="hint">检查前请保存或放弃当前修改。</p>}
       {error && (
         <p role="alert" className="notice">
           {error}

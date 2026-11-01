@@ -11,7 +11,6 @@ export function ConfigBackups({
   id,
   worldId,
   locked,
-  closed,
   dirty,
   onRestore,
 }: {
@@ -19,7 +18,6 @@ export function ConfigBackups({
   id: string;
   worldId?: string;
   locked: boolean;
-  closed: boolean;
   dirty: boolean;
   onRestore(preview: ConfigBackupPreview): Promise<void>;
 }) {
@@ -176,17 +174,12 @@ export function ConfigBackups({
           <button
             className="primary"
             disabled={
-              disabled ||
-              dirty ||
-              !closed ||
-              !confirmed ||
-              !preview.changes.length
+              disabled || dirty || !confirmed || !preview.changes.length
             }
             onClick={() => void run(() => onRestore(preview))}
           >
             确认恢复配置
           </button>
-          {!closed && <p className="hint">请先勾选上方“确认游戏已关闭”。</p>}
         </section>
       )}
       <BackupRetention
@@ -194,7 +187,6 @@ export function ConfigBackups({
         id={id}
         worldId={worldId}
         disabled={disabled}
-        closed={closed}
         dirty={dirty}
         onDone={async () => {
           clearPreview();

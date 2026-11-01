@@ -11,7 +11,12 @@ import {
 } from 'react';
 import { Modal } from '../components/Modal';
 
-type Editor = { dirty: boolean; save(): Promise<void>; discard(): void };
+type Editor = {
+  dirty: boolean;
+  automatic?: boolean;
+  save(): Promise<void>;
+  discard(): void;
+};
 const Context = createContext<{
   register(id: string, editor: Editor | null): void;
   navigate(action: () => void): void;
@@ -19,11 +24,11 @@ const Context = createContext<{
 export function useEditor(editor: Editor) {
   const context = useContext(Context);
   const id = useId();
-  const { dirty, save, discard } = editor;
+  const { dirty, save, discard, automatic } = editor;
   useEffect(() => {
-    context?.register(id, { dirty, save, discard });
+    context?.register(id, { dirty, save, discard, automatic });
     return () => context?.register(id, null);
-  }, [context, id, dirty, save, discard]);
+  }, [context, id, dirty, save, discard, automatic]);
 }
 export function useNavigationGuard() {
   const context = useContext(Context);
@@ -41,7 +46,18 @@ export function UnsavedChanges({ children }: { children: ReactNode }) {
     setDirty([...editors.current.values()].some((item) => item.dirty));
   }, []);
   const navigate = useCallback((action: () => void) => {
-    if ([...editors.current.values()].some((item) => item.dirty)) {
+    const changed = [...editors.current.values()].filter((item) => item.dirty);
+    if (changed.length && changed.every((item) => item.automatic)) {
+      void (async () => {
+        try {
+          for (const editor of changed) await editor.save();
+          action();
+        } catch (error) {
+          setError(error instanceof Error ? error.message : '自动保存失败');
+          setPending(() => action);
+        }
+      })();
+    } else if (changed.length) {
       setError('');
       setPending(() => action);
     } else action();

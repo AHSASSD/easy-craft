@@ -1,0 +1,30 @@
+{
+  "schemaVersion": 2,
+  "id": "example.instance-check",
+  "name": "实例模组检查",
+  "author": "Easy Craft 示例",
+  "version": "1.0.0",
+  "description": "复用宿主的模组声明检查；仅对选定实例提供只读入口。",
+  "icon": "shield",
+  "category": "instance",
+  "capabilities": ["instance.mod-check"],
+  "entries": [
+    {
+      "id": "quick-check",
+      "label": "扩展模组检查",
+      "capability": "instance.mod-check",
+      "position": "instance-overview"
+    },
+    {
+      "id": "check-tab",
+      "label": "模组诊断",
+      "capability": "instance.mod-check",
+      "position": "instance-tab"
+    }
+  ],
+  "scope": "instance",
+  "apiVersion": "1.0.0",
+  "permissions": ["instances.read"],
+  "configVersion": 1,
+  "settings": {}
+}

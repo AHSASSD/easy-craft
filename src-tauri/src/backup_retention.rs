@@ -491,6 +491,8 @@ mod tests {
             &root,
             "instances.json",
             &vec![model::Instance {
+                version_folder: None,
+                storage_root: None,
                 id: instance.clone(),
                 name: "Fixture".into(),
                 version: "1.21.1".into(),

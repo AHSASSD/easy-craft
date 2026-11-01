@@ -169,6 +169,9 @@ function validPackPlan(value: unknown): boolean {
     !/^[A-Za-z0-9._-]{1,99}$/.test(value.gameVersion) ||
     !bounded(value.fabricVersion, 100) ||
     (value.forgeVersion !== undefined && !bounded(value.forgeVersion, 100)) ||
+    (value.neoforgeVersion !== undefined &&
+      !bounded(value.neoforgeVersion, 100)) ||
+    (value.storageRoot != null && !bounded(value.storageRoot, 32768)) ||
     (value.recommendedMemoryMb != null &&
       (!integer(value.recommendedMemoryMb) ||
         value.recommendedMemoryMb < 512 ||
@@ -246,8 +249,8 @@ function contentEntries(value: unknown): ContentEntry[] {
         typeof item.enabled === 'boolean' &&
         typeof item.editable === 'boolean' &&
         integer(item.bytes) &&
-        string(item.revision) &&
-        /^\d+:\d+$/.test(item.revision),
+        bounded(item.revision, 160) &&
+        /^\d+:\d+(?::\d+:\d+:\d+)?$/.test(item.revision),
     )
   )
     throw new Error('本地内容响应无效');
@@ -397,6 +400,8 @@ function validOptions(value: unknown): value is ClientOptions {
     isRecord(value) &&
     string(value.revision) &&
     (value.revision === 'missing' || /^[a-f0-9]{40}$/.test(value.revision)) &&
+    string(value.language) &&
+    /^[A-Za-z0-9_]{1,32}$/.test(value.language) &&
     unit(value.masterVolume) &&
     unit(value.musicVolume) &&
     integer(value.renderDistance) &&
@@ -422,8 +427,19 @@ export function validLaunchOverrides(value: unknown): boolean {
   return (
     isRecord(value) &&
     Object.keys(value).every((key) =>
-      ['javaPath', 'memory', 'gameIsolation', 'windowMode'].includes(key),
+      [
+        'javaPath',
+        'javaVersion',
+        'memory',
+        'gameIsolation',
+        'windowMode',
+      ].includes(key),
     ) &&
+    (value.javaVersion === undefined ||
+      (integer(value.javaVersion) &&
+        value.javaVersion > 0 &&
+        value.javaVersion < 1000 &&
+        typeof value.javaPath === 'string')) &&
     (value.gameIsolation === undefined ||
       typeof value.gameIsolation === 'boolean') &&
     (value.windowMode === undefined ||
@@ -466,6 +482,8 @@ export function validNativeState(value: unknown): value is NativeState {
     typeof settings.optimizeMemory === 'boolean' &&
     ['microsoft', 'offline'].includes(settings.launchMode as string) &&
     string(settings.offlineName) &&
+    (settings.autoTranslatePacks === undefined ||
+      typeof settings.autoTranslatePacks === 'boolean') &&
     (settings.isolateNewInstances === undefined ||
       typeof settings.isolateNewInstances === 'boolean') &&
     (settings.offlineName === '' ||
@@ -487,6 +505,10 @@ export function validNativeState(value: unknown): value is NativeState {
         string(item.manifestSha1) &&
         /^[0-9a-f]{40}$/i.test(item.manifestSha1) &&
         integer(item.javaMajor) &&
+        (item.storageRoot === undefined || bounded(item.storageRoot, 32768)) &&
+        (item.versionFolder === undefined ||
+          (bounded(item.versionFolder, 256) &&
+            /^ec-[^/\\]+$/.test(item.versionFolder))) &&
         (item.local === undefined ||
           (isRecord(item.local) &&
             bounded(item.local.root, 32768) &&
@@ -639,6 +661,7 @@ export function createNativeService(
       modRevision:
         (snapshot.modRevision ?? 0) +
         (name === 'native_content_toggle' ||
+        name === 'native_mod_remove' ||
         (name === 'native_content_import' && args?.kind === 'mods')
           ? 1
           : 0),
@@ -785,6 +808,8 @@ export function createNativeService(
     },
     downloadForge: (game, loader) =>
       operation('native_forge_download', { game, loader }),
+    installForge: (game, name, loader) =>
+      operation('native_forge_install', { game, name, loader }),
     planResources: async (
       id,
       kind,
@@ -827,6 +852,27 @@ export function createNativeService(
         token,
         ...(acknowledgeIssues ? { acknowledgeIssues: true } : {}),
       }),
+    installTranslation: async (id) => {
+      try {
+        const report = await request('native_translation_install', { id });
+        if (
+          !isRecord(report) ||
+          !bounded(report.file, 128) ||
+          !bounded(report.source, 256) ||
+          !integer(report.skippedFiles) ||
+          ![report.matched, report.unmatched].every(
+            (items) =>
+              Array.isArray(items) &&
+              items.length <= 16000 &&
+              items.every((item) => bounded(item, 128)),
+          )
+        )
+          throw Error('汉化安装报告无效');
+        return report as import('../core/native-contracts').TranslationReport;
+      } finally {
+        await refresh(true);
+      }
+    },
     openResource: (kind, project, source) =>
       operation('native_open_resource', {
         kind,
@@ -987,6 +1033,47 @@ export function createNativeService(
     },
     toggleContent: (id, file, revision, enabled) =>
       operation('native_content_toggle', { id, file, revision, enabled }),
+    modDetails: async (id, file, revision) => {
+      const value = await request('native_mod_details', { id, file, revision });
+      if (
+        !isRecord(value) ||
+        !bounded(value.path, 32768) ||
+        !bounded(value.note, 4096)
+      )
+        throw new Error('模组详情响应无效');
+      contentEntries([value.entry]);
+      const info = value.information;
+      if (
+        info !== null &&
+        (!isRecord(info) ||
+          !bounded(info.name, 1024) ||
+          !bounded(info.version, 512) ||
+          !bounded(info.loader, 64) ||
+          !bounded(info.description, 64000) ||
+          !bounded(info.license, 2048) ||
+          !['ids', 'authors', 'dependencies'].every(
+            (key) =>
+              Array.isArray(info[key]) &&
+              info[key].length <= 256 &&
+              info[key].every((item: unknown) => bounded(item, 4096)),
+          ))
+      )
+        throw new Error('模组声明响应无效');
+      return value as import('../core/native-contracts').ModDetails;
+    },
+    revealMod: (id, file, revision) =>
+      operation('native_mod_reveal', { id, file, revision }),
+    removeMod: async (id, file, revision) => {
+      const location = await request('native_mod_remove', {
+        id,
+        file,
+        revision,
+      });
+      if (!bounded(location, 32768)) throw new Error('模组回收位置响应无效');
+      update({ ...snapshot, modRevision: (snapshot.modRevision ?? 0) + 1 });
+      await refresh(true);
+      return location as string;
+    },
     importContent: async (id, kind, file, bytes) => {
       if (bytes.length > 16 * 1024 * 1024)
         throw new Error('本地导入暂限 16 MB');
@@ -1026,6 +1113,16 @@ export function createNativeService(
       operation('native_instance_folder_open', { id, folder }),
     renameInstance: (id, name) =>
       operation('native_instance_rename', { id, name }),
+    removeInstance: async (id, archive) => {
+      try {
+        const value = await request('native_instance_remove', { id, archive });
+        if (value !== null && !bounded(value, 32768))
+          throw new Error('实例移除响应无效');
+        return value as string | null;
+      } finally {
+        await refresh(true);
+      }
+    },
     snapshot: () => snapshot,
     subscribe: (listener) => {
       listeners.add(listener);
@@ -1416,6 +1513,12 @@ export function createNativeService(
     },
     installPack: (token, name, selected) =>
       operation('native_pack_install', { token, name, selected }),
+    pickPackDestination: async (token, reset = false) => {
+      const value = await request('native_pack_destination', { token, reset });
+      if (value !== null && !bounded(value, 32768))
+        throw new Error('安装目录响应无效');
+      return value as string | null;
+    },
     optimizeMemory: async (system = false) => {
       const value = await request('native_memory_optimize', { system });
       if (!validMemory(value)) throw new Error('内存检测响应无效');
@@ -1438,6 +1541,42 @@ export function createNativeService(
       if (!validMemory(value)) throw new Error('内存检测响应无效');
       return value;
     },
+    pickJava: async () => {
+      const value = await request('native_java_pick');
+      if (value === null) return null;
+      if (
+        !isRecord(value) ||
+        !integer(value.major) ||
+        typeof value.is64Bit !== 'boolean' ||
+        !string(value.path)
+      )
+        throw Error('Java 检测响应无效');
+      return value as JavaInfo;
+    },
+    instanceFolderJava: async (id) => {
+      const value = await request('native_java_instance_folder', { id });
+      if (
+        !isRecord(value) ||
+        !integer(value.major) ||
+        typeof value.is64Bit !== 'boolean' ||
+        !string(value.path)
+      )
+        throw Error('Java 检测响应无效');
+      return value as JavaInfo;
+    },
+    instanceJava: async (id) => {
+      const value = await request('native_instance_java', { id });
+      if (
+        !isRecord(value) ||
+        !integer(value.major) ||
+        value.major < 1 ||
+        typeof value.is64Bit !== 'boolean' ||
+        !bounded(value.path, 32768) ||
+        !value.path
+      )
+        throw Error('Java 检测响应无效');
+      return value as JavaInfo;
+    },
     probeJava: async (path) => {
       const value = await request('native_java', { path });
       if (
@@ -1448,6 +1587,23 @@ export function createNativeService(
       )
         throw new Error('Java 检测响应无效');
       return value as JavaInfo;
+    },
+    prepareJava: async (id) => {
+      try {
+        const value = await request('native_java_prepare', { id });
+        if (
+          !isRecord(value) ||
+          !integer(value.major) ||
+          value.major < 1 ||
+          value.is64Bit !== true ||
+          !bounded(value.path, 32768) ||
+          !value.path
+        )
+          throw Error('Java 准备响应无效');
+        return value as JavaInfo;
+      } finally {
+        await refresh(true);
+      }
     },
     beginLogin: async () => {
       const value = await request('native_login_begin');

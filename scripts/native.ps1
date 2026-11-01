@@ -1,6 +1,6 @@
 param(
     [ValidateSet('check', 'test', 'build', 'dev', 'bundle', 'fmt', 'clippy')][string]$Action = 'dev',
-    [ValidateSet('none', 'metadata', 'install', 'offline', 'fabric', 'resources', 'pack', 'local', 'scan', 'scan-diagnostics', 'local-reference')][string]$Integration = 'none'
+    [ValidateSet('none', 'metadata', 'install', 'offline', 'fabric', 'resources', 'pack', 'local', 'scan', 'scan-diagnostics', 'local-reference', 'real-packs', 'processors')][string]$Integration = 'none'
 )
 $ErrorActionPreference = 'Stop'
 $projectRoot = Split-Path $PSScriptRoot -Parent
@@ -42,7 +42,20 @@ try {
         'test' {
             if ($Integration -eq 'none') { & $cargo test --manifest-path src-tauri/Cargo.toml --locked }
             else {
-                $filter = switch ($Integration) { 'metadata' { 'official_metadata_and_java_integration' } 'install' { 'official_install_integration' } 'offline' { 'cached_offline_preparation_integration' } 'fabric' { 'official_fabric_install_integration' } 'resources' { 'modrinth_metadata_integration' } 'pack' { 'public_pack_stage_and_rollback_integration' } 'local' { 'imported_local_versions_prepare_cached_launch_without_starting_game' } 'scan' { 'local_scan_performance_benchmark' } 'scan-diagnostics' { 'local_directory_scan_diagnostics' } 'local-reference' { 'real_local_references_prepare_vanilla_forge_and_neoforge_without_copying_worlds' } }
+                $filter = switch ($Integration) {
+                    'metadata' { 'official_metadata_and_java_integration' }
+                    'install' { 'official_install_integration' }
+                    'offline' { 'cached_offline_preparation_integration' }
+                    'fabric' { 'official_fabric_install_integration' }
+                    'resources' { 'modrinth_metadata_integration' }
+                    'pack' { 'public_pack_stage_and_rollback_integration' }
+                    'local' { 'imported_local_versions_prepare_cached_launch_without_starting_game' }
+                    'scan' { 'local_scan_performance_benchmark' }
+                    'scan-diagnostics' { 'local_directory_scan_diagnostics' }
+                    'local-reference' { 'real_local_references_prepare_vanilla_forge_and_neoforge_without_copying_worlds' }
+                    'real-packs' { 'requested_real_packs_prepare_launch' }
+                    'processors' { 'installed_processor_loaders_prepare_real_launch_arguments' }
+                }
                 & $cargo test --manifest-path src-tauri/Cargo.toml --locked $filter -- --ignored --nocapture
             }
         }

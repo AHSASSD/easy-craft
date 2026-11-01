@@ -3,12 +3,13 @@ param(
     [Parameter(Mandatory=$true)][ValidateRange(800,1920)][int]$Width,
     [Parameter(Mandatory=$true)][ValidateRange(540,1080)][int]$Height,
     [ValidateSet('debug','release')][string]$BuildProfile = 'debug',
+    [ValidateSet('easy-craft','easy-craft-ui-preview')][string]$BinaryName = 'easy-craft',
     [string]$Screenshot
 )
 $ErrorActionPreference = 'Stop'
 $projectRoot = Split-Path $PSScriptRoot -Parent
 $appProcess = Get-Process -Id $AppProcessId
-$expectedPath = [IO.Path]::GetFullPath((Join-Path $projectRoot "src-tauri/target/$BuildProfile/easy-craft.exe"))
+$expectedPath = [IO.Path]::GetFullPath((Join-Path $projectRoot "src-tauri/target/$BuildProfile/$BinaryName.exe"))
 if ($appProcess.Path -ne $expectedPath) { throw 'Only this workspace launcher may be resized.' }
 Add-Type -TypeDefinition @'
 using System;

@@ -204,13 +204,13 @@ export function NativeWorkspace({
             ? '原版游戏'
             : '原版下载与启动'
           : loader === 'forge'
-            ? 'Forge 安装器'
+            ? 'Forge 游戏'
             : 'Fabric 游戏'}
       </h1>
       <p>
         {loader === 'forge'
-          ? '从 Forge 官方目录选择并下载安装器；当前不自动创建 Forge 实例。'
-          : '从官方来源安装独立实例，支持原版与 Fabric。安装成功后在游戏库中启动。'}
+          ? '从 Forge 官方目录选择版本，安装完成后在游戏库中启动。'
+          : '从官方来源安装独立实例，支持原版、Fabric 和 Forge。安装成功后在游戏库中启动。'}
       </p>
       {!snapshot.available && (
         <div className="notice" role="status">
@@ -292,7 +292,7 @@ export function NativeWorkspace({
               <h2>
                 <Download size={17} />{' '}
                 {loader === 'forge'
-                  ? '下载 Forge 安装器'
+                  ? '安装 Forge 实例'
                   : loader === 'fabric'
                     ? '安装 Fabric 实例'
                     : '安装原版实例'}
@@ -342,7 +342,7 @@ export function NativeWorkspace({
                 >
                   <option value="vanilla">原版</option>
                   <option value="fabric">Fabric</option>
-                  <option value="forge">Forge 安装器下载</option>
+                  <option value="forge">Forge</option>
                 </select>
               </label>
               {loader === 'fabric' && (
@@ -403,13 +403,12 @@ export function NativeWorkspace({
                     读取 Forge 推荐版本
                   </button>
                   <p className="hint">
-                    当前下载并验证官方安装器，不执行补丁处理，不创建可启动的
-                    Forge 实例。文件位于数据目录
-                    downloads/forge，结果见任务日志。
+                    使用官方安装器创建独立 Forge
+                    实例，安装进度与日志在底部任务中查看。
                   </p>
                 </>
               )}
-              {loader !== 'forge' && (
+              {
                 <label className="native-label">
                   实例名称
                   <input
@@ -419,13 +418,13 @@ export function NativeWorkspace({
                     onChange={(event) => setName(event.target.value)}
                   />
                 </label>
-              )}
+              }
               <button
                 className="primary"
                 disabled={
                   locked ||
                   !version.trim() ||
-                  (loader !== 'forge' && !name.trim()) ||
+                  !name.trim() ||
                   (loader === 'forge' && !forgeVersion.trim()) ||
                   (loader !== 'vanilla' &&
                     (!loaderReady ||
@@ -440,7 +439,7 @@ export function NativeWorkspace({
                 onClick={() =>
                   void run(() =>
                     loader === 'forge'
-                      ? service.downloadForge(version, forgeVersion)
+                      ? service.installForge(version, name, forgeVersion)
                       : service.install(
                           version,
                           name,
@@ -450,7 +449,7 @@ export function NativeWorkspace({
                 }
               >
                 {loader === 'forge'
-                  ? '下载 Forge 安装器'
+                  ? '下载并安装 Forge'
                   : loader === 'fabric'
                     ? '下载并安装 Fabric'
                     : '下载并安装原版'}
@@ -629,7 +628,7 @@ export function NativeWorkspace({
                 <>
                   <p className="hint">
                     {loader === 'forge'
-                      ? '来自 Forge 官方 Maven 目录；仅下载校验安装器。'
+                      ? '来自 Forge 官方 Maven 目录；安装为独立游戏实例。'
                       : '来自 Fabric 官方元数据；默认选择官方稳定推荐版，也可选择其他发布版本。'}
                   </p>
                   <div className="official-version-list loader-version-list">

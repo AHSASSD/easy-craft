@@ -148,35 +148,58 @@ test('real library is the default and remains usable at minimum size', async ({
   await page.keyboard.press('Escape');
   await expect(page.getByRole('dialog')).toHaveCount(0);
 });
-test('extensions expose actual built-ins and layout choice persists without claiming a community store', async ({
+test('extensions remain honest in browser preview and keep accordion navigation', async ({
   page,
 }) => {
   await page.goto('/');
-  const root = page.locator('.native-library');
   await page
     .getByRole('navigation')
     .getByRole('button', { name: '扩展', exact: true })
     .click();
   await expect(
-    page.getByRole('heading', { name: '官方工作区布局' }),
+    page.getByRole('heading', { name: '扩展工作区', exact: true }),
   ).toBeVisible();
-  await page.getByRole('button', { name: '紧凑工作区', exact: true }).click();
-  await expect(root).toHaveAttribute('data-layout', 'compact');
-  await page.reload();
-  await expect(root).toHaveAttribute('data-layout', 'compact');
-  await page.getByRole('button', { name: '发现插件', exact: true }).click();
   await expect(
-    page.getByRole('heading', { name: '社区插件，敬请期待' }),
+    page.getByRole('button', { name: '我的工具', exact: true }),
+  ).toHaveAttribute('aria-expanded', 'true');
+  await expect(
+    page.locator('.plugin-library-list .library-instance'),
+  ).toHaveCount(0);
+  await expect(
+    page.getByRole('button', { name: /官方工作区布局/ }),
+  ).toHaveCount(0);
+  await page.getByRole('button', { name: '实例扩展', exact: true }).click();
+  await expect(
+    page.locator('.extension-groups button[aria-expanded=true]'),
+  ).toHaveCount(1);
+  await expect(
+    page.getByRole('heading', { name: '扩展工作区', exact: true }),
   ).toBeVisible();
-  await page.screenshot({ path: 'output/playwright/extensions-discover.png' });
-  await page.getByRole('button', { name: '查看已安装', exact: true }).click();
-  await page
-    .getByRole('button', { name: '恢复默认布局与栏宽', exact: true })
-    .click();
-  await expect(root).toHaveAttribute('data-layout', 'default');
-  await page.screenshot({ path: 'output/playwright/extensions-installed.png' });
+  await page.getByRole('button', { name: '实例扩展', exact: true }).click();
+  await expect(
+    page.locator('.extension-groups button[aria-expanded=true]'),
+  ).toHaveCount(0);
+  await page.getByLabel('导入本地插件', { exact: true }).setInputFiles({
+    name: 'test.json',
+    mimeType: 'application/json',
+    buffer: Buffer.from('{}'),
+  });
+  await expect(
+    page.getByRole('alert').filter({ hasText: '本地插件安装需要桌面版' }),
+  ).toBeVisible();
+  await page.getByRole('button', { name: '插件下载', exact: true }).click();
+  await expect(
+    page.getByRole('heading', { name: '插件目录尚未开放', exact: true }),
+  ).toBeVisible();
+  await page.setViewportSize({ width: 800, height: 540 });
+  await page.emulateMedia({ reducedMotion: 'reduce' });
+  await page.getByRole('button', { name: '界面外观', exact: true }).click();
+  expect(
+    await page.evaluate(
+      () => document.documentElement.scrollWidth <= innerWidth,
+    ),
+  ).toBe(true);
 });
-
 test('appearance mask and reduced motion persist and honor the system preference', async ({
   page,
 }) => {

@@ -40,10 +40,12 @@ import { Titlebar } from '../components/Titlebar';
 import { Modal } from '../components/Modal';
 import { SkinAvatar } from '../components/SkinAvatar';
 import { backgroundImage } from './background-image';
+import { libraryFolders } from '../core/library-folders';
 import {
   instanceSettings,
   instanceLoader,
   instanceIsolated,
+  instanceGameDirectory,
 } from '../core/instance-settings';
 import { AccountPanel } from './AccountPanel';
 import { MemoryPanel } from './MemoryPanel';
@@ -59,7 +61,14 @@ import { AddInstanceMenu } from './AddInstanceMenu';
 import { IsolationPanel } from './IsolationPanel';
 import { InstanceSettings } from './InstanceSettings';
 import type { PackPreview, LocalVersionScan } from '../core/native-contracts';
-import { ExtensionsPanel } from './ExtensionsPanel';
+import {
+  ExtensionsPanel,
+  ExtensionsSidebar,
+  PluginHost,
+  InstancePluginEntries,
+  InstancePluginWorkspace,
+  type ExtensionGroupId,
+} from './ExtensionsPanel';
 import { InstanceOverview } from './InstanceOverview';
 import { LaunchChecks, useModCheck } from './LaunchChecks';
 import layout from '../plugins/official/layout.json';
@@ -69,6 +78,8 @@ import '../themes/library.css';
 import '../themes/rail.css';
 import '../themes/instance.css';
 import { accentStyle } from '../themes/accent';
+import { installProgress } from '../core/install-progress';
+import { TaskDiagnostics } from './TaskDiagnostics';
 
 const mainItems = [
   { id: 'library', name: '游戏库', icon: Box },
@@ -128,8 +139,18 @@ function Shell({ services }: { services: Services }) {
     !!selected &&
     !running &&
     !state?.loginPending &&
-    (state?.settings.launchMode === 'offline' || !!state?.account);
+    (state?.settings.launchMode === 'offline'
+      ? /^[A-Za-z0-9_]{3,16}$/.test(state.settings.offlineName)
+      : !!state?.account);
   const [account, setAccount] = useState(false);
+  const [extensionId, setExtensionId] = useState('');
+  const [instanceExtension, setInstanceExtension] = useState<{
+    id: string;
+    plugin: string;
+  } | null>(null);
+  const [extensionGroup, setExtensionGroup] = useState<ExtensionGroupId | null>(
+    'tools',
+  );
   const [localImportOpen, setLocalImportOpen] = useState(false);
   const [localScan, setLocalScan] = useState<LocalVersionScan | null>(null);
   const [pickedPack, setPickedPack] = useState<PackPreview | null>(null);
@@ -146,6 +167,11 @@ function Shell({ services }: { services: Services }) {
     }
   }
   const [checksOpen, setChecksOpen] = useState(false);
+  const [javaPending, setJavaPending] = useState(false);
+  const [javaFailure, setJavaFailure] = useState<{
+    id: string;
+    message: string;
+  } | null>(null);
   const launchPending = useRef(false);
   const checks = useModCheck(
     services.native,
@@ -248,6 +274,7 @@ function Shell({ services }: { services: Services }) {
   const consumeDroppedPack = useCallback(() => setDroppedPack(null), []);
   const [backgroundBusy, setBackgroundBusy] = useState(available);
   const [tasks, setTasks] = useState(false);
+  const [installOpen, setInstallOpen] = useState(false);
   const [closing, setClosing] = useState(false);
   const resourceKind =
     (selected && nav.resourceKinds?.[selected.id]) ?? 'resourcepacks';
@@ -261,6 +288,36 @@ function Shell({ services }: { services: Services }) {
   const [rename, setRename] = useState<{ id: string; name: string } | null>(
     null,
   );
+  const [removal, setRemoval] = useState<{
+    id: string;
+    name: string;
+    managed: boolean;
+    path: string;
+  } | null>(null);
+  const [archiveInstance, setArchiveInstance] = useState(false);
+  const [removeBusy, setRemoveBusy] = useState(false);
+  const [removeError, setRemoveError] = useState('');
+  function requestRemoval(id: string) {
+    const item = state?.instances.find((v) => v.id === id);
+    if (!item || running || !available) return;
+    const normalize = (p: string) =>
+      p.replace(/\\/g, '/').replace(/\/$/, '').toLowerCase();
+    const managed =
+      !!item.local?.versionDirectory.match(/^versions\/[^/]+$/) ||
+      !!item.versionFolder ||
+      !item.local ||
+      (normalize(item.local.root) === normalize(state!.dataRoot) &&
+        item.local.versionDirectory === `instances/${id}/game`);
+    const path = item.versionFolder
+      ? instanceGameDirectory(item, state!.dataRoot, true)
+      : item.local
+        ? `${item.local.root}/${item.local.versionDirectory}`
+        : `${item.storageRoot ?? state!.dataRoot}/instances/${id}`;
+    setRemoval({ id, name: item.name, managed, path });
+    setArchiveInstance(managed);
+    setRemoveError('');
+    setMenu(null);
+  }
   const [menu, setMenu] = useState<{
     id: string;
     name: string;
@@ -325,7 +382,7 @@ function Shell({ services }: { services: Services }) {
         allowClose.current = false;
         setNotice('关闭窗口失败，请重试。');
       });
-  }, []);
+  }, [setNotice]);
   const requestClose = useCallback(
     () =>
       guard(() => {
@@ -414,10 +471,40 @@ function Shell({ services }: { services: Services }) {
     }
   }
   async function requestLaunch() {
-    if (!selected || !canLaunch || launchPending.current) return;
+    if (
+      !selected ||
+      running ||
+      state?.loginPending ||
+      !available ||
+      launchPending.current
+    )
+      return;
+    if (!canLaunch) {
+      setAccount(true);
+      return;
+    }
     launchPending.current = true;
     const id = selected.id;
     try {
+      setJavaPending(true);
+      setJavaFailure(null);
+      try {
+        try {
+          await services.native.instanceJava(id);
+        } catch (error) {
+          if (selected.launch?.javaPath) throw error;
+          await services.native.prepareJava(id);
+        }
+      } catch (error) {
+        setJavaFailure({
+          id,
+          message: error instanceof Error ? error.message : 'Java 检查未完成',
+        });
+        setChecksOpen(true);
+        return;
+      } finally {
+        setJavaPending(false);
+      }
       if (checks.busy) {
         setChecksOpen(true);
         return;
@@ -449,6 +536,7 @@ function Shell({ services }: { services: Services }) {
     });
   }
   function selectTab(next: Navigation['instanceTabs'][string]) {
+    setInstanceExtension(null);
     if (selected)
       change({ instanceTabs: { ...nav.instanceTabs, [selected.id]: next } });
   }
@@ -485,6 +573,14 @@ function Shell({ services }: { services: Services }) {
       }
     >
       <Titlebar realMode report={setNotice} onClose={requestClose} />
+      <PluginHost
+        services={services}
+        active={view === 'extensions'}
+        onInstalled={(id, category) => {
+          setExtensionId(id);
+          setExtensionGroup(category);
+        }}
+      />
       <div
         className={`library-shell ${!expanded ? 'library-collapsed' : ''} ${compact ? 'compact-context' : ''}`}
       >
@@ -560,21 +656,17 @@ function Shell({ services }: { services: Services }) {
                 {task?.pendingInstance && (
                   <button
                     className="library-instance pending-install"
-                    style={{
-                      opacity:
-                        0.5 +
-                        0.5 *
-                          (1 -
-                            1 /
-                              (1 +
-                                (task.steps?.filter((step) => step.done)
-                                  .length ?? 0) +
-                                (task.total
-                                  ? task.completed / task.total
-                                  : 0))),
+                    style={
+                      {
+                        '--install-fill': `${installProgress(task).percent}%`,
+                      } as CSSProperties
+                    }
+                    onClick={() => {
+                      setInstallOpen(true);
+                      change({ section: 'library' });
                     }}
-                    onClick={() => setTasks(true)}
                   >
+                    {' '}
                     <Download size={24} />
                     <span>
                       <strong>{task.pendingInstance}</strong>
@@ -586,67 +678,117 @@ function Shell({ services }: { services: Services }) {
                             : '安装已取消'}{' '}
                         ·{' '}
                         {task.total
-                          ? `${Math.floor((task.completed / task.total) * 100)}%（当前步骤）`
+                          ? `${installProgress(task).percent}%（整体）`
                           : '处理中'}
                       </small>
                       <progress
-                        aria-label="待安装实例当前步骤"
-                        value={task.total ? task.completed : undefined}
-                        max={task.total || undefined}
+                        aria-label="待安装实例整体进度"
+                        value={installProgress(task).percent}
+                        max={100}
                       />
                     </span>
                   </button>
                 )}
-                {matches.map((item) => (
-                  <button
-                    key={item.id}
-                    className={`library-instance ${selected?.id === item.id ? 'selected' : ''}`}
-                    aria-pressed={selected?.id === item.id}
-                    onClick={() => change({}, item.id)}
-                    onContextMenu={(event) => {
-                      event.preventDefault();
-                      menuTrigger.current = event.currentTarget;
-                      setMenu({
-                        id: item.id,
-                        name: item.name,
-                        x: event.clientX,
-                        y: event.clientY,
-                      });
-                    }}
-                    onDoubleClick={() => {
-                      if (
-                        preferences.doubleClickLaunch &&
-                        !running &&
-                        native.available &&
-                        state &&
-                        (state.settings.launchMode === 'offline' ||
-                          state.account)
-                      )
-                        void requestLaunch();
-                    }}
+                {libraryFolders(matches, state?.dataRoot ?? '').map((group) => (
+                  <details
+                    className="library-folder"
+                    key={`${group.path}:${nav.query}`}
+                    open
                   >
-                    <span
-                      className={`instance-block ${item.fabricVersion ? 'fabric-block' : ''}`}
-                    >
-                      <Box size={27} />
-                    </span>
-                    <span className="library-instance-name">
-                      <strong title={item.name}>{item.name}</strong>
-                      <small>
-                        {item.version} · {instanceLoader(item)}
-                      </small>
-                    </span>
-                    {selected?.id === item.id &&
-                    !!checks.report?.issues.length ? (
-                      <AlertTriangle
-                        className="instance-warning"
-                        size={16}
-                        aria-label={`${checks.report.issues.length} 项启动建议`}
-                      />
-                    ) : (
-                      <ChevronRight size={15} />
-                    )}
-                  </button>
+                    <summary title={group.path}>
+                      <FolderOpen size={17} />
+                      <span>
+                        <strong>{group.label}</strong>
+                        <small>{group.path}</small>
+                      </span>
+                      <span className="library-folder-count">
+                        {group.instances.length}
+                      </span>
+                    </summary>
+                    {group.instances.map((item) => (
+                      <div className="library-instance-row" key={item.id}>
+                        <button
+                          className={`library-instance ${selected?.id === item.id ? 'selected' : ''}`}
+                          aria-pressed={selected?.id === item.id}
+                          onClick={() => {
+                            setInstallOpen(false);
+                            change({}, item.id);
+                          }}
+                          onKeyDown={(event) => {
+                            if (running || !available) return;
+                            if (event.key === 'F2') {
+                              event.preventDefault();
+                              setRename({ id: item.id, name: item.name });
+                            }
+                            if (event.key === 'Delete') {
+                              event.preventDefault();
+                              requestRemoval(item.id);
+                            }
+                          }}
+                          onContextMenu={(event) => {
+                            event.preventDefault();
+                            menuTrigger.current = event.currentTarget;
+                            setMenu({
+                              id: item.id,
+                              name: item.name,
+                              x: event.clientX,
+                              y: event.clientY,
+                            });
+                          }}
+                          onDoubleClick={() => {
+                            if (
+                              preferences.doubleClickLaunch &&
+                              !running &&
+                              native.available &&
+                              state &&
+                              (state.settings.launchMode === 'offline' ||
+                                state.account)
+                            )
+                              void requestLaunch();
+                          }}
+                        >
+                          <span
+                            className={`instance-block ${item.fabricVersion ? 'fabric-block' : ''}`}
+                          >
+                            <Box size={27} />
+                          </span>
+                          <span className="library-instance-name">
+                            <strong title={item.name}>{item.name}</strong>
+                            <small>
+                              {item.version} · {instanceLoader(item)}
+                            </small>
+                          </span>
+                          {selected?.id === item.id &&
+                          !!checks.report?.issues.length ? (
+                            <AlertTriangle
+                              className="instance-warning"
+                              size={16}
+                              aria-label={`${checks.report.issues.length} 项启动建议`}
+                            />
+                          ) : null}
+                        </button>
+                        <button
+                          className="instance-row-menu"
+                          aria-label={`管理实例 ${item.name}`}
+                          title="管理实例"
+                          aria-haspopup="menu"
+                          onClick={(event) => {
+                            const rect =
+                              event.currentTarget.getBoundingClientRect();
+                            menuTrigger.current = event.currentTarget;
+                            setMenu({
+                              id: item.id,
+                              name: item.name,
+                              x: rect.right,
+                              y: rect.bottom,
+                            });
+                          }}
+                        >
+                          <MoreHorizontal size={16} />
+                        </button>
+                      </div>
+                    ))}
+                  </details>
                 ))}
                 {!state?.instances.length && (
                   <div className="library-empty">
@@ -719,12 +861,12 @@ function Shell({ services }: { services: Services }) {
               </div>
             </>
           ) : view === 'extensions' ? (
-            <div className="extension-sidebar">
-              <Puzzle size={28} />
-              <h2>扩展你的工作区</h2>
-              <p>选择喜欢的布局，让常用功能触手可及。</p>
-              <span className="subtle-badge">官方模块 · 本地运行</span>
-            </div>
+            <ExtensionsSidebar
+              expanded={extensionGroup}
+              onExpand={setExtensionGroup}
+              selected={extensionId}
+              onSelect={setExtensionId}
+            />
           ) : (
             <>
               <div className="library-list-heading">
@@ -875,320 +1017,59 @@ function Shell({ services }: { services: Services }) {
                 {notice || native.error}
               </p>
             )}
-            {view === 'library' && !selected && (
-              <section className="library-welcome" style={backgroundStyle}>
-                <div className="welcome-emblem">
-                  <Box size={38} />
-                </div>
-                <span className="welcome-kicker">EASY CRAFT</span>
-                <h1>下一个世界，从这里开始。</h1>
-                <p>
-                  安装 Minecraft，或带上你喜欢的整合包。
-                  <br />
-                  每个实例独立保存，让冒险各有天地。
-                </p>
-                <div className="welcome-actions">
-                  <button
-                    className="primary"
-                    onClick={() =>
-                      change({
-                        section: 'download',
-                        downloadCategory: 'vanilla',
-                      })
-                    }
-                  >
-                    <Plus size={18} /> 安装游戏
-                  </button>
-                  <button
-                    disabled={
-                      !available ||
-                      running ||
-                      !!state?.loginPending ||
-                      packPicking
-                    }
-                    onClick={() => void importLocalPack()}
-                  >
-                    <FolderOpen size={18} /> 导入整合包
+            {view === 'library' && installOpen && task?.pendingInstance && (
+              <div className="workspace-page install-workspace">
+                <div className="library-page-heading">
+                  <h1>{task.pendingInstance}</h1>
+                  <button onClick={() => setInstallOpen(false)}>
+                    返回实例
                   </button>
                 </div>
-                <small>支持原版与 Fabric · ZIP / MRPACK 导入</small>
-              </section>
-            )}
-            {view === 'library' && selected && (
-              <>
-                <section
-                  className={`library-hero ${tab !== 'overview' ? 'compact-hero' : ''}`}
-                  style={{
-                    ...backgroundStyle,
-                  }}
-                >
-                  <button
-                    className="hero-menu"
-                    aria-label="当前实例更多操作"
-                    onClick={(event) => {
-                      menuTrigger.current = event.currentTarget;
-                      const bounds =
-                        event.currentTarget.getBoundingClientRect();
-                      setMenu({
-                        id: selected.id,
-                        name: selected.name,
-                        x: bounds.right - 230,
-                        y: bounds.bottom,
-                      });
-                    }}
-                  >
-                    <MoreHorizontal size={19} />
-                  </button>
-                  <div className="library-hero-bottom">
-                    <div>
-                      <h1 title={selected.name}>{selected.name}</h1>
-                      <div className="library-chips">
-                        <span>
-                          <Box size={13} />
-                          {selected
-                            ? `Minecraft ${selected.version}`
-                            : '独立实例'}
-                        </span>
-                        {selected && (
-                          <>
-                            <span>{instanceLoader(selected)}</span>
-                            <span>
-                              <Cpu size={13} />
-                              需要 Java {selected.javaMajor}
-                            </span>
-                          </>
-                        )}
-                      </div>
-                    </div>
-                    <div className="hero-launch-group">
-                      <button
-                        className="library-launch"
-                        disabled={!canLaunch}
-                        onClick={() => void requestLaunch()}
-                      >
-                        <Play fill="currentColor" size={21} />
-                        {running ? '游戏 / 任务运行中' : '启动游戏'}
-                      </button>
-                      <span className="launch-identity">
-                        {identity ? (
-                          `${identity} · ${running ? '运行中' : state?.settings.launchMode === 'offline' ? '离线账户' : 'Microsoft'}`
-                        ) : (
-                          <button onClick={() => setAccount(true)}>
-                            选择账号后启动
-                          </button>
-                        )}
+                <p>整体安装进度 · {installProgress(task).percent}%（按阶段）</p>
+                <progress
+                  style={{ width: '100%' }}
+                  value={installProgress(task).percent}
+                  max={100}
+                />
+                <ol className="task-steps">
+                  {installProgress(task).rows.map((row) => (
+                    <li key={row.id}>
+                      <strong>{row.name}</strong>
+                      <span>
+                        {row.status} · {row.percent}%
                       </span>
-                    </div>
-                  </div>
-                </section>
-                <button
-                  className={`preflight-summary ${checks.report?.issues.length ? 'has-warning' : ''}`}
-                  onClick={() => setChecksOpen(true)}
-                >
-                  {checks.report?.issues.length ? (
-                    <AlertTriangle size={15} />
-                  ) : (
-                    <ShieldCheck size={15} />
-                  )}
-                  <span>
-                    {checks.busy
-                      ? checks.report
-                        ? '正在核对文件变化，上次报告待更新…'
-                        : '正在检查本地模组…'
-                      : checks.stale
-                        ? '上次报告待更新 · 可查看详情或详细检查'
-                        : checks.error
-                          ? '启动检查未完成，仍可启动'
-                          : checks.report?.issues.length
-                            ? `发现 ${checks.report.issues.length} 项依赖问题，仍可启动`
-                            : checks.report?.details?.complete
-                              ? '支持范围内未发现声明问题 · 查看检查详情'
-                              : checks.report
-                                ? '检查未完成 · 查看范围与建议'
-                                : '尚未检查 · 查看范围与建议'}
-                  </span>
-                  {checks.report?.details && (
-                    <small
-                      className="check-time"
-                      title={new Date(
-                        checks.report.details.checkedAt,
-                      ).toLocaleString()}
-                    >
-                      {checks.stale ? '上次' : '核对'}{' '}
-                      {new Date(
-                        checks.report.details.checkedAt,
-                      ).toLocaleTimeString([], {
-                        hour: '2-digit',
-                        minute: '2-digit',
-                      })}
-                    </small>
-                  )}
-                  <ChevronRight size={14} />
-                </button>
-                <div
-                  className="library-tabs"
-                  role="tablist"
-                  aria-label="实例工作区"
-                  onKeyDown={(event) => {
-                    if (
-                      !['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(
-                        event.key,
-                      )
-                    )
-                      return;
-                    event.preventDefault();
-                    const tabs = Array.from(
-                      event.currentTarget.querySelectorAll<HTMLButtonElement>(
-                        '[role="tab"]',
-                      ),
-                    );
-                    const current = tabs.indexOf(
-                      document.activeElement as HTMLButtonElement,
-                    );
-                    const index =
-                      event.key === 'Home'
-                        ? 0
-                        : event.key === 'End'
-                          ? tabs.length - 1
-                          : (current +
-                              (event.key === 'ArrowRight' ? 1 : -1) +
-                              tabs.length) %
-                            tabs.length;
-                    tabs[index]?.click();
-                    tabs[index]?.focus();
-                  }}
-                >
-                  {(
-                    [
-                      { id: 'overview', name: '概览' },
-                      { id: 'mods', name: '模组' },
-                      { id: 'resources', name: '资源与光影' },
-                      { id: 'worlds', name: '存档' },
-                      { id: 'screenshots', name: '截图' },
-                      { id: 'options', name: '实例设置' },
-                    ] as const
-                  ).map(({ id, name }) => (
-                    <button
-                      key={id}
-                      role="tab"
-                      tabIndex={tab === id ? 0 : -1}
-                      aria-selected={tab === id}
-                      onClick={() => selectTab(id)}
-                    >
-                      {name}
-                    </button>
+                      <progress value={row.percent} max={100} />
+                    </li>
                   ))}
+                </ol>
+                <p role="status">{task.message}</p>
+                <div className="button-row">
+                  {running && (
+                    <button onClick={() => void run(services.native.cancel)}>
+                      取消安装
+                    </button>
+                  )}
+                  <button onClick={() => setTasks(true)}>详细日志</button>
                 </div>
-                {tab === 'overview' ? (
-                  <InstanceOverview
-                    key={`${selected.id}:${instanceIsolated(selected)}`}
-                    service={services.native}
-                    instance={selected}
-                    settings={effectiveSettings!}
-                    identity={identity ?? ''}
-                    running={!!running}
-                    onWorlds={() => selectTab('worlds')}
-                    onMods={() => selectTab('mods')}
-                    onSettings={() => selectTab('options')}
-                    onChecks={() => setChecksOpen(true)}
-                    report={setNotice}
-                  />
-                ) : selected &&
-                  (tab === 'mods' ||
-                    tab === 'resources' ||
-                    tab === 'screenshots') ? (
-                  <>
-                    <ContentPanel
-                      key={`${selected.id}:${tab}:${resourceKind}:${instanceIsolated(selected)}`}
-                      service={services.native}
-                      id={selected.id}
-                      kind={contentKind}
-                      categorySwitch={
-                        tab === 'resources' ? (
-                          <div
-                            className="content-subtabs"
-                            aria-label="资源类型"
-                          >
-                            {(['resourcepacks', 'shaderpacks'] as const).map(
-                              (kind) => (
-                                <button
-                                  key={kind}
-                                  aria-pressed={resourceKind === kind}
-                                  onClick={() =>
-                                    change({
-                                      resourceKinds: {
-                                        ...nav.resourceKinds,
-                                        [selected.id]: kind,
-                                      },
-                                    })
-                                  }
-                                >
-                                  {kind === 'resourcepacks'
-                                    ? '资源包'
-                                    : '光影包'}
-                                </button>
-                              ),
-                            )}
-                          </div>
-                        ) : undefined
-                      }
-                      query={nav.contentQueries?.[contentQueryKey] ?? ''}
-                      onQuery={(query) =>
-                        change({
-                          contentQueries: Object.fromEntries(
-                            Object.entries({
-                              ...nav.contentQueries,
-                              [contentQueryKey]: query,
-                            }).slice(-300),
-                          ),
-                        })
-                      }
-                      running={!!running}
-                      onDownload={() =>
-                        change({
-                          section: 'download',
-                          downloadCategory:
-                            tab === 'mods'
-                              ? 'mod'
-                              : resourceKind === 'shaderpacks'
-                                ? 'shader'
-                                : 'resourcepack',
-                        })
-                      }
-                    />
-                  </>
-                ) : selected && tab === 'options' ? (
-                  <InstanceSettings
-                    key={`${selected.id}:settings`}
-                    service={services.native}
-                    id={selected.id}
-                    running={!!running}
-                  />
-                ) : selected ? (
-                  <>
-                    <WorldSettingsPanel
-                      key={`${selected.id}:${tab}:${instanceIsolated(selected)}`}
-                      service={services.native}
-                      id={selected.id}
-                      running={!!running}
-                      section="world"
-                      onDatapacks={(worldId) =>
-                        change({
-                          section: 'download',
-                          downloadCategory: 'datapack',
-                          datapackWorlds: {
-                            ...nav.datapackWorlds,
-                            [selected.id]: worldId,
-                          },
-                        })
-                      }
-                    />
-                  </>
-                ) : (
-                  <section className="card library-empty">
-                    <Box size={30} />
-                    <h2>先选择一个已安装实例</h2>
+              </div>
+            )}
+            {view === 'library' &&
+              !(installOpen && task?.pendingInstance) &&
+              !selected && (
+                <section className="library-welcome" style={backgroundStyle}>
+                  <div className="welcome-emblem">
+                    <Box size={38} />
+                  </div>
+                  <span className="welcome-kicker">EASY CRAFT</span>
+                  <h1>下一个世界，从这里开始。</h1>
+                  <p>
+                    安装 Minecraft，或带上你喜欢的整合包。
+                    <br />
+                    每个实例独立保存，让冒险各有天地。
+                  </p>
+                  <div className="welcome-actions">
                     <button
+                      className="primary"
                       onClick={() =>
                         change({
                           section: 'download',
@@ -1196,12 +1077,361 @@ function Shell({ services }: { services: Services }) {
                         })
                       }
                     >
-                      安装实例
+                      <Plus size={18} /> 安装游戏
                     </button>
+                    <button
+                      disabled={
+                        !available ||
+                        running ||
+                        !!state?.loginPending ||
+                        packPicking
+                      }
+                      onClick={() => void importLocalPack()}
+                    >
+                      <FolderOpen size={18} /> 导入整合包
+                    </button>
+                  </div>
+                  <small>支持原版与 Fabric · ZIP / MRPACK 导入</small>
+                </section>
+              )}
+            {view === 'library' &&
+              !(installOpen && task?.pendingInstance) &&
+              selected && (
+                <>
+                  <section
+                    className={`library-hero ${tab !== 'overview' ? 'compact-hero' : 'overview-hero'}`}
+                    style={{
+                      ...backgroundStyle,
+                    }}
+                  >
+                    {tab !== 'overview' && (
+                      <button
+                        className="hero-menu"
+                        aria-label="当前实例更多操作"
+                        onClick={(event) => {
+                          menuTrigger.current = event.currentTarget;
+                          const bounds =
+                            event.currentTarget.getBoundingClientRect();
+                          setMenu({
+                            id: selected.id,
+                            name: selected.name,
+                            x: bounds.right - 230,
+                            y: bounds.bottom,
+                          });
+                        }}
+                      >
+                        <MoreHorizontal size={19} />
+                      </button>
+                    )}
+                    <div className="library-hero-bottom">
+                      <div>
+                        <h1 title={selected.name}>{selected.name}</h1>
+                        <div className="library-chips">
+                          <span>
+                            <Box size={13} />
+                            {selected
+                              ? `Minecraft ${selected.version}`
+                              : '独立实例'}
+                          </span>
+                          {selected && (
+                            <>
+                              <span>{instanceLoader(selected)}</span>
+                              <span>
+                                <Cpu size={13} />
+                                需要 Java {selected.javaMajor}
+                              </span>
+                            </>
+                          )}
+                        </div>
+                      </div>
+                      <div className="hero-launch-group">
+                        <button
+                          className="library-launch"
+                          disabled={
+                            !available ||
+                            running ||
+                            !!state?.loginPending ||
+                            javaPending
+                          }
+                          onClick={() => void requestLaunch()}
+                        >
+                          <Play fill="currentColor" size={21} />
+                          {running
+                            ? '游戏 / 任务运行中'
+                            : javaPending
+                              ? '正在检查 Java…'
+                              : !canLaunch
+                                ? '选择账号后启动'
+                                : '启动游戏'}
+                        </button>
+                        <span className="launch-identity">
+                          {identity ? (
+                            `${identity} · ${running ? '运行中' : state?.settings.launchMode === 'offline' ? '离线账户' : 'Microsoft'}`
+                          ) : (
+                            <button onClick={() => setAccount(true)}>
+                              选择账号后启动
+                            </button>
+                          )}
+                        </span>
+                      </div>
+                    </div>
                   </section>
-                )}
-              </>
-            )}
+                  <button
+                    className={`preflight-summary ${checks.report?.issues.length ? 'has-warning' : ''}`}
+                    onClick={() => setChecksOpen(true)}
+                  >
+                    {checks.report?.issues.length ? (
+                      <AlertTriangle size={15} />
+                    ) : (
+                      <ShieldCheck size={15} />
+                    )}
+                    <span>
+                      {checks.busy
+                        ? checks.report
+                          ? '正在核对文件变化，上次报告待更新…'
+                          : '正在检查本地模组…'
+                        : checks.stale
+                          ? '上次报告待更新 · 可查看详情或详细检查'
+                          : checks.error
+                            ? '启动检查未完成，仍可启动'
+                            : checks.report?.issues.length
+                              ? `发现 ${checks.report.issues.length} 项依赖问题，仍可启动`
+                              : checks.report?.details?.complete
+                                ? '支持范围内未发现声明问题 · 查看检查详情'
+                                : checks.report
+                                  ? '检查未完成 · 查看范围与建议'
+                                  : '尚未检查 · 查看范围与建议'}
+                    </span>
+                    {checks.report?.details && (
+                      <small
+                        className="check-time"
+                        title={new Date(
+                          checks.report.details.checkedAt,
+                        ).toLocaleString()}
+                      >
+                        {checks.stale ? '上次' : '核对'}{' '}
+                        {new Date(
+                          checks.report.details.checkedAt,
+                        ).toLocaleTimeString([], {
+                          hour: '2-digit',
+                          minute: '2-digit',
+                        })}
+                      </small>
+                    )}
+                    <ChevronRight size={14} />
+                  </button>
+                  <div
+                    className="library-tabs"
+                    role="tablist"
+                    aria-label="实例工作区"
+                    onKeyDown={(event) => {
+                      if (
+                        !['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(
+                          event.key,
+                        )
+                      )
+                        return;
+                      event.preventDefault();
+                      const tabs = Array.from(
+                        event.currentTarget.querySelectorAll<HTMLButtonElement>(
+                          '[role="tab"]',
+                        ),
+                      );
+                      const current = tabs.indexOf(
+                        document.activeElement as HTMLButtonElement,
+                      );
+                      const index =
+                        event.key === 'Home'
+                          ? 0
+                          : event.key === 'End'
+                            ? tabs.length - 1
+                            : (current +
+                                (event.key === 'ArrowRight' ? 1 : -1) +
+                                tabs.length) %
+                              tabs.length;
+                      tabs[index]?.click();
+                      tabs[index]?.focus();
+                    }}
+                  >
+                    {(
+                      [
+                        { id: 'overview', name: '概览' },
+                        { id: 'mods', name: '模组' },
+                        { id: 'resources', name: '资源与光影' },
+                        { id: 'worlds', name: '存档' },
+                        { id: 'screenshots', name: '截图' },
+                        { id: 'options', name: '实例设置' },
+                      ] as const
+                    ).map(({ id, name }) => (
+                      <button
+                        key={id}
+                        role="tab"
+                        tabIndex={tab === id ? 0 : -1}
+                        aria-selected={
+                          tab === id && instanceExtension?.id !== selected.id
+                        }
+                        onClick={() => selectTab(id)}
+                      >
+                        {name}
+                      </button>
+                    ))}
+                    <InstancePluginEntries
+                      id={selected.id}
+                      position="instance-tab"
+                      selectedPlugin={
+                        instanceExtension?.id === selected.id
+                          ? instanceExtension.plugin
+                          : undefined
+                      }
+                      onOpen={(plugin) =>
+                        setInstanceExtension({ id: selected.id, plugin })
+                      }
+                    />
+                  </div>
+                  {tab === 'overview' && (
+                    <InstancePluginEntries
+                      id={selected.id}
+                      position="instance-overview"
+                      onOpen={(plugin) =>
+                        setInstanceExtension({ id: selected.id, plugin })
+                      }
+                    />
+                  )}
+                  {instanceExtension?.id === selected.id ? (
+                    <div className="workspace-page">
+                      <InstancePluginWorkspace
+                        plugin={instanceExtension.plugin}
+                        id={selected.id}
+                        services={services}
+                      />
+                    </div>
+                  ) : tab === 'overview' ? (
+                    <InstanceOverview
+                      key={`${selected.id}:${instanceIsolated(selected)}`}
+                      service={services.native}
+                      instance={selected}
+                      settings={effectiveSettings!}
+                      identity={identity ?? ''}
+                      running={!!running}
+                      onWorlds={() => selectTab('worlds')}
+                      onMods={() => selectTab('mods')}
+                      onSettings={() => selectTab('options')}
+                      onChecks={() => setChecksOpen(true)}
+                      onRename={() =>
+                        setRename({ id: selected.id, name: selected.name })
+                      }
+                      onRemove={() => requestRemoval(selected.id)}
+                      report={setNotice}
+                    />
+                  ) : selected &&
+                    (tab === 'mods' ||
+                      tab === 'resources' ||
+                      tab === 'screenshots') ? (
+                    <>
+                      <ContentPanel
+                        key={`${selected.id}:${tab}:${resourceKind}:${instanceIsolated(selected)}`}
+                        service={services.native}
+                        id={selected.id}
+                        kind={contentKind}
+                        categorySwitch={
+                          tab === 'resources' ? (
+                            <div
+                              className="content-subtabs"
+                              aria-label="资源类型"
+                            >
+                              {(['resourcepacks', 'shaderpacks'] as const).map(
+                                (kind) => (
+                                  <button
+                                    key={kind}
+                                    aria-pressed={resourceKind === kind}
+                                    onClick={() =>
+                                      change({
+                                        resourceKinds: {
+                                          ...nav.resourceKinds,
+                                          [selected.id]: kind,
+                                        },
+                                      })
+                                    }
+                                  >
+                                    {kind === 'resourcepacks'
+                                      ? '资源包'
+                                      : '光影包'}
+                                  </button>
+                                ),
+                              )}
+                            </div>
+                          ) : undefined
+                        }
+                        query={nav.contentQueries?.[contentQueryKey] ?? ''}
+                        onQuery={(query) =>
+                          change({
+                            contentQueries: Object.fromEntries(
+                              Object.entries({
+                                ...nav.contentQueries,
+                                [contentQueryKey]: query,
+                              }).slice(-300),
+                            ),
+                          })
+                        }
+                        running={!!running}
+                        onDownload={() =>
+                          change({
+                            section: 'download',
+                            downloadCategory:
+                              tab === 'mods'
+                                ? 'mod'
+                                : resourceKind === 'shaderpacks'
+                                  ? 'shader'
+                                  : 'resourcepack',
+                          })
+                        }
+                      />
+                    </>
+                  ) : selected && tab === 'options' ? (
+                    <InstanceSettings
+                      key={`${selected.id}:settings`}
+                      service={services.native}
+                      id={selected.id}
+                      running={!!running}
+                    />
+                  ) : selected ? (
+                    <>
+                      <WorldSettingsPanel
+                        key={`${selected.id}:${tab}:${instanceIsolated(selected)}`}
+                        service={services.native}
+                        id={selected.id}
+                        running={!!running}
+                        section="world"
+                        onDatapacks={(worldId) =>
+                          change({
+                            section: 'download',
+                            downloadCategory: 'datapack',
+                            datapackWorlds: {
+                              ...nav.datapackWorlds,
+                              [selected.id]: worldId,
+                            },
+                          })
+                        }
+                      />
+                    </>
+                  ) : (
+                    <section className="card library-empty">
+                      <Box size={30} />
+                      <h2>先选择一个已安装实例</h2>
+                      <button
+                        onClick={() =>
+                          change({
+                            section: 'download',
+                            downloadCategory: 'vanilla',
+                          })
+                        }
+                      >
+                        安装实例
+                      </button>
+                    </section>
+                  )}
+                </>
+              )}
             {view === 'settings' && (
               <div className="workspace-page">
                 <div className="library-page-heading">
@@ -1496,9 +1726,7 @@ function Shell({ services }: { services: Services }) {
                       gameVersion={
                         nav.contentQueries?.[
                           `download:${nav.downloadCategory}:game`
-                        ] ??
-                        selected?.version ??
-                        '1.21.1'
+                        ] ?? 'all'
                       }
                       onFilter={(query, game) =>
                         change({
@@ -1516,7 +1744,13 @@ function Shell({ services }: { services: Services }) {
                 )}
               </div>
             )}
-            {view === 'extensions' && <ExtensionsPanel services={services} />}
+            {view === 'extensions' && (
+              <ExtensionsPanel
+                services={services}
+                selected={extensionId}
+                onSelect={setExtensionId}
+              />
+            )}
           </div>
           <footer className="workspace-taskbar">
             {running ? (
@@ -1552,7 +1786,10 @@ function Shell({ services }: { services: Services }) {
                       {Math.round(
                         Math.min(1, task.completed / task.total) * 100,
                       )}
-                      % · {task.completed}/{task.total}
+                      % ·{' '}
+                      {['pack-download', 'pack-archive'].includes(task.phase)
+                        ? `${(task.completed / 1048576).toFixed(1)}/${(task.total / 1048576).toFixed(1)} MiB`
+                        : `${task.completed}/${task.total}`}
                     </small>
                   </>
                 ) : (
@@ -1609,12 +1846,28 @@ function Shell({ services }: { services: Services }) {
           title={`启动检查 · ${selected.name}`}
           onClose={() => setChecksOpen(false)}
         >
+          {javaFailure?.id === selected.id && (
+            <section className="notice launch-java-failure" role="alert">
+              <p>Java 检查未通过：{javaFailure.message}</p>
+              <p>
+                请在实例设置的运行环境中选择兼容的 64 位 Java，然后重新启动。
+              </p>
+              <button
+                onClick={() => {
+                  setChecksOpen(false);
+                  selectTab('options');
+                }}
+              >
+                打开实例设置
+              </button>
+            </section>
+          )}
           <LaunchChecks
             report={checks.report}
             error={checks.error}
             busy={checks.busy}
             stale={checks.stale}
-            canLaunch={canLaunch}
+            canLaunch={canLaunch && !javaPending}
             onRefresh={() => void checks.refresh()}
             onLaunch={() => {
               launchPending.current = false;
@@ -1635,6 +1888,10 @@ function Shell({ services }: { services: Services }) {
       {tasks && (
         <Modal title="任务与日志" onClose={() => setTasks(false)}>
           <p role="status">{task?.message || '没有正在进行的任务。'}</p>
+          {state &&
+            (task?.status === 'failed' || task?.status === 'cancelled') && (
+              <TaskDiagnostics state={state} />
+            )}
           <ol className="task-steps">
             {task?.steps?.map((step, index) => (
               <li key={index}>
@@ -1652,7 +1909,10 @@ function Shell({ services }: { services: Services }) {
                         100,
                         Math.floor((step.completed / step.total) * 100),
                       )}
-                      % · {step.completed}/{step.total}
+                      % ·{' '}
+                      {['pack-download', 'pack-archive'].includes(step.phase)
+                        ? `${(step.completed / 1048576).toFixed(1)}/${(step.total / 1048576).toFixed(1)} MiB`
+                        : `${step.completed}/${step.total}`}
                     </span>
                   </>
                 ) : (
@@ -1704,7 +1964,7 @@ function Shell({ services }: { services: Services }) {
             tabIndex={-1}
             style={{
               left: Math.max(0, Math.min(menu.x, window.innerWidth - 236)),
-              top: Math.max(0, Math.min(menu.y, window.innerHeight - 220)),
+              top: Math.max(8, Math.min(menu.y, window.innerHeight - 300)),
             }}
             onMouseDown={(event) => event.stopPropagation()}
             onKeyDown={(event) => {
@@ -1779,6 +2039,13 @@ function Shell({ services }: { services: Services }) {
             <button role="menuitem" onClick={() => setMenu(null)}>
               关闭菜单
             </button>
+            <button
+              role="menuitem"
+              disabled={!!running || !native.available}
+              onClick={() => requestRemoval(menu.id)}
+            >
+              移除实例
+            </button>
           </div>
         </div>
       )}
@@ -1797,7 +2064,7 @@ function Shell({ services }: { services: Services }) {
               实例名称
               <input
                 aria-label="真实实例名称"
-                maxLength={60}
+                maxLength={120}
                 required
                 value={rename.name}
                 onChange={(event) =>
@@ -1806,10 +2073,92 @@ function Shell({ services }: { services: Services }) {
               />
             </label>
             <p>只修改显示名称，实例目录和存档不会移动。</p>
-            <button className="primary" type="submit">
+            <button
+              className="primary"
+              type="submit"
+              disabled={
+                !rename.name.trim() ||
+                Array.from(rename.name.trim()).length > 60 ||
+                !!running
+              }
+            >
               保存实例名称
             </button>
           </form>
+        </Modal>
+      )}
+      {removal && (
+        <Modal title="移除实例" onClose={() => setRemoval(null)}>
+          <p>将「{removal.name}」移出游戏库？</p>
+          {removal.managed && (
+            <p className="hint" style={{ overflowWrap: 'anywhere' }}>
+              版本目录：{removal.path}
+            </p>
+          )}
+          {removal.managed ? (
+            <label className="toggle-row">
+              <span>同时将此版本文件夹移入系统回收站</span>
+              <input
+                type="checkbox"
+                checked={archiveInstance}
+                disabled={removeBusy}
+                onChange={(event) => setArchiveInstance(event.target.checked)}
+              />
+            </label>
+          ) : (
+            <p>这是引用的本地版本，只移除记录，原文件保留。</p>
+          )}
+          <p className="hint">
+            {archiveInstance && removal.managed
+              ? '版本文件夹将进入 Windows 回收站；共享目录保留，回收失败时不永久删除。'
+              : '游戏文件、存档与模组保留在原位置。'}
+          </p>
+          {removeError && (
+            <p className="notice" role="alert">
+              {removeError}
+            </p>
+          )}
+          <div className="content-toolbar">
+            <button disabled={removeBusy} onClick={() => setRemoval(null)}>
+              取消
+            </button>
+            <button
+              className="primary"
+              disabled={removeBusy || !!running}
+              onClick={() => {
+                setRemoveBusy(true);
+                setRemoveError('');
+                void services.native
+                  .removeInstance(
+                    removal.id,
+                    removal.managed && archiveInstance,
+                  )
+                  .then((path) => {
+                    if (
+                      services.preferences.snapshot().selectedId === removal.id
+                    )
+                      services.preferences.update({
+                        selectedId:
+                          services.native.snapshot().state?.instances[0]?.id,
+                      });
+                    setRemoval(null);
+                    setNotice(
+                      path
+                        ? `已移入系统回收站，原位置：${path}`
+                        : '实例已移出游戏库，原文件保留。',
+                    );
+                  })
+                  .catch((error) =>
+                    setRemoveError(
+                      error instanceof Error ? error.message : '移除失败',
+                    ),
+                  )
+                  .finally(() => setRemoveBusy(false));
+              }}
+            >
+              {removeBusy ? '正在移除…' : '确认移除'}
+            </button>
+          </div>
         </Modal>
       )}
       {closing && (

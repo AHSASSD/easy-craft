@@ -19,6 +19,18 @@ export function instanceGameDirectory(
   dataRoot: string,
   isolated?: boolean,
 ) {
+  if (instance.versionFolder) {
+    let root = (instance.storageRoot ?? dataRoot)
+      .replaceAll('\\', '/')
+      .replace(/\/+$/, '');
+    if (!root.toLowerCase().endsWith('/.minecraft')) root += '/.minecraft';
+    return (isolated ?? instanceIsolated(instance))
+      ? `${root}/versions/${instance.versionFolder}`
+      : root;
+  }
+  if (instance.storageRoot) {
+    return `${instance.storageRoot.replace(/\\/g, '/')}/${(isolated ?? instanceIsolated(instance)) ? `instances/${instance.id}/game` : 'shared-game'}`;
+  }
   if (instance.local) {
     const path =
       isolated === undefined

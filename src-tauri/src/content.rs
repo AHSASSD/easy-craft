@@ -56,8 +56,16 @@ fn file_path(root: &Path, kind: Kind, file: &str) -> Result<PathBuf> {
     filename(file)?;
     model::safe_path(root, &format!("{}/{file}", kind.dir()))
 }
-fn revision(metadata: &fs::Metadata) -> String {
-    format!("{}:{}", metadata.len(), metadata.last_write_time())
+fn revision(metadata: &fs::Metadata, path: &Path) -> Result<String> {
+    let identity = crate::resource_install::file_identity(path)?;
+    Ok(format!(
+        "{}:{}:{}:{}:{}",
+        metadata.len(),
+        metadata.last_write_time(),
+        identity.0,
+        identity.1,
+        identity.2
+    ))
 }
 pub(crate) fn fabric_metadata<R: Read + std::io::Seek>(
     archive: &mut zip::ZipArchive<R>,
@@ -73,9 +81,45 @@ pub(crate) fn fabric_metadata<R: Read + std::io::Seek>(
         .take(512 * 1024 + 1)
         .read_to_end(&mut bytes)
         .map_err(|_| "无法读取模组信息")?;
-    let value: serde_json::Value =
-        serde_json::from_slice(&bytes).map_err(|_| "模组描述不是有效 JSON")?;
+    let value = parse_fabric_json(&bytes)?;
     Ok(value)
+}
+// Fabric Loader's JsonReader accepts literal controls inside quoted strings
+// (notably multiline descriptions). Normalize only that syntax for serde_json;
+// retain strict structural parsing and never rewrite the downloaded JAR.
+fn parse_fabric_json(bytes: &[u8]) -> Result<serde_json::Value> {
+    let bytes = bytes.strip_prefix(&[0xef, 0xbb, 0xbf]).unwrap_or(bytes);
+    let mut normalized = Vec::with_capacity(bytes.len());
+    let (mut quoted, mut escaped) = (false, false);
+    const HEX: &[u8] = b"0123456789abcdef";
+    for &byte in bytes {
+        if quoted && !escaped && byte < 0x20 {
+            normalized.extend_from_slice(&[
+                b'\\',
+                b'u',
+                b'0',
+                b'0',
+                HEX[(byte >> 4) as usize],
+                HEX[(byte & 15) as usize],
+            ]);
+            continue;
+        }
+        normalized.push(byte);
+        if escaped {
+            escaped = false;
+        } else if quoted && byte == b'\\' {
+            escaped = true;
+        } else if byte == b'"' {
+            quoted = !quoted;
+        }
+    }
+    serde_json::from_slice(&normalized).map_err(|error| {
+        format!(
+            "fabric.mod.json 无法解析：第 {} 行，第 {} 列：{error}",
+            error.line(),
+            error.column()
+        )
+    })
 }
 fn fabric_info<R: Read + std::io::Seek>(
     archive: &mut zip::ZipArchive<R>,
@@ -98,6 +142,50 @@ fn fabric_info<R: Read + std::io::Seek>(
         .ok_or("缺少模组版本")?;
     Ok((name.into(), version.into()))
 }
+fn inspect_entry(root: &Path, kind: Kind, file: String) -> Result<Entry> {
+    let path = file_path(root, kind, &file)?;
+    let meta = fs::metadata(&path).map_err(|_| "无法读取文件状态")?;
+    let enabled = !file.to_ascii_lowercase().ends_with(".disabled");
+    let mut name = file.clone();
+    let mut version = if meta.is_dir() {
+        "文件夹 · 只读"
+    } else {
+        "未知文件 · 保留原样"
+    }
+    .to_string();
+    let mut editable = false;
+    if meta.is_file()
+        && kind == Kind::Mods
+        && (file.to_ascii_lowercase().ends_with(".jar")
+            || file.to_ascii_lowercase().ends_with(".jar.disabled"))
+        && meta.len() <= crate::file_picker::MAX_FILE
+    {
+        if let Ok(input) = fs::File::open(&path) {
+            if let Ok(mut zip) = zip::ZipArchive::new(input) {
+                if zip.len() <= crate::packs::MAX_RESOURCE_ENTRIES {
+                    if let Ok(info) = crate::mod_info::read(&mut zip) {
+                        name = info.name;
+                        version = info.version;
+                        editable = true;
+                    }
+                }
+            }
+        }
+    }
+    let fingerprint = revision(&meta, &path).unwrap_or_else(|_| {
+        editable = false;
+        format!("{}:{}", meta.len(), meta.last_write_time())
+    });
+    Ok(Entry {
+        file,
+        name,
+        version,
+        enabled,
+        editable,
+        bytes: meta.len(),
+        revision: fingerprint,
+    })
+}
 pub fn list(root: &Path, kind: Kind) -> Result<Vec<Entry>> {
     let directory = model::safe_path(root, kind.dir())?;
     if !directory.exists() {
@@ -116,44 +204,7 @@ pub fn list(root: &Path, kind: Kind) -> Result<Vec<Entry>> {
             .file_name()
             .into_string()
             .map_err(|_| "文件名包含无效 Unicode")?;
-        let path = file_path(root, kind, &file)?;
-        let meta = fs::metadata(&path).map_err(|_| "无法读取文件状态")?;
-        let enabled = !file.to_ascii_lowercase().ends_with(".disabled");
-        let mut name = file.clone();
-        let mut version = if meta.is_dir() {
-            "文件夹 · 只读"
-        } else {
-            "未知文件 · 保留原样"
-        }
-        .to_string();
-        let mut editable = false;
-        if meta.is_file()
-            && kind == Kind::Mods
-            && (file.to_ascii_lowercase().ends_with(".jar")
-                || file.to_ascii_lowercase().ends_with(".jar.disabled"))
-            && meta.len() <= crate::file_picker::MAX_FILE
-        {
-            if let Ok(input) = fs::File::open(path) {
-                if let Ok(mut zip) = zip::ZipArchive::new(input) {
-                    if zip.len() <= 10000 {
-                        if let Ok((title, v)) = fabric_info(&mut zip) {
-                            name = title;
-                            version = v;
-                            editable = true;
-                        }
-                    }
-                }
-            }
-        }
-        result.push(Entry {
-            file,
-            name,
-            version,
-            enabled,
-            editable,
-            bytes: meta.len(),
-            revision: revision(&meta),
-        });
+        result.push(inspect_entry(root, kind, file)?);
     }
     result.sort_by_key(|item| item.name.to_lowercase());
     Ok(result)
@@ -162,10 +213,7 @@ pub fn toggle(root: &Path, file: &str, expected: &str, enabled: bool) -> Result<
     let _locks = crate::worlds::lock_worlds(root)?;
     crate::resource_install::recover_all(root)?;
     let old = file_path(root, Kind::Mods, file)?;
-    let entry = list(root, Kind::Mods)?
-        .into_iter()
-        .find(|item| item.file == file)
-        .ok_or("模组文件不存在")?;
+    let entry = inspect_entry(root, Kind::Mods, file.into())?;
     if !entry.editable || entry.revision != expected {
         return Err("模组已变化或格式不支持，请重新读取".into());
     }
@@ -182,9 +230,125 @@ pub fn toggle(root: &Path, file: &str, expected: &str, enabled: bool) -> Result<
     let new = file_path(root, Kind::Mods, &target)?;
     move_no_replace(&old, &new)
 }
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Details {
+    pub entry: Entry,
+    pub path: String,
+    pub information: Option<crate::mod_info::Information>,
+    pub note: String,
+}
+fn mod_entry(root: &Path, file: &str, expected: &str) -> Result<(PathBuf, Entry)> {
+    let path = file_path(root, Kind::Mods, file)?;
+    let entry = inspect_entry(root, Kind::Mods, file.into())?;
+    if entry.revision != expected {
+        return Err("文件已变化，请重新读取模组列表".into());
+    }
+    Ok((path, entry))
+}
+pub fn details(root: &Path, file: &str, expected: &str) -> Result<Details> {
+    let (path, entry) = mod_entry(root, file, expected)?;
+    let result = if path.is_file() && entry.bytes <= crate::file_picker::MAX_FILE {
+        fs::File::open(&path)
+            .map_err(|_| "模组文件不可读".into())
+            .and_then(|file| zip::ZipArchive::new(file).map_err(|_| "不是有效 JAR".into()))
+            .and_then(|mut zip| crate::mod_info::read(&mut zip))
+    } else {
+        Err("此项不是可识别的模组文件".into())
+    };
+    let (information, note) = match result {
+        Ok(info) => (Some(info), String::new()),
+        Err(note) => (None, note),
+    };
+    Ok(Details {
+        entry,
+        path: path.to_string_lossy().into_owned(),
+        information,
+        note,
+    })
+}
+pub fn reveal(root: &Path, file: &str, expected: &str) -> Result<()> {
+    let (path, _) = mod_entry(root, file, expected)?;
+    std::process::Command::new("explorer.exe")
+        .arg("/select,")
+        .arg(path)
+        .spawn()
+        .map_err(|_| "无法打开模组文件位置")?;
+    Ok(())
+}
+pub fn remove_mod(root: &Path, file: &str, expected: &str) -> Result<String> {
+    let _locks = crate::worlds::lock_worlds(root)?;
+    crate::resource_install::recover_all(root)?;
+    let (path, entry) = mod_entry(root, file, expected)?;
+    if !entry.editable {
+        return Err("未识别的文件保留为只读，请在文件夹中核对".into());
+    }
+    let folder = model::safe_path(
+        root,
+        &format!(".easycraft-mod-trash/{}", uuid::Uuid::new_v4()),
+    )?;
+    fs::create_dir_all(folder.parent().ok_or("回收区路径无效")?)
+        .map_err(|_| "无法创建模组回收区")?;
+    fs::create_dir(&folder).map_err(|_| "无法创建本次回收目录")?;
+    let target = model::safe_path(&folder, file)?;
+    // Recheck after preparing the destination; never remove an unknown replacement.
+    if revision(&fs::metadata(&path).map_err(|_| "模组已移除")?, &path)? != expected {
+        return Err("模组已变化，未删除".into());
+    }
+    if let Err(error) = move_no_replace(&path, &target) {
+        let _ = fs::remove_dir(&folder);
+        return Err(error);
+    }
+    if revision(
+        &fs::metadata(&target).map_err(|_| "无法核对回收文件")?,
+        &target,
+    )? != expected
+    {
+        let _ = move_no_replace(&target, &path);
+        return Err(format!(
+            "文件在操作期间变化，未永久删除；请核对 {}",
+            folder.display()
+        ));
+    }
+    if let Err(error) = model::save_json(
+        &folder,
+        "restore.json",
+        &serde_json::json!({"file":file,"originalPath":path,"revision":expected}),
+    ) {
+        let rollback = move_no_replace(&target, &path);
+        return Err(format!(
+            "回收记录保存失败：{error}；{}",
+            if rollback.is_ok() {
+                "原文件已恢复".into()
+            } else {
+                format!("文件保留在 {}", target.display())
+            }
+        ));
+    }
+    Ok(target.to_string_lossy().into_owned())
+}
 pub(crate) fn move_no_replace(old: &Path, new: &Path) -> Result<()> {
-    let from: Vec<u16> = old.as_os_str().encode_wide().chain(Some(0)).collect();
-    let to: Vec<u16> = new.as_os_str().encode_wide().chain(Some(0)).collect();
+    fn extended(path: &Path) -> Result<Vec<u16>> {
+        let absolute = std::path::absolute(path).map_err(|_| "无法定位提交路径")?;
+        let value: Vec<u16> = absolute.as_os_str().encode_wide().collect();
+        if value.contains(&0) {
+            return Err("提交路径含无效字符".into());
+        }
+        let mut wide = if value.starts_with(&[92, 92, 63, 92]) {
+            value
+        } else if value.starts_with(&[92, 92]) {
+            "\\\\?\\UNC\\"
+                .encode_utf16()
+                .chain(value.into_iter().skip(2))
+                .collect()
+        } else {
+            "\\\\?\\".encode_utf16().chain(value).collect()
+        };
+        wide.push(0);
+        Ok(wide)
+    }
+    let from = extended(old)?;
+    let to = extended(new)?;
     // MoveFileW refuses to overwrite an existing destination, including a racing external writer.
     if unsafe { windows_sys::Win32::Storage::FileSystem::MoveFileW(from.as_ptr(), to.as_ptr()) }
         == 0
@@ -253,7 +417,11 @@ pub fn import_reader_cancellable(
         }
         output.sync_all().map_err(|_| "无法同步临时资源")?;
         output.rewind().map_err(|_| "无法读取临时资源")?;
-        crate::packs::preview_reader(&mut output)?;
+        if matches!(kind, Kind::Mods) {
+            crate::packs::preview_mod_reader(&mut output)?;
+        } else {
+            crate::packs::preview_resource_reader(&mut output)?;
+        }
         output
             .seek(SeekFrom::Start(0))
             .map_err(|_| "无法读取临时资源")?;
@@ -477,8 +645,44 @@ pub fn open_folder(root: &Path, folder: &str) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn no_replace_move_supports_long_paths_and_keeps_collision_protection() {
+        let root =
+            std::env::temp_dir().join(format!("easycraft-long-move-{}", uuid::Uuid::new_v4()));
+        let nested = root
+            .join("a".repeat(80))
+            .join("b".repeat(80))
+            .join("c".repeat(80));
+        std::fs::create_dir_all(&nested).unwrap();
+        let from = nested.join("library.jar.part");
+        let to = nested.join("library.jar");
+        std::fs::write(&from, b"verified library").unwrap();
+        super::move_no_replace(&from, &to).unwrap();
+        std::fs::write(&from, b"another file").unwrap();
+        assert!(super::move_no_replace(&from, &to).is_err());
+        assert_eq!(std::fs::read(&to).unwrap(), b"verified library");
+        assert_eq!(std::fs::read(&from).unwrap(), b"another file");
+        std::fs::remove_dir_all(root).unwrap();
+    }
     use super::*;
     use std::io::Write;
+    #[test]
+    fn fabric_descriptions_accept_loader_compatible_literal_line_breaks() {
+        let bytes=b"{\"schemaVersion\":1,\"id\":\"fixture\",\"version\":\"1.0\",\"description\":\"first\nsecond\tline\",\"custom\":\"escaped \\\" quote and \\\\ slash\"}";
+        let mut output = zip::ZipWriter::new(Cursor::new(Vec::new()));
+        output
+            .start_file("fabric.mod.json", zip::write::SimpleFileOptions::default())
+            .unwrap();
+        output.write_all(bytes).unwrap();
+        let mut archive =
+            zip::ZipArchive::new(Cursor::new(output.finish().unwrap().into_inner())).unwrap();
+        let metadata = fabric_metadata(&mut archive).unwrap();
+        assert_eq!(metadata["description"], "first\nsecond\tline");
+        assert_eq!(metadata["custom"], "escaped \" quote and \\ slash");
+        assert!(parse_fabric_json(b"{\"id\":\"broken\"").is_err());
+        assert!(parse_fabric_json(b"{\"id\":\"bad\\q\"}").is_err());
+        assert!(parse_fabric_json(b"{\"id\":\"ok\",}").is_err());
+    }
     #[test]
     fn no_overwrite_move_refuses_an_open_directory_and_preserves_existing_target() {
         use std::os::windows::fs::OpenOptionsExt;
@@ -568,6 +772,91 @@ mod tests {
         zip.write_all(br#"{"id":"testmod","name":"Test Mod","version":"1.0"}"#)
             .unwrap();
         zip.finish().unwrap().into_inner()
+    }
+    #[test]
+    fn mod_details_toggle_archive_and_stale_identity_preserve_user_files() {
+        use std::io::Write;
+        let root = root();
+        fs::create_dir_all(root.join("mods")).unwrap();
+        fs::write(root.join("mods/fabric.jar"), jar()).unwrap();
+        fs::write(root.join("mods/unknown.jar"), b"unrecognized").unwrap();
+        let item = list(&root, Kind::Mods)
+            .unwrap()
+            .into_iter()
+            .find(|entry| entry.file == "fabric.jar")
+            .unwrap();
+        let info = details(&root, &item.file, &item.revision).unwrap();
+        assert_eq!(info.information.unwrap().ids, vec!["testmod"]);
+        assert!(details(&root, "../fabric.jar", &item.revision).is_err());
+        let old_metadata = fs::metadata(root.join("mods/fabric.jar")).unwrap();
+        fs::rename(root.join("mods/fabric.jar"), root.join("original.jar")).unwrap();
+        fs::write(root.join("mods/fabric.jar"), jar()).unwrap();
+        fs::File::options()
+            .write(true)
+            .open(root.join("mods/fabric.jar"))
+            .unwrap()
+            .set_times(fs::FileTimes::new().set_modified(old_metadata.modified().unwrap()))
+            .unwrap();
+        assert!(remove_mod(&root, "fabric.jar", &item.revision).is_err());
+        let current = list(&root, Kind::Mods)
+            .unwrap()
+            .into_iter()
+            .find(|entry| entry.file == "fabric.jar")
+            .unwrap();
+        toggle(&root, &current.file, &current.revision, false).unwrap();
+        let disabled = list(&root, Kind::Mods)
+            .unwrap()
+            .into_iter()
+            .find(|entry| entry.file == "fabric.jar.disabled")
+            .unwrap();
+        assert!(!disabled.enabled);
+        let archived = remove_mod(&root, &disabled.file, &disabled.revision).unwrap();
+        assert_eq!(fs::read(&archived).unwrap(), jar());
+        assert!(Path::new(&archived)
+            .parent()
+            .unwrap()
+            .join("restore.json")
+            .is_file());
+        assert!(!root.join("mods/fabric.jar.disabled").exists());
+        let unknown = list(&root, Kind::Mods)
+            .unwrap()
+            .into_iter()
+            .find(|entry| entry.file == "unknown.jar")
+            .unwrap();
+        assert!(remove_mod(&root, &unknown.file, &unknown.revision).is_err());
+        assert!(details(&root, &unknown.file, &unknown.revision)
+            .unwrap()
+            .information
+            .is_none());
+        assert_eq!(
+            fs::read(root.join("mods/unknown.jar")).unwrap(),
+            b"unrecognized"
+        );
+        for (name,path,metadata) in [
+            ("forge.jar","META-INF/mods.toml","modLoader='javafml'\nlicense='MIT'\n[[mods]]\nmodId='forge_fixture'\ndisplayName='Forge fixture'\nversion='1.2.3'"),
+            ("neo.jar","META-INF/neoforge.mods.toml","modLoader='javafml'\n[[mods]]\nmodId='neo_fixture'\ndisplayName='Neo fixture'\nversion='1.2.3'")
+        ] {
+            let mut zip=zip::ZipWriter::new(Cursor::new(vec![]));zip.start_file(path,zip::write::SimpleFileOptions::default()).unwrap();zip.write_all(metadata.as_bytes()).unwrap();
+            fs::write(root.join("mods").join(name),zip.finish().unwrap().into_inner()).unwrap();
+            let item=list(&root,Kind::Mods).unwrap().into_iter().find(|entry|entry.file==name).unwrap();
+            assert!(item.editable);assert_eq!(item.version,"1.2.3");
+            toggle(&root,&item.file,&item.revision,false).unwrap();
+        }
+    }
+    #[test]
+    fn busy_mod_archive_refuses_and_leaves_the_original_in_place() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let root = root();
+        fs::create_dir_all(root.join("mods")).unwrap();
+        fs::write(root.join("mods/locked.jar"), jar()).unwrap();
+        let entry = list(&root, Kind::Mods).unwrap().remove(0);
+        let _handle = fs::OpenOptions::new()
+            .read(true)
+            .share_mode(windows_sys::Win32::Storage::FileSystem::FILE_SHARE_READ)
+            .open(root.join("mods/locked.jar"))
+            .unwrap();
+        assert!(remove_mod(&root, &entry.file, &entry.revision).is_err());
+        assert_eq!(fs::read(root.join("mods/locked.jar")).unwrap(), jar());
     }
     #[test]
     fn pack_formats_check_legacy_ranges_modern_minor_versions_and_backwards_declarations() {
@@ -708,6 +997,8 @@ mod tests {
             &root,
             "instances.json",
             &vec![model::Instance {
+                version_folder: None,
+                storage_root: None,
                 id: id.clone(),
                 name: "Before".into(),
                 version: "1.21.1".into(),

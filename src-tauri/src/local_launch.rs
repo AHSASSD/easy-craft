@@ -174,10 +174,7 @@ pub fn companion_libraries(profile: &Value) -> Result<Vec<String>> {
         .collect()
 }
 pub fn read_profile(root: &Path, instance: &Instance) -> Result<Value> {
-    let path = model::safe_path(
-        root,
-        &format!("instances/{}/local-profile.json", instance.id),
-    )?;
+    let path = model::safe_path(&instance.directory(root)?, "local-profile.json")?;
     if fs::metadata(&path)
         .map_err(|_| "本地启动配置快照缺失，请重新添加版本")?
         .len()
@@ -220,6 +217,295 @@ pub fn read_profile(root: &Path, instance: &Instance) -> Result<Value> {
         return Err("缺少已校验的 1.12.2 原版元数据，无法修复图形库配置".into());
     }
     Ok(profile)
+}
+// Repair processed NeoForge artifacts through its verified official installer, never
+// substitute another loader version or treat a generated client as a CDN download.
+pub async fn repair_neoforge(
+    host: &Host,
+    instance: &Instance,
+    java: &str,
+    cancel: &CancellationToken,
+) -> Result<()> {
+    let local = instance.local.as_ref().ok_or("不是本地实例")?;
+    let source = crate::local_import::checked_directory(Path::new(&local.root))?;
+    let profile = read_profile(&host.root, instance)?;
+    let outputs = companion_libraries(&profile)?;
+    if local.loader != "neoforge"
+        || outputs
+            .iter()
+            .all(|p| source.join("libraries").join(p).is_file())
+    {
+        return Ok(());
+    }
+    let version = &local.loader_version;
+    if version.is_empty()
+        || version.len() > 64
+        || !version
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b".-".contains(&b))
+    {
+        return Err("NeoForge 版本号无效".into());
+    }
+    let base = format!("https://maven.neoforged.net/releases/net/neoforged/neoforge/{version}/neoforge-{version}-installer.jar");
+    host.progress("local-repair", "获取 NeoForge 官方安装器与校验值", 0, 3);
+    let sha1 = crate::net::neoforge_checksum(&host.client, &format!("{base}.sha1"), cancel).await?;
+    let installer = crate::net::neoforge_download(
+        &host.client,
+        &host.root,
+        &crate::net::Artifact {
+            url: base,
+            sha1,
+            size: None,
+            path: format!("downloads/neoforge/{version}-installer.jar"),
+        },
+        cancel,
+    )
+    .await?;
+    let stage = model::safe_path(&host.root, &format!("repair/neoforge/{version}"))?;
+    fs::create_dir_all(&stage).map_err(|_| "无法创建修复暂存目录")?;
+    fs::write(stage.join("launcher_profiles.json"), b"{\"profiles\":{}}")
+        .map_err(|_| "无法初始化修复目录")?;
+    // Only seed named launch libraries, never traverse worlds or launcher accounts.
+    for lib in profile["libraries"].as_array().ok_or("依赖清单缺失")? {
+        let relative = lib["downloads"]["artifact"]["path"]
+            .as_str()
+            .map(str::to_owned)
+            .or_else(|| lib["name"].as_str().and_then(|n| coordinate_path(n).ok()));
+        if let Some(relative) = relative {
+            let from = model::safe_path(&source, &format!("libraries/{relative}"))?;
+            let to = model::safe_path(&stage, &format!("libraries/{relative}"))?;
+            if from.is_file() && !to.exists() {
+                if cancel.is_cancelled() {
+                    return Err("修复已取消".into());
+                }
+                fs::create_dir_all(to.parent().ok_or("修复路径无效")?)
+                    .map_err(|_| "无法创建修复缓存")?;
+                fs::copy(from, to).map_err(|_| "无法复用本地依赖")?;
+            }
+        }
+    }
+    let manifest: Value = {
+        use std::io::Read;
+        let file = fs::File::open(&installer).map_err(|_| "无法读取官方安装器")?;
+        let mut zip = zip::ZipArchive::new(file).map_err(|_| "官方安装器不是有效归档")?;
+        let entry = zip
+            .by_name("install_profile.json")
+            .map_err(|_| "官方安装器清单缺失")?;
+        if entry.size() > 8 * 1024 * 1024 {
+            return Err("安装器清单过大".into());
+        }
+        serde_json::from_reader(entry.take(8 * 1024 * 1024)).map_err(|_| "安装器清单无效")?
+    };
+    let libraries = manifest["libraries"]
+        .as_array()
+        .ok_or("安装器依赖清单缺失")?;
+    if libraries.len() > 2000 {
+        return Err("安装器依赖过多".into());
+    }
+    for (index, lib) in libraries.iter().enumerate() {
+        let value = &lib["downloads"]["artifact"];
+        let url = value["url"].as_str().unwrap_or_default();
+        if url.is_empty() {
+            continue;
+        } // Generated outputs are produced by the processors.
+        let relative = value["path"].as_str().ok_or("安装器依赖路径缺失")?;
+        let artifact = crate::net::Artifact {
+            url: url.into(),
+            sha1: value["sha1"].as_str().ok_or("安装器依赖校验缺失")?.into(),
+            size: value["size"].as_u64(),
+            path: format!("libraries/{relative}"),
+        };
+        host.progress(
+            "local-repair-download",
+            "自动补齐并校验 NeoForge 处理器依赖",
+            index,
+            libraries.len(),
+        );
+        crate::net::installer_library_download(&host.client, &stage, &artifact, cancel).await?;
+    }
+    host.progress(
+        "local-repair",
+        "执行官方 NeoForge 处理器，详情见任务日志",
+        1,
+        3,
+    );
+    let log_path = stage.join("installer-output.log");
+    let log = fs::File::create(&log_path).map_err(|_| "无法创建修复日志")?;
+    let mut child = tokio::process::Command::new(java)
+        .arg("-jar")
+        .arg(installer)
+        .arg("--installClient")
+        .arg(&stage)
+        .current_dir(&stage)
+        .stdout(log.try_clone().map_err(|_| "无法打开修复日志")?)
+        .stderr(log)
+        .kill_on_drop(true)
+        .creation_flags(0x08000000)
+        .spawn()
+        .map_err(|_| "无法启动官方修复处理器")?;
+    let status = tokio::select! {
+        result = child.wait() => result.map_err(|_| "无法读取修复结果")?,
+        _ = cancel.cancelled() => { let _ = child.kill().await; let _ = child.wait().await; return Err("修复已取消".into()); },
+        _ = tokio::time::sleep(std::time::Duration::from_secs(900)) => { let _ = child.kill().await; let _ = child.wait().await; return Err("NeoForge 修复超时，请检查网络后重试".into()); }
+    };
+    host.log(
+        &format!("NeoForge 官方处理器日志：{}", log_path.display()),
+        &[],
+    );
+    if !status.success() {
+        return Err(format!(
+            "NeoForge 官方处理器失败；日志：{}",
+            log_path.display()
+        ));
+    }
+    for relative in outputs {
+        if cancel.is_cancelled() {
+            return Err("修复已取消".into());
+        }
+        commit_repaired_library(&stage, &source, &relative)?;
+    }
+    host.progress(
+        "local-repair",
+        "NeoForge 缺失依赖已补齐，重新检查启动环境",
+        3,
+        3,
+    );
+    Ok(())
+}
+pub async fn repair_downloads(
+    host: &Host,
+    instance: &Instance,
+    cancel: &CancellationToken,
+) -> Result<()> {
+    let local = instance.local.as_ref().ok_or("不是本地实例")?;
+    let source = crate::local_import::checked_directory(Path::new(&local.root))?;
+    let profile = read_profile(&host.root, instance)?;
+    let mut artifacts = vec![];
+    let make = |value: &Value, relative: String| -> Result<crate::net::Artifact> {
+        Ok(crate::net::Artifact {
+            url: value["url"]
+                .as_str()
+                .ok_or("缺失依赖没有官方下载地址")?
+                .into(),
+            sha1: value["sha1"]
+                .as_str()
+                .ok_or("缺失依赖没有官方校验值")?
+                .into(),
+            size: value["size"].as_u64(),
+            path: relative,
+        })
+    };
+    for lib in profile["libraries"].as_array().ok_or("本地依赖清单缺失")? {
+        if !minecraft::allowed(lib.get("rules"))? {
+            continue;
+        }
+        let mut values = vec![&lib["downloads"]["artifact"]];
+        if let Some(native) = lib["natives"]["windows"].as_str() {
+            values.push(&lib["downloads"]["classifiers"][native.replace("${arch}", "64")]);
+        }
+        for value in values {
+            if let Some(path) = value["path"].as_str() {
+                let relative = format!("libraries/{path}");
+                if !model::safe_path(&source, &relative)?.is_file() {
+                    artifacts.push(make(value, relative)?);
+                }
+            }
+        }
+    }
+    if !model::safe_path(&source, &local.client_jar)?.is_file() {
+        artifacts.push(make(
+            &profile["downloads"]["client"],
+            local.client_jar.clone(),
+        )?);
+    }
+    let index = &profile["assetIndex"];
+    let index_id = index["id"].as_str().ok_or("资源索引标识缺失")?;
+    let relative = format!("assets/indexes/{index_id}.json");
+    let index_path = model::safe_path(&source, &relative)?;
+    if !index_path.is_file() {
+        artifacts.push(make(index, relative)?);
+    }
+    for (i, artifact) in artifacts.iter().enumerate() {
+        host.progress(
+            "local-repair-download",
+            "自动补齐并校验游戏启动依赖",
+            i,
+            artifacts.len(),
+        );
+        crate::net::installer_library_download(&host.client, &source, artifact, cancel).await?;
+    }
+    if fs::metadata(&index_path)
+        .map_err(|_| "无法读取资源索引")?
+        .len()
+        > 16 * 1024 * 1024
+    {
+        return Err("资源索引过大".into());
+    }
+    let assets: Value =
+        serde_json::from_slice(&fs::read(index_path).map_err(|_| "无法读取资源索引")?)
+            .map_err(|_| "资源索引损坏，请重新安装资源索引")?;
+    let objects = assets["objects"].as_object().ok_or("资源索引内容无效")?;
+    if objects.len() > 100000 {
+        return Err("资源索引项目过多".into());
+    }
+    for (i, value) in objects.values().enumerate() {
+        if cancel.is_cancelled() {
+            return Err("启动准备已取消".into());
+        }
+        let hash = value["hash"]
+            .as_str()
+            .filter(|s| model::valid_sha1(s))
+            .ok_or("资源哈希无效")?;
+        let relative = format!("assets/objects/{}/{hash}", &hash[..2]);
+        if !model::safe_path(&source, &relative)?.is_file() {
+            host.progress(
+                "local-repair-assets",
+                "自动补齐并校验游戏资源",
+                i,
+                objects.len(),
+            );
+            crate::net::download(
+                &host.client,
+                &source,
+                &crate::net::Artifact {
+                    url: format!(
+                        "https://resources.download.minecraft.net/{}/{hash}",
+                        &hash[..2]
+                    ),
+                    sha1: hash.into(),
+                    size: value["size"].as_u64(),
+                    path: relative,
+                },
+                cancel,
+            )
+            .await?;
+        }
+    }
+    Ok(())
+}
+pub(crate) fn commit_repaired_library(stage: &Path, source: &Path, relative: &str) -> Result<()> {
+    let from = model::safe_path(stage, &format!("libraries/{relative}"))?;
+    let target = model::safe_path(source, &format!("libraries/{relative}"))?;
+    if target.is_file() {
+        return Ok(());
+    }
+    let file = fs::File::open(&from).map_err(|_| format!("官方处理器未生成 {relative}"))?;
+    zip::ZipArchive::new(file).map_err(|_| "修复产物不是有效 JAR")?;
+    fs::create_dir_all(target.parent().ok_or("修复路径无效")?).map_err(|_| "无法创建依赖目录")?;
+    let temporary = target.with_extension(format!("{}.part", uuid::Uuid::new_v4()));
+    let result = (|| {
+        fs::copy(&from, &temporary).map_err(|_| "无法暂存修复依赖".to_string())?;
+        fs::OpenOptions::new()
+            .write(true)
+            .open(&temporary)
+            .and_then(|f| f.sync_all())
+            .map_err(|_| "无法同步修复依赖".to_string())?;
+        crate::content::move_no_replace(&temporary, &target)
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temporary);
+    }
+    result
 }
 pub fn prepare(
     host: &Host,
@@ -303,7 +589,7 @@ pub fn prepare(
         missing.push(format!("assets/indexes/{index}.json"));
     }
     if !missing.is_empty() {
-        return Err(format!("本地安装缺少 {} 项启动依赖：{}。未联网、未修改源目录；请用原启动器修复，或选择独立副本模式。",missing.len(),missing.iter().take(6).cloned().collect::<Vec<_>>().join("；")));
+        return Err(format!("仍缺少 {} 项启动依赖：{}。无法确认来源或尚未支持自动生成的文件不会猜测替代；请核对安装版本与任务日志。",missing.len(),missing.iter().take(6).cloned().collect::<Vec<_>>().join("；")));
     }
     host.progress(
         "local-libraries",
@@ -356,6 +642,7 @@ async fn find_java(
     if let Some(base) = std::env::var_os("APPDATA") {
         let base = PathBuf::from(base);
         roots.extend([
+            base.join(".minecraft/runtime"),
             base.join(".hmcl/java"),
             base.join("PrismLauncher/java"),
             base.join("ModrinthApp/meta/java_versions"),
@@ -529,6 +816,43 @@ mod tests {
             paths[2],
             "net/minecraft/client/1.21.1-20240808.144430/client-1.21.1-20240808.144430-srg.jar"
         );
+    }
+    #[test]
+    fn repaired_libraries_are_validated_and_never_replace_existing_files() {
+        use std::io::Write;
+        let root = std::env::temp_dir().join(format!("easycraft-repair-{}", uuid::Uuid::new_v4()));
+        let stage = root.join("stage");
+        let source = root.join("source");
+        fs::create_dir_all(stage.join("libraries")).unwrap();
+        fs::create_dir_all(&source).unwrap();
+        fs::write(stage.join("libraries/broken.jar"), b"not a jar").unwrap();
+        assert!(commit_repaired_library(&stage, &source, "broken.jar").is_err());
+        assert!(!source.join("libraries/broken.jar").exists());
+        assert!(commit_repaired_library(&stage, &source, "../escape.jar").is_err());
+        let file = fs::File::create(stage.join("libraries/good.jar")).unwrap();
+        let mut zip = zip::ZipWriter::new(file);
+        zip.start_file("test", zip::write::SimpleFileOptions::default())
+            .unwrap();
+        zip.write_all(b"valid").unwrap();
+        zip.finish().unwrap();
+        commit_repaired_library(&stage, &source, "good.jar").unwrap();
+        assert_eq!(
+            fs::read(stage.join("libraries/good.jar")).unwrap(),
+            fs::read(source.join("libraries/good.jar")).unwrap()
+        );
+        fs::write(source.join("libraries/good.jar"), b"keep original").unwrap();
+        commit_repaired_library(&stage, &source, "good.jar").unwrap();
+        assert_eq!(
+            fs::read(source.join("libraries/good.jar")).unwrap(),
+            b"keep original"
+        );
+        assert!(crate::net::neoforge_url("https://maven.neoforged.net/releases/net/neoforged/neoforge/21.1.265/neoforge-21.1.265-installer.jar").is_ok());
+        assert!(
+            crate::net::neoforge_url("https://evil.example/releases/net/neoforged/neoforge/a")
+                .is_err()
+        );
+        assert!(crate::net::neoforge_url("https://maven.neoforged.net/other.jar").is_err());
+        fs::remove_dir_all(root).unwrap();
     }
     #[test]
     fn forge_and_neoforge_inheritance_preserves_base_args_and_replaces_library_versions() {

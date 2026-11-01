@@ -4,7 +4,9 @@ param(
     [Parameter(Mandatory=$true)][string]$JavaPath,
     [Parameter(Mandatory=$true)][string]$Sandbox,
     [Parameter(Mandatory=$true)][string]$Screenshot,
-    [string]$GameDirectory
+    [string]$GameDirectory,
+    [ValidateRange(-1,1)][double]$ClickX = -1,
+    [ValidateRange(-1,1)][double]$ClickY = -1
 )
 $ErrorActionPreference = 'Stop'
 $projectRoot = Split-Path $PSScriptRoot -Parent
@@ -17,7 +19,10 @@ if (!$capturePath.StartsWith($outputRoot, [StringComparison]::OrdinalIgnoreCase)
 $launcher = Get-Process -Id $LauncherProcessId
 if ($launcher.Path -ne (Join-Path $projectRoot 'src-tauri/target/debug/easy-craft.exe')) { throw 'Unexpected parent launcher.' }
 $game = Get-CimInstance Win32_Process -Filter "ProcessId = $GameProcessId"
-if (!$game -or $game.ParentProcessId -ne $LauncherProcessId -or $game.ExecutablePath -ne $JavaPath -or !$game.CommandLine.Contains($resolvedSandbox)) { throw 'Game ownership or sandbox command line did not match.' }
+# Sodium rewrites the OS process title after initialization; parent and executable
+# ownership still identify our child. Only its exact known title is accepted.
+$rewrittenSodiumTitle = $game -and $game.CommandLine.Trim() -eq 'net.caffeinemc.sodium / net.minecraft.client.main.Main /'
+if (!$game -or $game.ParentProcessId -ne $LauncherProcessId -or $game.ExecutablePath -ne $JavaPath -or (!$game.CommandLine.Contains($resolvedSandbox) -and !$rewrittenSodiumTitle)) { throw 'Game ownership or sandbox command line did not match.' }
 $gameProcess = Get-Process -Id $GameProcessId
 $window = $gameProcess.MainWindowHandle
 if ($window -eq [IntPtr]::Zero) { throw 'Game does not have a window yet.' }
@@ -40,9 +45,21 @@ public static class TestGameWindow {
 }
 '@
 [void][TestGameWindow]::SetThreadDpiAwarenessContext([IntPtr](-4))
+if($ClickX -ge 0 -and $ClickY -ge 0){
+    $clientRect=New-Object TestGameWindow+Rect
+    [void][TestGameWindow]::GetClientRect($window,[ref]$clientRect)
+    $mouseX=[int]($clientRect.Right*$ClickX)
+    $mouseY=[int]($clientRect.Bottom*$ClickY)
+    $position=[IntPtr](($mouseY -shl 16) -bor $mouseX)
+    [void][TestGameWindow]::PostMessage($window,0x200,[IntPtr]::Zero,$position)
+    [void][TestGameWindow]::PostMessage($window,0x201,[IntPtr]1,$position)
+    Start-Sleep -Milliseconds 100
+    [void][TestGameWindow]::PostMessage($window,0x202,[IntPtr]::Zero,$position)
+    Start-Sleep -Seconds 3
+}
 if($GameDirectory){
     $gameDirectoryPath=[IO.Path]::GetFullPath($GameDirectory)
-    if(!$gameDirectoryPath.StartsWith($resolvedSandbox+'\',[StringComparison]::OrdinalIgnoreCase) -or !$game.CommandLine.Contains($gameDirectoryPath)){throw 'Unexpected game screenshot directory.'}
+    if(!$gameDirectoryPath.StartsWith($resolvedSandbox+'\',[StringComparison]::OrdinalIgnoreCase) -or (!$game.CommandLine.Contains($gameDirectoryPath) -and !$rewrittenSodiumTitle)){throw 'Unexpected game screenshot directory.'}
     $screenshots=Join-Path $gameDirectoryPath 'screenshots'
     $before=@(Get-ChildItem -LiteralPath $screenshots -File -Filter '*.png' -ErrorAction SilentlyContinue | ForEach-Object {$_.FullName})
     $scan=[long][TestGameWindow]::MapVirtualKey(0x71,0) -shl 16

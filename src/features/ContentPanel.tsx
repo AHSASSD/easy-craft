@@ -10,12 +10,17 @@ import {
   Search,
   ShieldCheck,
   Upload,
+  Info,
+  Power,
+  Trash2,
+  FolderSearch,
 } from 'lucide-react';
 import type {
   ContentEntry,
   ContentKind,
   NativeService,
   ResourcePlan,
+  ModDetails,
 } from '../core/native-contracts';
 import { Modal } from '../components/Modal';
 import { InstallPreflight } from './InstallPreflight';
@@ -49,9 +54,13 @@ export function ContentPanel({
   const [loading, setLoading] = useState(true);
   const [statusFilter, setStatusFilter] = useState('all');
   const [sort, setSort] = useState(kind === 'screenshots' ? 'reverse' : 'name');
-  const [closed, setClosed] = useState(false);
   const [error, setError] = useState('');
   const [message, setMessage] = useState('');
+  const [details, setDetails] = useState<{
+    entry: ContentEntry;
+    value: ModDetails | null;
+  } | null>(null);
+  const [removal, setRemoval] = useState<ContentEntry | null>(null);
   const [localPlan, setLocalPlan] = useState<ResourcePlan | null>(null);
   const [acknowledged, setAcknowledged] = useState(false);
   const [preview, setPreview] = useState<{ file: string; url: string } | null>(
@@ -81,15 +90,25 @@ export function ContentPanel({
       disposed = true;
     };
   }, [service, id, kind, running]);
-  async function run(action: () => Promise<unknown>, success = '') {
+  async function run(
+    action: () => Promise<unknown>,
+    success: string | ((result: unknown) => string) = '',
+    reload = true,
+  ) {
     setBusy(true);
     setError('');
     setMessage('');
     try {
       const result = await action();
-      if (service.snapshot().state?.task.status !== 'running')
+      if (reload && service.snapshot().state?.task.status !== 'running')
         setEntries(await service.content(id, kind));
-      setMessage(result === false ? '' : success);
+      setMessage(
+        result === false
+          ? ''
+          : typeof success === 'function'
+            ? success(result)
+            : success,
+      );
     } catch (error) {
       setError(error instanceof Error ? error.message : '操作失败');
     } finally {
@@ -99,8 +118,8 @@ export function ContentPanel({
   const locked = busy || running || !service.snapshot().available;
   function importFile(file?: File) {
     if (!file) return;
-    if (locked || !closed) {
-      setError('请先退出游戏并勾选“确认内容修改前游戏已关闭”');
+    if (locked) {
+      setError('游戏或任务正在运行，或本地服务暂不可用，请稍后再试');
       return;
     }
     void run(async () => {
@@ -204,7 +223,7 @@ export function ContentPanel({
           )}
         </div>
       </div>
-      {error && !localPlan && (
+      {error && !localPlan && !details && !removal && (
         <p className="notice" role="alert">
           {error}
         </p>
@@ -255,18 +274,8 @@ export function ContentPanel({
       </div>
       {kind !== 'screenshots' && (
         <div className="manager-import-bar">
-          <label className="toggle-row">
-            <span>我已关闭此实例的游戏，允许修改文件</span>
-            <input
-              type="checkbox"
-              aria-label="确认内容修改前游戏已关闭"
-              disabled={locked}
-              checked={closed}
-              onChange={(event) => setClosed(event.target.checked)}
-            />
-          </label>
           <button
-            disabled={locked || !closed}
+            disabled={locked}
             aria-label={`选择本地${titles[kind]}（最大 512 MiB，不覆盖）`}
             onClick={() =>
               void run(async () => {
@@ -292,7 +301,7 @@ export function ContentPanel({
                   type="file"
                   aria-label={`导入本地${titles[kind]}`}
                   accept={kind === 'mods' ? '.jar' : '.zip'}
-                  disabled={locked || !closed}
+                  disabled={locked}
                   onChange={(event) => {
                     const file = event.target.files?.[0];
                     event.target.value = '';
@@ -303,7 +312,8 @@ export function ContentPanel({
               </label>
               <p className="hint">
                 可向此页拖入单个文件，接收进度与取消在底部任务栏。本地导入会验证压缩路径和格式；未知文件保留。模组启停只识别
-                Fabric 模组。外部游戏停留主菜单时无法可靠检测，请先退出。
+                Fabric、Forge 和 NeoForge
+                模组。外部游戏停留主菜单时无法可靠检测，请先退出。
               </p>
             </div>
           </details>
@@ -399,32 +409,105 @@ export function ContentPanel({
                   )}
                 </div>
                 <span className="content-file-size">{size(item.bytes)}</span>
-                {kind === 'mods' && item.editable && (
-                  <label className="toggle-row">
-                    <span>{item.enabled ? '已启用' : '已禁用'}</span>
-                    <input
-                      aria-label={`启用模组 ${item.name}`}
-                      type="checkbox"
-                      disabled={locked || !closed}
-                      checked={item.enabled}
-                      onChange={(event) => {
-                        const enabled = event.target.checked;
+                {kind === 'mods' && (
+                  <div
+                    className="mod-row-actions"
+                    role="group"
+                    aria-label={`${item.name} 快捷操作`}
+                  >
+                    <span className="mod-row-state">
+                      {item.editable
+                        ? item.enabled
+                          ? '已启用'
+                          : '已禁用'
+                        : '只读'}
+                    </span>
+                    <button
+                      type="button"
+                      aria-pressed={item.enabled && item.editable}
+                      aria-label={`${item.enabled ? '禁用' : '启用'}模组 ${item.name}`}
+                      title={
+                        !item.editable
+                          ? '未识别的文件保留为只读'
+                          : item.enabled
+                            ? '禁用模组'
+                            : '启用模组'
+                      }
+                      disabled={locked || !item.editable}
+                      onClick={() =>
                         void run(
                           () =>
                             service.toggleContent(
                               id,
                               item.file,
                               item.revision,
-                              enabled,
+                              !item.enabled,
                             ),
                           '模组状态已更新。',
+                        )
+                      }
+                    >
+                      <Power size={15} />
+                    </button>
+                    <button
+                      type="button"
+                      className="mod-delete"
+                      aria-label={`删除模组 ${item.name}`}
+                      title={
+                        !item.editable ? '未识别的文件保留为只读' : '删除模组'
+                      }
+                      disabled={locked || !item.editable}
+                      onClick={() => {
+                        setError('');
+                        setRemoval(item);
+                      }}
+                    >
+                      <Trash2 size={15} />
+                    </button>
+                    <button
+                      type="button"
+                      aria-label={`查看模组详情 ${item.name}`}
+                      title="查看详情"
+                      disabled={locked}
+                      onClick={() => {
+                        setDetails({ entry: item, value: null });
+                        void run(
+                          async () => {
+                            const value = await service.modDetails(
+                              id,
+                              item.file,
+                              item.revision,
+                            );
+                            setDetails((current) =>
+                              current?.entry.file === item.file
+                                ? { ...current, value }
+                                : current,
+                            );
+                            return false;
+                          },
+                          '',
+                          false,
                         );
                       }}
-                    />
-                  </label>
-                )}
-                {kind === 'mods' && !item.editable && (
-                  <span className="content-state-badge">只读</span>
+                    >
+                      <Info size={15} />
+                    </button>
+                    <button
+                      type="button"
+                      aria-label={`打开模组文件位置 ${item.name}`}
+                      title="打开文件位置"
+                      disabled={locked}
+                      onClick={() =>
+                        void run(
+                          () => service.revealMod(id, item.file, item.revision),
+                          '',
+                          false,
+                        )
+                      }
+                    >
+                      <FolderSearch size={15} />
+                    </button>
+                  </div>
                 )}
               </article>
             ))}
@@ -464,6 +547,120 @@ export function ContentPanel({
           </div>
         )}
       </section>
+      {removal && (
+        <Modal
+          title={`删除模组 · ${removal.name}`}
+          onClose={() => setRemoval(null)}
+        >
+          <p>{removal.file}</p>
+          <p>文件将移入此实例的模组回收区，不会永久删除。</p>
+          {error && (
+            <p role="alert" className="notice">
+              {error}
+            </p>
+          )}
+          <div className="mod-dialog-actions">
+            <button disabled={busy} onClick={() => setRemoval(null)}>
+              取消
+            </button>
+            <button
+              className="mod-delete"
+              disabled={locked}
+              onClick={() =>
+                void run(
+                  async () => {
+                    const location = await service.removeMod(
+                      id,
+                      removal.file,
+                      removal.revision,
+                    );
+                    setRemoval(null);
+                    return location;
+                  },
+                  (location) => `模组已删除，回收文件：${String(location)}`,
+                )
+              }
+            >
+              确认删除模组
+            </button>
+          </div>
+        </Modal>
+      )}
+      {details && (
+        <Modal
+          title={`模组详情 · ${details.entry.name}`}
+          onClose={() => setDetails(null)}
+        >
+          {error ? (
+            <p role="alert" className="notice">
+              {error}
+            </p>
+          ) : !details.value ? (
+            <p role="status">正在读取本地模组信息…</p>
+          ) : (
+            <section className="mod-details">
+              <dl>
+                <dt>版本</dt>
+                <dd>{details.value.entry.version || '未提供'}</dd>
+                <dt>加载器</dt>
+                <dd>{details.value.information?.loader || '未识别'}</dd>
+                <dt>模组 ID</dt>
+                <dd>{details.value.information?.ids.join('、') || '未提供'}</dd>
+                <dt>作者</dt>
+                <dd>
+                  {details.value.information?.authors.join('、') || '未提供'}
+                </dd>
+                <dt>许可证</dt>
+                <dd>{details.value.information?.license || '未提供'}</dd>
+                <dt>文件大小</dt>
+                <dd>{size(details.value.entry.bytes)}</dd>
+                <dt>文件位置</dt>
+                <dd>{details.value.path}</dd>
+              </dl>
+              {details.value.note && (
+                <p className="notice">{details.value.note}</p>
+              )}
+              {details.value.information?.description && (
+                <p className="mod-description">
+                  {details.value.information.description}
+                </p>
+              )}
+              {!!details.value.information?.dependencies.length && (
+                <details>
+                  <summary>
+                    声明的依赖 · {details.value.information.dependencies.length}{' '}
+                    项
+                  </summary>
+                  <ul>
+                    {details.value.information.dependencies.map(
+                      (dependency, index) => (
+                        <li key={index}>{dependency}</li>
+                      ),
+                    )}
+                  </ul>
+                </details>
+              )}
+              <button
+                disabled={locked}
+                onClick={() =>
+                  void run(
+                    () =>
+                      service.revealMod(
+                        id,
+                        details.entry.file,
+                        details.entry.revision,
+                      ),
+                    '',
+                    false,
+                  )
+                }
+              >
+                <FolderSearch size={15} /> 打开文件位置
+              </button>
+            </section>
+          )}
+        </Modal>
+      )}
       {preview && (
         <Modal title={preview.file} onClose={() => setPreview(null)}>
           <img
@@ -507,7 +704,6 @@ export function ContentPanel({
           <button
             disabled={
               locked ||
-              !closed ||
               !localPlan.preflight ||
               (!!localPlan.preflight.issues.length && !acknowledged)
             }

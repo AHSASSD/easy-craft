@@ -53,6 +53,79 @@ pub struct Status {
     pub login_code: Option<DeviceCode>,
 }
 impl Host {
+    pub async fn prepare_java(&self, id: &str) -> Result<minecraft::JavaInfo> {
+        let state = self.status();
+        let instance = state
+            .instances
+            .iter()
+            .find(|v| v.id == id)
+            .ok_or("实例不存在")?;
+        if instance.launch.java_path.is_some() {
+            return Err("已指定实例 Java，请手动核对该路径".into());
+        }
+        let settings = instance.launch.resolve(&state.settings);
+        let cancel = self.begin_task("自动准备兼容 Java")?;
+        let result =
+            crate::java_runtime::ensure(self, instance, &settings.java_path, &cancel).await;
+        if let Err(error) = &result {
+            self.log(error, &[]);
+        }
+        self.finish(result.as_ref().map(|_| ()).map_err(Clone::clone), &cancel);
+        result
+    }
+    /// Check the same Java selection used by launch, without creating a game task.
+    pub async fn instance_java(&self, id: &str) -> Result<minecraft::JavaInfo> {
+        let state = self.status();
+        if state.task.status == "running" {
+            return Err("请先结束游戏或当前任务".into());
+        }
+        let instance = state
+            .instances
+            .iter()
+            .find(|v| v.id == id)
+            .ok_or("实例不存在")?;
+        let settings = instance.launch.resolve(&state.settings);
+        resolve_java(instance, &settings.java_path, &self.root).await
+    }
+    pub async fn install_translation(&self, id: &str) -> Result<crate::translation::Report> {
+        let cancel = self.begin_task("匹配并安装当前实例汉化")?;
+        let result: Result<crate::translation::Report> = async {
+            let instance = self
+                .status()
+                .instances
+                .into_iter()
+                .find(|v| v.id == id)
+                .ok_or("实例不存在")?;
+            let report = crate::translation::install(self, &instance, &cancel).await?;
+            let mut inner = self.inner.lock().map_err(|_| "宿主状态不可用")?;
+            inner.task.phase = "translation-committed".into();
+            inner.task.message = format!(
+                "汉化已导入并启用：{} 个资源命名空间匹配，{} 个未在 CFPA 中匹配",
+                report.matched.len(),
+                report.unmatched.len()
+            );
+            Ok(report)
+        }
+        .await;
+        if let Err(error) = &result {
+            self.log(error, &[]);
+        }
+        self.finish(result.as_ref().map(|_| ()).map_err(Clone::clone), &cancel);
+        result
+    }
+    pub(crate) fn plugin_task<T>(
+        &self,
+        message: &str,
+        action: impl FnOnce(&CancellationToken) -> Result<T>,
+    ) -> Result<T> {
+        let cancel = self.begin_task(message)?;
+        let result = action(&cancel);
+        if let Err(error) = &result {
+            self.log(error, &[]);
+        }
+        self.finish(result.as_ref().map(|_| ()).map_err(Clone::clone), &cancel);
+        result
+    }
     pub async fn save_resource(
         &self,
         directory: &Path,
@@ -103,7 +176,20 @@ impl Host {
                 .as_u64()
                 .filter(|v| *v <= 512 * 1024 * 1024)
                 .ok_or("资源超过 512 MiB")?;
-            let cached = net::resource_download(
+            let observer = |update| {
+                let bytes = match update {
+                    net::TransferUpdate::Bytes(bytes) => bytes,
+                    net::TransferUpdate::Cached | net::TransferUpdate::Verified => size,
+                    net::TransferUpdate::Retrying(_) => return,
+                };
+                self.progress(
+                    "resource-export",
+                    "下载并校验原始归档（仅保存）",
+                    bytes as usize,
+                    size as usize,
+                );
+            };
+            let cached = net::resource_download_observed(
                 &self.client,
                 &self.root,
                 &net::Artifact {
@@ -113,6 +199,7 @@ impl Host {
                     size: Some(size),
                 },
                 &cancel,
+                &observer,
             )
             .await?;
             if crate::resource_install::sum(&cached)? != sha512 {
@@ -167,7 +254,10 @@ impl Host {
             .map_err(|_| "无法锁定启动器数据目录")?;
         lock.try_lock()
             .map_err(|_| "此数据目录已由另一个 Easy Craft 使用，请先关闭已有窗口")?;
-        let settings: Settings = model::load_json(&root, "settings.json")?;
+        let mut settings: Settings = model::load_json(&root, "settings.json")?;
+        if settings.client_id.is_empty() {
+            settings.client_id = Settings::default().client_id;
+        }
         if !(512..=16384).contains(&settings.memory_mb)
             || (!settings.client_id.is_empty() && !auth::valid_client(&settings.client_id))
             || (!settings.offline_name.is_empty()
@@ -426,6 +516,22 @@ impl Host {
                 .cloned()
                 .ok_or("实例不存在")?
         };
+        self.check_instance_mods(&instance, force)
+    }
+    pub(crate) fn plugin_mod_check(&self, id: &str) -> Result<crate::resource_install::ModCheck> {
+        let instance = self
+            .status()
+            .instances
+            .into_iter()
+            .find(|i| i.id == id)
+            .ok_or("实例不存在")?;
+        self.check_instance_mods(&instance, false)
+    }
+    fn check_instance_mods(
+        &self,
+        instance: &Instance,
+        force: bool,
+    ) -> Result<crate::resource_install::ModCheck> {
         let root = instance.game_path(&self.root)?;
         if !root.is_dir() {
             return Err("实例游戏目录不存在".into());
@@ -433,7 +539,7 @@ impl Host {
         self.mod_checks
             .lock()
             .map_err(|_| "检查缓存不可用")?
-            .check(&self.root, &root, &instance, force)
+            .check(&self.root, &root, instance, force)
     }
     pub fn rename_instance(&self, id: &str, name: &str) -> Result<()> {
         let name = name.trim();
@@ -453,6 +559,98 @@ impl Host {
         model::save_json(&self.root, "instances.json", &instances)?;
         inner.instances = instances;
         Ok(())
+    }
+    pub fn remove_instance(&self, id: &str, archive: bool) -> Result<Option<String>> {
+        let mut inner = self.inner.lock().map_err(|_| "宿主状态不可用")?;
+        if inner.cancel.is_some() || inner.auth_cancel.is_some() {
+            return Err("请先结束游戏、任务或登录".into());
+        }
+        let instance = inner
+            .instances
+            .iter()
+            .find(|v| v.id == id)
+            .ok_or("实例不存在")?;
+        if uuid::Uuid::parse_str(id).is_err() {
+            return Err("实例 ID 无效".into());
+        }
+        let directory = if let Some(local) = &instance.local {
+            if local.version_directory.starts_with("versions/")
+                && local.version_directory.split('/').count() == 2
+            {
+                model::safe_path(Path::new(&local.root), &local.version_directory)?
+            } else {
+                instance.directory(&self.root)?
+            }
+        } else {
+            instance.directory(&self.root)?
+        };
+        let target = if archive {
+            if instance.version_folder.is_none()
+                && instance.local.as_ref().is_some_and(|v| {
+                    Path::new(&v.root) != self.root
+                        || v.version_directory != format!("instances/{id}/game")
+                })
+                && !instance.local.as_ref().is_some_and(|v| {
+                    v.version_directory.starts_with("versions/")
+                        && v.version_directory.split('/').count() == 2
+                })
+            {
+                return Err("此引用没有独立版本目录，只能移出记录".into());
+            }
+            let prefix = directory
+                .to_string_lossy()
+                .replace('\\', "/")
+                .to_lowercase();
+            if inner.instances.iter().filter(|v| v.id != id).any(|v| {
+                let uses_client = v.local.as_ref().is_some_and(|l| {
+                    model::safe_path(Path::new(&l.root), &l.client_jar).is_ok_and(|p| {
+                        let p = p.to_string_lossy().replace('\\', "/").to_lowercase();
+                        p.starts_with(&(prefix.clone() + "/"))
+                    })
+                });
+                if uses_client {
+                    return true;
+                }
+                v.game_path(&self.root).is_ok_and(|p| {
+                    let p = p.to_string_lossy().replace('\\', "/").to_lowercase();
+                    p == prefix || p.starts_with(&(prefix.clone() + "/"))
+                })
+            }) {
+                return Err("其他实例仍在使用此目录，请先只移出游戏库".into());
+            }
+            if !directory.is_dir() {
+                return Err("实例目录缺失，请取消勾选文件清理后移出游戏库".into());
+            }
+            Some(directory.clone())
+        } else {
+            None
+        };
+        let current: Vec<Instance> = model::load_json(&self.root, "instances.json")?;
+        if current != inner.instances {
+            return Err("实例清单已被外部修改，请重新打开启动器".into());
+        }
+        let updated: Vec<_> = inner
+            .instances
+            .iter()
+            .filter(|v| v.id != id)
+            .cloned()
+            .collect();
+        // Commit the catalog first: interruption can leave retained files, never a missing live instance.
+        model::save_json(&self.root, "instances.json", &updated)?;
+        if let Some(target) = &target {
+            if let Err(error) = crate::plugins::recycle_file(target) {
+                if model::save_json(&self.root, "instances.json", &current).is_err() {
+                    inner.instances = updated;
+                    return Err(format!(
+                        "实例已移出游戏库，原文件仍在 {}；回收和恢复清单失败：{error}",
+                        directory.display()
+                    ));
+                }
+                return Err(format!("无法移入回收区，实例和原文件已保留：{error}"));
+            }
+        }
+        inner.instances = updated;
+        Ok(target.map(|p| p.to_string_lossy().into_owned()))
     }
     pub fn progress(&self, phase: &str, message: &str, completed: usize, total: usize) {
         let mut inner = self.inner.lock().expect("host state poisoned");
@@ -498,7 +696,7 @@ impl Host {
         inner.task.completed = completed;
         inner.task.total = total;
     }
-    fn log(&self, line: &str, secrets: &[String]) {
+    pub(crate) fn log(&self, line: &str, secrets: &[String]) {
         let mut inner = self.inner.lock().expect("host state poisoned");
         inner.task.logs.push(model::redact(line, secrets));
         if inner.task.logs.len() > 200 {
@@ -543,7 +741,7 @@ impl Host {
         &self,
         id: String,
         expected: model::LaunchOverrides,
-        launch: model::LaunchOverrides,
+        mut launch: model::LaunchOverrides,
     ) -> Result<()> {
         launch.validate()?;
         let instance = self
@@ -560,6 +758,13 @@ impl Host {
                     instance.java_major, java.major
                 ));
             }
+            if launch
+                .java_version
+                .is_some_and(|version| version != java.major)
+            {
+                return Err("Java 版本记录与实际运行时不符".into());
+            }
+            launch.java_version = Some(java.major);
         }
         let mut inner = self.inner.lock().map_err(|_| "宿主状态不可用")?;
         if inner.cancel.is_some() || inner.auth_cancel.is_some() {
@@ -580,7 +785,12 @@ impl Host {
         let previous_isolated = item.isolated();
         item.launch = launch;
         let directory_changed = previous_isolated != item.isolated();
-        if item.local.is_none() {
+        if item.version_folder.is_some()
+            || item.local.as_ref().is_none_or(|local| {
+                Path::new(&local.root) == self.root
+                    && local.version_directory == format!("instances/{id}/game")
+            })
+        {
             fs::create_dir_all(item.game_path(&self.root)?).map_err(|_| "无法创建所选游戏目录")?;
         } else if directory_changed && !item.game_path(&self.root)?.is_dir() {
             return Err("原安装目录不可用，未修改隔离设置".into());
@@ -624,6 +834,9 @@ impl Host {
                 "resources-committed",
                 "pack-committed",
                 "local-import-committed",
+                "plugin-committed",
+                "translation-committed",
+                "java-committed",
             ]
             .contains(&inner.task.phase.as_str());
         let cancelled = cancel.is_cancelled() && !committed;
@@ -646,8 +859,15 @@ impl Host {
             .into()
         } else {
             result.err().unwrap_or_else(|| {
-                if ["local-import-committed", "resource-export-committed"]
-                    .contains(&inner.task.phase.as_str())
+                if [
+                    "local-import-committed",
+                    "resource-export-committed",
+                    "pack-committed",
+                    "plugin-committed",
+                    "translation-committed",
+                    "java-committed",
+                ]
+                .contains(&inner.task.phase.as_str())
                 {
                     return inner.task.message.clone();
                 }
@@ -1264,9 +1484,28 @@ impl Host {
                 .filter(|plan| plan.token == token)
                 .ok_or("整合包计划无效或已被替换，请重新检查")?;
             crate::modpack::check_selection(plan, &selected)?;
+            if let Some(directory) = &plan.storage_root {
+                crate::local_import::checked_directory(Path::new(directory))?;
+            }
             inner.pack_plan.take().ok_or("整合包计划不可用")?
         };
         let cancel = self.begin_task("准备整合包新实例")?;
+        {
+            let mut inner = self.inner.lock().map_err(|_| "宿主不可用")?;
+            let mut stages = vec![];
+            if !plan.curse_files.is_empty() {
+                stages.push("resolve");
+            }
+            stages.push("base");
+            if !plan.fabric_version.is_empty()
+                || !plan.forge_version.is_empty()
+                || !plan.neoforge_version.is_empty()
+            {
+                stages.push("loader");
+            }
+            stages.extend(["content", "files", "check", "publish"]);
+            inner.task.planned_stages = stages.into_iter().map(String::from).collect();
+        }
         self.inner
             .lock()
             .map_err(|_| "宿主不可用")?
@@ -1290,35 +1529,32 @@ impl Host {
                             Some(plan.fabric_version.clone())
                         },
                         &cancel,
-                        !plan.forge_version.is_empty(),
+                        !plan.forge_version.is_empty() && plan.game_version == "1.12.2",
                     )
                     .await?;
                 instance.launch.game_isolation = Some(true);
-                let profile = if !plan.forge_version.is_empty() {
-                    let profile = crate::pack_download::legacy_forge(
-                        &host,
-                        &plan.game_version,
-                        &plan.forge_version,
-                        &prepared.metadata,
-                        &cancel,
+                instance.storage_root = plan.storage_root.clone();
+                let loader_kind = if !plan.neoforge_version.is_empty() {
+                    "neoforge"
+                } else {
+                    "forge"
+                };
+                let loader_version = if loader_kind == "neoforge" {
+                    &plan.neoforge_version
+                } else {
+                    &plan.forge_version
+                };
+                let profile = if !loader_version.is_empty() {
+                    Some(
+                        host.apply_loader(
+                            &mut instance,
+                            &prepared.metadata,
+                            loader_kind,
+                            loader_version,
+                            &cancel,
+                        )
+                        .await?,
                     )
-                    .await?;
-                    use sha1::Digest;
-                    let bytes = serde_json::to_vec(&profile).map_err(|_| "配置序列化失败")?;
-                    instance.manifest_sha1 = sha1::Sha1::digest(&bytes)
-                        .iter()
-                        .map(|b| format!("{b:02x}"))
-                        .collect();
-                    instance.local = Some(model::LocalInstallation {
-                        root: host.root.to_string_lossy().into(),
-                        version_directory: format!("instances/{}/game", instance.id),
-                        game_directory: format!("instances/{}/game", instance.id),
-                        client_jar: format!("versions/{}/client.jar", instance.version),
-                        source_key: uuid::Uuid::new_v4().simple().to_string().repeat(2),
-                        loader: "forge".into(),
-                        loader_version: plan.forge_version.clone(),
-                    });
-                    Some(bytes)
                 } else {
                     None
                 };
@@ -1335,14 +1571,33 @@ impl Host {
                     )?;
                 }
                 crate::modpack::stage(&host, &plan, transaction, &selected, &cancel).await?;
+                crate::modpack::initialize_language(&host.root, transaction, &cancel)?;
                 host.progress("pack-publish", "提交完整实例到游戏库", 0, 1);
+                let previous = host.status().instances;
+                let updated = crate::modpack::publish(&host.root, transaction, &previous, &cancel)?;
+                let (installed, location) = {
+                    let mut inner = host.inner.lock().map_err(|_| "宿主状态不可用")?;
+                    inner.instances = updated;
+                    inner.task.phase = "pack-committed".into();
+                    inner.task.completed = plan.files.len();
+                    inner.task.total = plan.files.len();
+                    inner.task.pending_instance = None;
+                    let installed = inner.instances.last().ok_or("已安装实例记录缺失")?.clone();
+                    let location = installed.game_path(&host.root)?;
+                    inner
+                        .task
+                        .logs
+                        .push(format!("整合包安装位置：{}", location.display()));
+                    inner.task.message = format!("安装完成：{}", location.display());
+                    (installed, location)
+                };
+                let translation =
+                    crate::translation::after_pack_install(&host, &installed, &cancel).await;
                 let mut inner = host.inner.lock().map_err(|_| "宿主状态不可用")?;
-                inner.instances =
-                    crate::modpack::publish(&host.root, transaction, &inner.instances, &cancel)?;
                 inner.task.phase = "pack-committed".into();
-                inner.task.completed = plan.files.len();
-                inner.task.total = plan.files.len();
-                inner.task.pending_instance = None;
+                inner.task.message = format!("安装完成：{}；{translation}", location.display());
+                inner.task.completed = 1;
+                inner.task.total = 1;
                 Ok(())
             }
             .await;
@@ -1358,6 +1613,149 @@ impl Host {
             } else {
                 Ok(())
             };
+            if let Err(error) = &result {
+                host.log(error, &[]);
+            }
+            host.finish(result, &cancel);
+        });
+        Ok(())
+    }
+    pub fn pack_destination(
+        &self,
+        token: &str,
+        directory: Option<&Path>,
+    ) -> Result<Option<String>> {
+        let selected = directory
+            .map(crate::local_import::checked_directory)
+            .transpose()?;
+        let mut inner = self.inner.lock().map_err(|_| "宿主状态不可用")?;
+        if inner.cancel.is_some() || inner.auth_cancel.is_some() {
+            return Err("请先结束当前任务或登录".into());
+        }
+        let plan = inner
+            .pack_plan
+            .as_mut()
+            .filter(|plan| plan.token == token)
+            .ok_or("整合包预览已变化，请重新选择版本")?;
+        plan.storage_root = selected.map(|path| path.to_string_lossy().into_owned());
+        Ok(plan.storage_root.clone())
+    }
+    async fn apply_loader(
+        &self,
+        instance: &mut Instance,
+        base: &serde_json::Value,
+        kind: &str,
+        loader: &str,
+        cancel: &CancellationToken,
+    ) -> Result<Vec<u8>> {
+        let profile = if instance.version == "1.12.2" && kind == "forge" {
+            crate::pack_download::legacy_forge(self, &instance.version, loader, base, cancel)
+                .await?
+        } else {
+            let java = crate::java_runtime::ensure(
+                self,
+                instance,
+                &self.status().settings.java_path,
+                cancel,
+            )
+            .await?;
+            crate::loader_install::install(self, loader, kind, &java.path, base, cancel).await?
+        };
+        use sha1::Digest;
+        let bytes = serde_json::to_vec(&profile).map_err(|_| "加载器配置序列化失败")?;
+        instance.manifest_sha1 = sha1::Sha1::digest(&bytes)
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
+        instance.local = Some(model::LocalInstallation {
+            root: self.root.to_string_lossy().into(),
+            version_directory: format!("instances/{}/game", instance.id),
+            game_directory: format!("instances/{}/game", instance.id),
+            client_jar: format!("versions/{}/client.jar", instance.version),
+            source_key: uuid::Uuid::new_v4().simple().to_string().repeat(2),
+            loader: kind.into(),
+            loader_version: loader.into(),
+        });
+        Ok(bytes)
+    }
+    pub fn start_install_forge(
+        self: &Arc<Self>,
+        game: String,
+        name: String,
+        loader: String,
+    ) -> Result<()> {
+        if !model::valid_id(&game)
+            || !crate::forge::valid_loader(&loader)
+            || name.trim().is_empty()
+            || name.chars().count() > 60
+            || name.chars().any(char::is_control)
+        {
+            return Err("游戏、加载器版本或实例名称无效".into());
+        }
+        let cancel = self.begin_task("准备安装 Forge 客户端")?;
+        self.inner
+            .lock()
+            .map_err(|_| "宿主不可用")?
+            .task
+            .planned_stages = vec!["base".into(), "loader".into(), "publish".into()];
+        self.inner
+            .lock()
+            .map_err(|_| "宿主状态不可用")?
+            .task
+            .pending_instance = Some(name.clone());
+        let host = self.clone();
+        tauri::async_runtime::spawn(async move {
+            let mut transaction = None;
+            let result = async {
+                let legacy = game == "1.12.2";
+                let (mut instance, base) = host
+                    .prepare_instance(game, name, None, &cancel, legacy)
+                    .await?;
+                instance.launch.game_isolation = Some(true);
+                let bytes = host
+                    .apply_loader(&mut instance, &base.metadata, "forge", &loader, &cancel)
+                    .await?;
+                transaction = Some(crate::modpack::begin_instance(
+                    &host.root,
+                    &uuid::Uuid::new_v4().to_string(),
+                    instance,
+                )?);
+                let tx = transaction.as_mut().ok_or("Forge 安装事务缺失")?;
+                crate::modpack::copy(
+                    &host.root,
+                    tx,
+                    "local-profile.json",
+                    bytes.as_slice(),
+                    None,
+                    &cancel,
+                )?;
+                // Even a mod-free Forge instance needs a real isolated game directory.
+                crate::modpack::ensure_game(&host.root, tx)?;
+                crate::modpack::initialize_language(&host.root, tx, &cancel)?;
+                let mut inner = host.inner.lock().map_err(|_| "宿主状态不可用")?;
+                inner.instances =
+                    crate::modpack::publish(&host.root, tx, &inner.instances, &cancel)?;
+                inner.task.phase = "pack-committed".into();
+                inner.task.pending_instance = None;
+                let location = inner
+                    .instances
+                    .last()
+                    .ok_or("实例提交记录缺失")?
+                    .game_path(&host.root)?;
+                inner.task.message = format!("Forge 安装完成：{}", location.display());
+                let message = inner.task.message.clone();
+                inner.task.logs.push(message);
+                Ok(())
+            }
+            .await;
+            let result = result.map_err(|error: String| {
+                if let Some(tx) = &transaction {
+                    if let Err(cleanup) = crate::modpack::rollback(&host.root, tx) {
+                        return format!("{error}；暂存数据保留：{cleanup}");
+                    }
+                }
+                error
+            });
             if let Err(error) = &result {
                 host.log(error, &[]);
             }
@@ -1422,7 +1820,9 @@ impl Host {
         if cancel.is_cancelled() {
             return Err("操作已取消".into());
         }
-        let instance = Instance {
+        let mut instance = Instance {
+            version_folder: None,
+            storage_root: None,
             local: None,
             id: uuid::Uuid::new_v4().to_string(),
             name: name.trim().into(),
@@ -1436,6 +1836,7 @@ impl Host {
                 ..Default::default()
             },
         };
+        instance.use_versions_layout();
         Ok((instance, prepared))
     }
     async fn install(
@@ -1454,7 +1855,9 @@ impl Host {
             &format!("instances/{}/natives", instance.id),
         )?;
         let game = instance.game_path(&self.root)?;
-        fs::create_dir_all(game).map_err(|_| "无法创建隔离实例目录")?;
+        fs::create_dir_all(instance.directory(&self.root)?).map_err(|_| "无法创建版本目录")?;
+        fs::create_dir_all(&game).map_err(|_| "无法创建隔离实例目录")?;
+        crate::worlds::initialize_options(&game, &instance.version)?;
         if cancel.is_cancelled() {
             return Err("操作已取消".into());
         }
@@ -1514,18 +1917,12 @@ impl Host {
             &format!("本次游戏最大堆内存：{} MB", settings.memory_mb),
             &[],
         );
-        let java = if instance.local.is_some() && instance.launch.java_path.is_none() {
-            crate::local_launch::java_for(&instance, &settings.java_path, &self.root).await?
+        let java = if instance.launch.java_path.is_none() {
+            crate::java_runtime::ensure(self, &instance, &settings.java_path, cancel).await?
         } else {
-            minecraft::probe_java(&settings.java_path).await?
+            resolve_java(&instance, &settings.java_path, &self.root).await?
         };
         settings.java_path = java.path.clone();
-        if !java.is_64_bit || java.major != instance.java_major {
-            return Err(format!(
-                "该实例需要 64 位 Java {}，当前为 Java {}",
-                instance.java_major, java.major
-            ));
-        }
         let (profile, token) = if settings.launch_mode == model::LaunchMode::Offline {
             (model::offline_profile(&settings.offline_name)?, "0".into())
         } else {
@@ -1542,6 +1939,15 @@ impl Host {
             release_time: String::new(),
         };
         let mut prepared = if instance.local.is_some() {
+            crate::local_launch::repair_downloads(self, &instance, cancel).await?;
+            if instance
+                .local
+                .as_ref()
+                .is_some_and(|v| v.loader == "neoforge")
+            {
+                crate::local_launch::repair_neoforge(self, &instance, &settings.java_path, cancel)
+                    .await?;
+            }
             crate::local_launch::prepare(self, &instance, cancel)?
         } else {
             minecraft::prepare(self, &entry, cancel).await?
@@ -1777,6 +2183,25 @@ async fn capture<R: AsyncRead + Unpin>(
         }
     }
 }
+async fn resolve_java(
+    instance: &Instance,
+    configured: &str,
+    root: &Path,
+) -> Result<minecraft::JavaInfo> {
+    let java = if instance.launch.java_path.is_none() {
+        crate::local_launch::java_for(instance, configured, root).await?
+    } else {
+        minecraft::probe_java(configured).await?
+    };
+    if !java.is_64_bit || java.major != instance.java_major {
+        return Err(format!(
+            "该实例需要 64 位 Java {}，当前为 Java {}",
+            instance.java_major, java.major
+        ));
+    }
+    Ok(java)
+}
+
 pub fn default_root() -> Result<PathBuf> {
     if let Some(path) = std::env::var_os("EASYCRAFT_DATA_DIR") {
         return Ok(PathBuf::from(path));
@@ -1803,6 +2228,200 @@ pub fn find_java() -> Option<String> {
 #[cfg(test)]
 mod capture_tests {
     use super::*;
+    #[tokio::test]
+    async fn java_preflight_is_read_only_and_honors_explicit_paths() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../.native/tests")
+            .join(uuid::Uuid::new_v4().to_string());
+        let id = uuid::Uuid::new_v4().to_string();
+        let item: Instance = serde_json::from_value(serde_json::json!({"id":id,"name":"Java preflight","version":"1.21.1","manifestSha1":"a".repeat(40),"javaMajor":21,"launch":{"javaPath":"Z:/missing-easycraft-fixture/java.exe"}})).unwrap();
+        model::save_json(&root, "instances.json", &vec![item]).unwrap();
+        let host = Host::new(root.clone()).unwrap();
+        let before = fs::read(root.join("instances.json")).unwrap();
+        assert!(host.instance_java("missing").await.is_err());
+        assert!(host
+            .instance_java(&id)
+            .await
+            .err()
+            .unwrap()
+            .contains("java.exe"));
+        assert_eq!(host.status().task.status, "idle");
+        assert_eq!(fs::read(root.join("instances.json")).unwrap(), before);
+    }
+    #[test]
+    fn custom_library_removal_uses_its_own_archive_and_preserves_other_files() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../.native/tests")
+            .join(uuid::Uuid::new_v4().to_string());
+        let selected = root.join("selected");
+        fs::create_dir_all(&selected).unwrap();
+        let id = uuid::Uuid::new_v4().to_string();
+        let item: Instance = serde_json::from_value(serde_json::json!({"id":id,"name":"Selected location","version":"1.21.1","manifestSha1":"a".repeat(40),"javaMajor":21,"storageRoot":selected.to_string_lossy()})).unwrap();
+        model::write_file(
+            &selected,
+            &format!("instances/{id}/game/options.txt"),
+            b"game settings",
+        )
+        .unwrap();
+        fs::write(selected.join("keep.txt"), b"unrelated").unwrap();
+        model::save_json(&root, "instances.json", &vec![item]).unwrap();
+        let host = Host::new(root.clone()).unwrap();
+        let archived = host.remove_instance(&id, true).unwrap().unwrap();
+        let archive = PathBuf::from(archived);
+        assert!(!archive.exists());
+        assert_eq!(fs::read(selected.join("keep.txt")).unwrap(), b"unrelated");
+        assert!(host.status().instances.is_empty());
+    }
+    #[test]
+    fn pack_destination_is_bound_to_current_preview_and_can_reset_without_writing_content() {
+        use std::io::Write;
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../.native/tests")
+            .join(uuid::Uuid::new_v4().to_string());
+        let selected = root.join("chosen");
+        fs::create_dir_all(&selected).unwrap();
+        let host = Host::new(root.clone()).unwrap();
+        let mut zip = zip::ZipWriter::new(std::io::Cursor::new(vec![]));
+        zip.start_file(
+            "modrinth.index.json",
+            zip::write::SimpleFileOptions::default(),
+        )
+        .unwrap();
+        zip.write_all(br#"{"formatVersion":1,"game":"minecraft","name":"Destination test","versionId":"1","dependencies":{"minecraft":"1.21.1"},"files":[]}"#).unwrap();
+        let bytes = zip.finish().unwrap().into_inner();
+        let preview = host
+            .pack_preview(crate::modpack::inspect(&root, bytes.as_slice()).unwrap())
+            .unwrap();
+        let token = preview.install.unwrap().token;
+        assert!(host
+            .pack_destination("stale-token", Some(&selected))
+            .is_err());
+        let chosen = host
+            .pack_destination(&token, Some(&selected))
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            PathBuf::from(chosen).canonicalize().unwrap(),
+            selected.canonicalize().unwrap()
+        );
+        assert_eq!(fs::read_dir(&selected).unwrap().count(), 0);
+        assert!(host.pack_destination(&token, None).unwrap().is_none());
+        let cancel = host.begin_task("Busy fixture").unwrap();
+        assert!(host.pack_destination(&token, Some(&selected)).is_err());
+        host.finish(Ok(()), &cancel);
+    }
+    #[test]
+    fn instance_removal_archives_owned_data_and_preserves_references_and_busy_instances() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../.native/tests")
+            .join(uuid::Uuid::new_v4().to_string());
+        fs::create_dir_all(&root).unwrap();
+        let id = uuid::Uuid::new_v4().to_string();
+        let item = Instance {
+            version_folder: None,
+            storage_root: None,
+            id: id.clone(),
+            name: "Owned".into(),
+            version: "1.21.1".into(),
+            manifest_sha1: "a".repeat(40),
+            java_major: 21,
+            fabric_version: String::new(),
+            fabric_sha1: String::new(),
+            launch: Default::default(),
+            local: None,
+        };
+        model::save_json(&root, "instances.json", &vec![item.clone()]).unwrap();
+        model::write_file(
+            &root,
+            &format!("instances/{id}/game/saves/keep.txt"),
+            b"world bytes",
+        )
+        .unwrap();
+        model::write_file(&root, "libraries/keep.jar", b"shared bytes").unwrap();
+        let host = Host::new(root.clone()).unwrap();
+        let cancel = host.begin_task("busy test").unwrap();
+        assert!(host.remove_instance(&id, true).is_err());
+        host.finish(Ok(()), &cancel);
+        let lock = fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(0x02000000)
+            .share_mode(1)
+            .open(root.join(format!("instances/{id}")))
+            .unwrap();
+        assert!(host.remove_instance(&id, true).is_err());
+        assert_eq!(host.status().instances.len(), 1);
+        drop(lock);
+        let archived = host.remove_instance(&id, true).unwrap().unwrap();
+        assert!(!Path::new(&archived).exists());
+        assert_eq!(
+            fs::read(root.join("libraries/keep.jar")).unwrap(),
+            b"shared bytes"
+        );
+        assert!(host.status().instances.is_empty());
+        assert!(host.remove_instance(&id, false).is_err());
+        drop(host);
+        let mut reference = item;
+        let outside = root.join("reference-source");
+        fs::create_dir_all(outside.join("versions/ref")).unwrap();
+        fs::write(outside.join("versions/ref/keep.txt"), b"external bytes").unwrap();
+        reference.local = Some(model::LocalInstallation {
+            root: outside.to_string_lossy().into(),
+            version_directory: "versions/ref".into(),
+            game_directory: "versions/ref".into(),
+            client_jar: "versions/ref/ref.jar".into(),
+            source_key: "a".repeat(64),
+            loader: "vanilla".into(),
+            loader_version: String::new(),
+        });
+        model::save_json(&root, "instances.json", &vec![reference]).unwrap();
+        let host = Host::new(root.clone()).unwrap();
+        assert!(host.remove_instance(&id, false).unwrap().is_none());
+        assert_eq!(
+            fs::read(outside.join("versions/ref/keep.txt")).unwrap(),
+            b"external bytes"
+        );
+        drop(host);
+        model::save_json(
+            &root,
+            "instances.json",
+            &vec![{
+                let mut v: Instance = model::load_json::<Vec<Instance>>(&root, "instances.json")
+                    .unwrap()
+                    .into_iter()
+                    .next()
+                    .unwrap_or_else(|| Instance {
+                        id: id.clone(),
+                        name: "ref".into(),
+                        version: "1.21.1".into(),
+                        manifest_sha1: "a".repeat(40),
+                        java_major: 21,
+                        fabric_version: String::new(),
+                        fabric_sha1: String::new(),
+                        local: None,
+                        storage_root: None,
+                        version_folder: None,
+                        launch: Default::default(),
+                    });
+                v.local = Some(model::LocalInstallation {
+                    root: outside.to_string_lossy().into(),
+                    version_directory: "versions/ref".into(),
+                    game_directory: "versions/ref".into(),
+                    client_jar: "versions/ref/ref.jar".into(),
+                    source_key: "a".repeat(64),
+                    loader: "vanilla".into(),
+                    loader_version: String::new(),
+                });
+                v
+            }],
+        )
+        .unwrap();
+        let host = Host::new(root.clone()).unwrap();
+        host.remove_instance(&id, true).unwrap();
+        assert!(!outside.join("versions/ref").exists());
+        drop(host);
+        assert!(Host::new(root).unwrap().status().instances.is_empty());
+    }
     #[test]
     fn cancellation_after_commit_does_not_report_a_committed_file_as_unwritten() {
         let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))

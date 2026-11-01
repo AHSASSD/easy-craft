@@ -147,6 +147,7 @@ async fn instance_overrides_migrate_persist_clear_and_reject_stale_or_external_c
     let empty = model::LaunchOverrides::default();
     assert!(host.status().instances[0].launch.is_empty());
     let memory = model::LaunchOverrides {
+        java_version: None,
         java_path: None,
         game_isolation: None,
         window_mode: None,
@@ -213,6 +214,7 @@ fn resolved_instance_settings_preserve_identity_and_only_apply_explicit_override
         ..Default::default()
     };
     let overrides = model::LaunchOverrides {
+        java_version: None,
         java_path: Some("instance java".into()),
         memory: None,
         game_isolation: None,
@@ -640,6 +642,8 @@ fn offline_and_microsoft_arguments_stay_distinct() {
         java_major: 21,
     };
     let instance = model::Instance {
+        version_folder: None,
+        storage_root: None,
         id: "test".into(),
         name: "test".into(),
         version: "1.21.1".into(),
@@ -871,6 +875,54 @@ async fn cached_offline_preparation_integration() {
         minecraft::command_args(&host, &instance, &prepared, &profile, "0", &settings).unwrap();
     assert!(args.iter().all(|arg| !arg.contains("${")));
     println!("PASS: cached 1.21.1 resources verified and offline arguments prepared with all HTTP routed to an unavailable local proxy; no account needed.");
+}
+
+#[tokio::test]
+#[ignore = "Requires the isolated versions-layout-20261030 real-pack UI installation"]
+async fn versions_layout_real_pack_prepares_cached_launch_without_starting_game() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .join(".native/public-packs/versions-layout-20261030");
+    let host = host::Host::new(root).unwrap();
+    let state = host.status();
+    let instance = state
+        .instances
+        .iter()
+        .find(|i| i.version_folder.is_some())
+        .unwrap();
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let entry = model::Version {
+        id: instance.version.clone(),
+        sha1: instance.manifest_sha1.clone(),
+        url: format!(
+            "https://piston-meta.mojang.com/v1/packages/{}/{}.json",
+            instance.manifest_sha1, instance.version
+        ),
+        kind: "release".into(),
+        release_time: String::new(),
+    };
+    let mut prepared = minecraft::prepare(&host, &entry, &cancel).await.unwrap();
+    crate::fabric::prepare(&host, instance, &mut prepared, &cancel)
+        .await
+        .unwrap();
+    assert!(prepared.classpath.iter().all(|p| p.is_file()));
+    let args = minecraft::command_args(
+        &host,
+        instance,
+        &prepared,
+        &model::offline_profile("FolderTest").unwrap(),
+        "0",
+        &state.settings,
+    )
+    .unwrap();
+    assert!(!args.iter().any(|a| a.contains("${")));
+    let game = instance.game_path(&host.root).unwrap();
+    assert!(game.join("mods").is_dir());
+    assert!(args
+        .windows(2)
+        .any(|a| a[0] == "--gameDir" && PathBuf::from(&a[1]) == game));
+    std::fs::write(host.root.join("layout-launch-preparation.json"),serde_json::to_vec_pretty(&serde_json::json!({"gameDirectory":game,"classpathFiles":prepared.classpath.len(),"argumentsResolved":true,"gameStarted":false})).unwrap()).unwrap();
 }
 
 #[tokio::test]

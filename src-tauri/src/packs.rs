@@ -2,6 +2,7 @@ use crate::model::{self, Result};
 use serde::Serialize;
 use serde_json::Value;
 use std::{collections::HashSet, io::Read};
+pub(crate) const MAX_RESOURCE_ENTRIES: usize = 100000;
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -29,12 +30,19 @@ pub fn preview(bytes: &[u8]) -> Result<PackPreview> {
     preview_reader(std::io::Cursor::new(bytes))
 }
 pub(crate) fn preview_reader<R: Read + std::io::Seek>(input: R) -> Result<PackPreview> {
-    preview_bounded(input, 10000)
+    preview_bounded(input, 10000, false)
 }
 pub(crate) fn preview_resource_reader<R: Read + std::io::Seek>(input: R) -> Result<PackPreview> {
-    preview_bounded(input, 100000)
+    preview_bounded(input, MAX_RESOURCE_ENTRIES, false)
 }
-fn preview_bounded<R: Read + std::io::Seek>(input: R, max_entries: usize) -> Result<PackPreview> {
+pub(crate) fn preview_mod_reader<R: Read + std::io::Seek>(input: R) -> Result<PackPreview> {
+    preview_bounded(input, MAX_RESOURCE_ENTRIES, true)
+}
+fn preview_bounded<R: Read + std::io::Seek>(
+    input: R,
+    max_entries: usize,
+    opaque_jar: bool,
+) -> Result<PackPreview> {
     let mut zip = zip::ZipArchive::new(input).map_err(|_| "不是有效的 ZIP / MRPACK 文件")?;
     if zip.len() > max_entries {
         return Err(format!("压缩包条目超过 {max_entries} 项上限"));
@@ -64,7 +72,14 @@ fn preview_bounded<R: Read + std::io::Seek>(input: R, max_entries: usize) -> Res
         {
             return Err("拒绝压缩包路径穿越或符号链接".into());
         }
-        if !names.insert(name.trim_end_matches('/').to_ascii_lowercase()) {
+        // JAR contents stay inside the archive; Java resource names are case-sensitive.
+        // Extracted packs retain Windows case-insensitive collision protection.
+        let key = if opaque_jar {
+            name.trim_end_matches('/').to_string()
+        } else {
+            name.trim_end_matches('/').to_ascii_lowercase()
+        };
+        if !names.insert(key) {
             return Err("拒绝重复或大小写冲突的压缩条目".into());
         }
         result.expanded_bytes = result
@@ -77,10 +92,10 @@ fn preview_bounded<R: Read + std::io::Seek>(input: R, max_entries: usize) -> Res
         if result.paths.len() < 30 {
             result.paths.push(name.to_string());
         }
-        if name == "modrinth.index.json" {
+        if !opaque_jar && name == "modrinth.index.json" {
             index = Some(i);
         }
-        if name == "manifest.json" {
+        if !opaque_jar && name == "manifest.json" {
             curse = Some(i);
         }
     }
@@ -191,6 +206,37 @@ fn preview_bounded<R: Read + std::io::Seek>(input: R, max_entries: usize) -> Res
 mod resource_archive_tests {
     use super::*;
     use std::io::{Cursor, Write};
+    #[test]
+    fn opaque_mods_allow_case_distinct_resources_but_extracted_packs_do_not() {
+        let mut zip = zip::ZipWriter::new(Cursor::new(vec![]));
+        for name in [
+            "assets/emotecraft/lang/en_US.json",
+            "assets/emotecraft/lang/en_us.json",
+        ] {
+            zip.start_file(name, zip::write::SimpleFileOptions::default())
+                .unwrap();
+            zip.write_all(b"{}").unwrap();
+        }
+        let bytes = zip.finish().unwrap().into_inner();
+        assert!(preview_resource_reader(Cursor::new(&bytes)).is_err());
+        assert!(preview_mod_reader(Cursor::new(&bytes)).is_ok());
+        for name in ["../escape", "C:/escape", "x/CON.txt"] {
+            let mut zip = zip::ZipWriter::new(Cursor::new(vec![]));
+            zip.start_file(name, zip::write::SimpleFileOptions::default())
+                .unwrap();
+            assert!(preview_mod_reader(Cursor::new(zip.finish().unwrap().into_inner())).is_err());
+        }
+    }
+    #[test]
+    #[ignore = "Uses a downloaded public Emotecraft JAR in output/"]
+    fn real_emotecraft_case_resources_are_valid_opaque_mod_content() {
+        let file =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../output/emotecraft.jar");
+        assert!(preview_resource_reader(std::fs::File::open(&file).unwrap()).is_err());
+        preview_mod_reader(std::fs::File::open(&file).unwrap()).unwrap();
+        let mut zip = zip::ZipArchive::new(std::fs::File::open(&file).unwrap()).unwrap();
+        crate::content::validate_archive(crate::content::Kind::Mods, &mut zip).unwrap();
+    }
     #[test]
     fn resource_entry_budget_does_not_relax_pack_or_path_boundaries() {
         let mut zip = zip::ZipWriter::new(Cursor::new(vec![]));

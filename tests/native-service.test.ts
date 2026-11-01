@@ -23,6 +23,7 @@ import { NativeWorkspace } from '../src/features/NativeWorkspace';
 import { LocalVersionImport } from '../src/features/LocalVersionImport';
 import { AddInstanceMenu } from '../src/features/AddInstanceMenu';
 import { PackInspector } from '../src/features/PackInspector';
+import { InstanceOverview } from '../src/features/InstanceOverview';
 import { CachePanel } from '../src/features/CachePanel';
 import { BackupRetention } from '../src/features/BackupRetention';
 import { instanceSettings } from '../src/core/instance-settings';
@@ -72,6 +73,72 @@ const state = (): NativeState => ({
   loginPending: false,
   loginCode: null,
 });
+
+test('instance Java preflight validates native responses without launching or saving', async () => {
+  let result: unknown = {
+    major: 21,
+    is64Bit: true,
+    path: 'E:/Java/bin/java.exe',
+  };
+  const call = vi.fn(async (command: string) =>
+    command === 'native_instance_java' ? result : state(),
+  );
+  const service = createNativeService(true, call as typeof invoke);
+  try {
+    expect((await service.instanceJava('one')).major).toBe(21);
+    for (const invalid of [
+      { major: 0, is64Bit: true, path: 'x' },
+      { major: 21, is64Bit: 'yes', path: 'x' },
+      { major: 21, is64Bit: true, path: '' },
+      null,
+    ]) {
+      result = invalid;
+      await expect(service.instanceJava('one')).rejects.toThrow(
+        'Java 检测响应无效',
+      );
+    }
+    expect(
+      call.mock.calls.every(([command]) =>
+        ['native_instance_java', 'native_status'].includes(command),
+      ),
+    ).toBe(true);
+  } finally {
+    service.stop();
+  }
+});
+
+test('Java preparation validates results and refreshes task state after success or failure', async () => {
+  let result: unknown = {
+    major: 21,
+    is64Bit: true,
+    path: 'E:/runtime/bin/java.exe',
+  };
+  const call = vi.fn(async (command: string) => {
+    if (command === 'native_java_prepare') {
+      if (typeof result === 'string') throw result;
+      return result;
+    }
+    return state();
+  });
+  const service = createNativeService(true, call as typeof invoke);
+  try {
+    expect((await service.prepareJava('one')).major).toBe(21);
+    result = { major: 21, is64Bit: false, path: 'E:/runtime/bin/java.exe' };
+    await expect(service.prepareJava('one')).rejects.toThrow(
+      'Java 准备响应无效',
+    );
+    result = '任务已取消';
+    await expect(service.prepareJava('one')).rejects.toThrow('任务已取消');
+    expect(
+      call.mock.calls.filter(([name]) => name === 'native_status').length,
+    ).toBeGreaterThanOrEqual(3);
+    expect(call.mock.calls.some(([name]) => name === 'native_launch')).toBe(
+      false,
+    );
+  } finally {
+    service.stop();
+  }
+});
 test('window mode persists independently without losing Java, memory or isolation overrides', async () => {
   const current = state();
   current.instances = [
@@ -106,7 +173,6 @@ test('window mode persists independently without losing Java, memory or isolatio
   }) as HTMLSelectElement;
   expect(selector.value).toBe('windowed');
   fireEvent.change(selector, { target: { value: 'fullscreen' } });
-  fireEvent.click(screen.getByRole('button', { name: '保存启动窗口设置' }));
   await waitFor(() =>
     expect(current.instances[0].launch?.windowMode).toBe('fullscreen'),
   );
@@ -115,7 +181,6 @@ test('window mode persists independently without losing Java, memory or isolatio
   expect(current.instances[0].launch?.gameIsolation).toBe(true);
   expect(current.instances[0].launch?.memory?.memoryMb).toBe(1536);
   fireEvent.change(selector, { target: { value: 'inherit' } });
-  fireEvent.click(screen.getByRole('button', { name: '保存启动窗口设置' }));
   await waitFor(() =>
     expect(current.instances[0].launch?.windowMode).toBe('inherit'),
   );
@@ -495,8 +560,10 @@ test('pack installation previews optional files and sends only the frozen token,
     install: plan,
   };
   let response: unknown = preview;
+  let destination: string | null = 'E:\\TestGames';
   const call = vi.fn(async (command: string) => {
     if (command === 'native_pack_pick') return response;
+    if (command === 'native_pack_destination') return destination;
     if (command === 'native_pack_install') {
       current.task.status = 'running';
       return;
@@ -520,6 +587,27 @@ test('pack installation previews optional files and sends only the frozen token,
   expect(
     (screen.getByLabelText('整合包新实例名称') as HTMLInputElement).value,
   ).toBe('Pack fixture');
+  fireEvent.click(screen.getByRole('button', { name: '更改位置' }));
+  await screen.findByText('E:\\TestGames');
+  destination = null;
+  fireEvent.click(screen.getByRole('button', { name: '更改位置' }));
+  await waitFor(() =>
+    expect(
+      (screen.getByRole('button', { name: '更改位置' }) as HTMLButtonElement)
+        .disabled,
+    ).toBe(false),
+  );
+  expect(screen.getByText('E:\\TestGames')).toBeTruthy();
+  expect(call).toHaveBeenCalledWith('native_pack_destination', {
+    token: plan.token,
+    reset: false,
+  });
+  fireEvent.click(screen.getByRole('button', { name: '恢复默认' }));
+  await waitFor(() => expect(screen.queryByText('E:\\TestGames')).toBeNull());
+  expect(call).toHaveBeenCalledWith('native_pack_destination', {
+    token: plan.token,
+    reset: true,
+  });
   expect(
     (
       screen.getByLabelText(
@@ -690,11 +778,14 @@ test('modpack browser selects archives over readmes and drops the prior preview 
       onFilter: vi.fn(),
     }),
   );
-  expect(screen.getAllByLabelText('整合包安全检查')).toHaveLength(1);
+  expect(screen.queryByLabelText('整合包安全检查')).toBeNull();
   fireEvent.click(screen.getByText('搜索资源'));
   fireEvent.click(
     await screen.findByRole('button', { name: '查看 Pack fixture' }),
   );
+  await screen.findByText('版本与下载', { exact: false });
+  expect(screen.queryByText('声明的依赖与冲突')).toBeNull();
+  fireEvent.click(screen.getByRole('button', { name: '安装此版本' }));
   await screen.findByLabelText('在线整合包归档文件');
   expect(
     (screen.getByLabelText('在线整合包归档文件') as HTMLSelectElement).value,
@@ -706,9 +797,8 @@ test('modpack browser selects archives over readmes and drops the prior preview 
     version: 'Vers1234',
     filename: 'Vers1234.mrpack',
   });
-  fireEvent.change(screen.getByLabelText('在线资源兼容版本'), {
-    target: { value: 'Vers5678' },
-  });
+  fireEvent.click(screen.getByRole('button', { name: '关闭弹窗' }));
+  fireEvent.click(screen.getByRole('button', { name: /Release 1/ }));
   expect(screen.queryByText('Old version preview · MRPACK')).toBeNull();
   expect(
     (screen.getByLabelText('在线整合包归档文件') as HTMLSelectElement).value,
@@ -1411,6 +1501,104 @@ test('preflight reports stay bound to their instance and warnings never remove t
   expect(screen.queryByRole('button', { name: '一键修复' })).toBeNull();
   service.stop();
 });
+test('overview exposes management and every folder without a more menu', async () => {
+  const current = state();
+  const instance = {
+    id: 'overview-one',
+    name: 'Overview',
+    version: '1.21.1',
+    manifestSha1: 'a'.repeat(40),
+    javaMajor: 21,
+    fabricVersion: '',
+    fabricSha1: '',
+  };
+  const call = vi.fn(async (command: string) =>
+    command === 'native_worlds'
+      ? [{ id: 'one', name: '本地世界' }]
+      : command === 'native_instance_folder_open'
+        ? null
+        : current,
+  );
+  const service = createNativeService(true, call as typeof invoke);
+  const rename = vi.fn(),
+    remove = vi.fn();
+  const props = {
+    service,
+    instance,
+    settings: current.settings,
+    identity: 'Test',
+    running: false,
+    onWorlds: vi.fn(),
+    onMods: vi.fn(),
+    onSettings: vi.fn(),
+    onChecks: vi.fn(),
+    report: vi.fn(),
+    onRename: rename,
+    onRemove: remove,
+  };
+  const view = render(createElement(InstanceOverview, props));
+  await screen.findByText('本地世界');
+  expect(screen.queryByText('更多文件夹')).toBeNull();
+  for (const [title, folder] of [
+    ['游戏文件夹', 'game'],
+    ['模组文件夹', 'mods'],
+    ['存档文件夹', 'saves'],
+    ['截图文件夹', 'screenshots'],
+    ['资源包文件夹', 'resourcepacks'],
+    ['光影包文件夹', 'shaderpacks'],
+  ]) {
+    fireEvent.click(screen.getByRole('button', { name: title }));
+    await waitFor(() =>
+      expect(call).toHaveBeenCalledWith('native_instance_folder_open', {
+        id: instance.id,
+        folder,
+      }),
+    );
+  }
+  fireEvent.click(screen.getByRole('button', { name: '重命名' }));
+  fireEvent.click(screen.getByRole('button', { name: '移除实例' }));
+  expect(rename).toHaveBeenCalledOnce();
+  expect(remove).toHaveBeenCalledOnce();
+  view.rerender(createElement(InstanceOverview, { ...props, running: true }));
+  expect(
+    (
+      screen.getByRole('button', {
+        name: '重命名',
+      }) as HTMLButtonElement
+    ).disabled,
+  ).toBe(true);
+  expect(
+    (screen.getByRole('button', { name: '资源包文件夹' }) as HTMLButtonElement)
+      .disabled,
+  ).toBe(true);
+  service.stop();
+});
+
+test('instance removal forwards the cleanup choice, refreshes the library and validates its result', async () => {
+  let result: unknown = null;
+  const call = vi.fn(async (command: string) =>
+    command === 'native_instance_remove' ? result : state(),
+  );
+  const service = createNativeService(true, call as typeof invoke);
+  await expect(
+    service.removeInstance('instance-id', false),
+  ).resolves.toBeNull();
+  expect(call).toHaveBeenCalledWith('native_instance_remove', {
+    id: 'instance-id',
+    archive: false,
+  });
+  expect(call).toHaveBeenCalledWith('native_status', undefined);
+  result = 'E:/EasyCraft/data/instance-trash/test';
+  await expect(service.removeInstance('instance-id', true)).resolves.toBe(
+    result,
+  );
+  result = { bad: true };
+  await expect(service.removeInstance('instance-id', true)).rejects.toThrow(
+    '实例移除响应无效',
+  );
+  service.stop();
+});
+
 test('saving a resource uses fixed version and native folder selection, cancellation installs nothing', async () => {
   let result: unknown = false;
   const call = vi.fn(async (command: string) =>
@@ -1479,6 +1667,55 @@ test('background reads and resets use only the controlled native command and val
   await expect(service.background()).rejects.toThrow('背景响应无效');
   service.stop();
 });
+test('Java file selection detects and saves per-instance path/version, cancellation and incompatible Java preserve old values', async () => {
+  const current = state();
+  current.instances = [
+    {
+      id: 'one',
+      name: 'One',
+      version: '1.21.1',
+      manifestSha1: 'a'.repeat(40),
+      javaMajor: 21,
+      fabricVersion: '',
+      fabricSha1: '',
+    },
+  ];
+  let picked: unknown = null;
+  const call = vi.fn(
+    async (command: string, args?: Record<string, unknown>) => {
+      if (command === 'native_java_pick') return picked;
+      if (command === 'native_instance_launch_settings') {
+        current.instances[0].launch = JSON.parse(JSON.stringify(args!.launch));
+        return null;
+      }
+      return current;
+    },
+  );
+  const service = createNativeService(true, call as typeof invoke);
+  await service.refresh();
+  render(createElement(JavaPanel, { service, instanceId: 'one' }));
+  const pick = screen.getByRole('button', { name: '选择 java.exe' });
+  fireEvent.click(pick);
+  await waitFor(() => expect((pick as HTMLButtonElement).disabled).toBe(false));
+  expect(current.instances[0].launch).toBeUndefined();
+  picked = { path: 'E:/runtime/bin/java.exe', major: 8, is64Bit: true };
+  fireEvent.click(pick);
+  await screen.findByText(/此实例需要 64 位 Java 21/);
+  expect(current.instances[0].launch).toBeUndefined();
+  picked = { path: 'E:/runtime/bin/java.exe', major: 21, is64Bit: true };
+  fireEvent.click(pick);
+  await screen.findByText('Java 21 · 64 位 · 路径已自动保存');
+  expect(current.instances[0].launch).toEqual({
+    javaPath: 'E:/runtime/bin/java.exe',
+    javaVersion: 21,
+  });
+  fireEvent.change(screen.getByLabelText('Java 选择方式'), {
+    target: { value: 'auto' },
+  });
+  await waitFor(() => expect(current.instances[0].launch).toEqual({}));
+  service.stop();
+});
+
 test('instance Java and memory save sequentially without changing global or other instances, and clear back to inheritance', async () => {
   const current = state();
   const item = {
@@ -1522,7 +1759,9 @@ test('instance Java and memory save sequentially without changing global or othe
   expect(
     (screen.getByLabelText('Java 可执行文件') as HTMLInputElement).disabled,
   ).toBe(true);
-  fireEvent.click(screen.getByLabelText('继承全局 Java'));
+  fireEvent.change(screen.getByLabelText('Java 选择方式'), {
+    target: { value: 'custom' },
+  });
   fireEvent.change(screen.getByLabelText('Java 可执行文件'), {
     target: { value: 'E:/instance-java/java.exe' },
   });
@@ -1541,8 +1780,9 @@ test('instance Java and memory save sequentially without changing global or othe
     memory: { memoryMode: 'manual', memoryMb: 1536, optimizeMemory: false },
   });
   expect(instanceSettings(global, current.instances[0]).memoryMb).toBe(1536);
-  fireEvent.click(screen.getByLabelText('继承全局 Java'));
-  fireEvent.click(screen.getByText('保存 Java 设置'));
+  fireEvent.change(screen.getByLabelText('Java 选择方式'), {
+    target: { value: 'auto' },
+  });
   await waitFor(() =>
     expect(current.instances[0].launch?.javaPath).toBeUndefined(),
   );
@@ -1583,6 +1823,7 @@ test('instance settings reject authentication overrides and invalid memory at th
 test('config restoration requires both acknowledgements, preserves errors and rereads committed options', async () => {
   let options = {
     revision: 'a'.repeat(40),
+    language: 'zh_cn',
     masterVolume: 0.75,
     musicVolume: 1,
     renderDistance: 12,
@@ -1631,8 +1872,6 @@ test('config restoration requires both acknowledgements, preserves errors and re
   const restore = screen.getByText('确认恢复配置') as HTMLButtonElement;
   expect(restore.disabled).toBe(true);
   fireEvent.click(screen.getByLabelText('确认配置恢复变更'));
-  expect(restore.disabled).toBe(true);
-  fireEvent.click(screen.getByLabelText('确认游戏已关闭'));
   expect(restore.disabled).toBe(false);
   fireEvent.change(screen.getByLabelText('主音量'), {
     target: { value: '50' },
@@ -1662,7 +1901,7 @@ test('config restoration requires both acknowledgements, preserves errors and re
   });
   service.stop();
 });
-test('backup cleanup requires closed-game and preview acknowledgements and sends only a frozen token', async () => {
+test('backup cleanup respects running locks and requires preview confirmation with a frozen token', async () => {
   const entry = {
     id: '11111111-1111-4111-8111-111111111111',
     sha1: 'a'.repeat(40),
@@ -1695,8 +1934,7 @@ test('backup cleanup requires closed-game and preview acknowledgements and sends
     service,
     id: 'instance',
     worldId: 'WorldA',
-    disabled: false,
-    closed: false,
+    disabled: true,
     dirty: false,
     onDone,
   };
@@ -1705,7 +1943,7 @@ test('backup cleanup requires closed-game and preview acknowledgements and sends
     (screen.getByText('检查备份保留计划') as HTMLButtonElement).disabled,
   ).toBe(true);
   expect(call).not.toHaveBeenCalled();
-  view.rerender(createElement(BackupRetention, { ...props, closed: true }));
+  view.rerender(createElement(BackupRetention, { ...props, disabled: false }));
   fireEvent.change(screen.getByLabelText('配置备份保留数量'), {
     target: { value: '1' },
   });
@@ -1720,10 +1958,10 @@ test('backup cleanup requires closed-game and preview acknowledgements and sends
   ).toBe(false);
   fireEvent.click(screen.getByLabelText('确认旧配置备份清理'));
   view.rerender(
-    createElement(BackupRetention, { ...props, closed: true, dirty: true }),
+    createElement(BackupRetention, { ...props, disabled: false, dirty: true }),
   );
   expect(clear.disabled).toBe(true);
-  view.rerender(createElement(BackupRetention, { ...props, closed: true }));
+  view.rerender(createElement(BackupRetention, { ...props, disabled: false }));
   fireEvent.click(clear);
   await screen.findByText(/已清理 1 份，保留 0 份候选/);
   expect(call).toHaveBeenCalledWith('native_backup_cleanup_prepare', {
@@ -1936,7 +2174,7 @@ test('incoming and directly dropped archives share the same preview and never in
   ).toBe(false);
   service.stop();
 });
-test('content drops need the closed-game acknowledgement before receiving any bytes', async () => {
+test('content drops block while running and accept files directly when idle', async () => {
   const file = new NodeFile(['fixture'], 'fixture.zip') as unknown as File;
   const call = vi.fn(async (command: string) => {
     if (command === 'native_content') return [];
@@ -1946,17 +2184,16 @@ test('content drops need the closed-game acknowledgement before receiving any by
     return state();
   });
   const service = createNativeService(true, call as typeof invoke);
-  render(
-    createElement(ContentPanel, {
-      service,
-      id: 'instance',
-      kind: 'resourcepacks',
-      running: false,
-      onDownload: vi.fn(),
-      query: '',
-      onQuery: vi.fn(),
-    }),
-  );
+  const props = {
+    service,
+    id: 'instance',
+    kind: 'resourcepacks' as const,
+    running: true,
+    onDownload: vi.fn(),
+    query: '',
+    onQuery: vi.fn(),
+  };
+  const view = render(createElement(ContentPanel, props));
   const drop = () =>
     fireEvent.drop(screen.getByLabelText('本地内容拖放区'), {
       dataTransfer: { files: [file] },
@@ -1965,7 +2202,7 @@ test('content drops need the closed-game acknowledgement before receiving any by
   expect(
     call.mock.calls.some(([command]) => command === 'native_file_upload_begin'),
   ).toBe(false);
-  fireEvent.click(screen.getByLabelText('确认内容修改前游戏已关闭'));
+  view.rerender(createElement(ContentPanel, { ...props, running: false }));
   drop();
   await screen.findByText('文件已导入；在游戏中是否启用仍需确认。');
   service.stop();
@@ -2225,7 +2462,7 @@ test('online install requires a native frozen plan and closed-game acknowledgeme
   );
   service.stop();
 });
-test('content manager shows native metadata, requires closed game, and sends the file revision', async () => {
+test('content manager toggles directly with the file revision and locks while running', async () => {
   const row = {
     file: 'fixture.jar',
     name: 'Fixture Mod',
@@ -2239,7 +2476,7 @@ test('content manager shows native metadata, requires closed game, and sends the
     command === 'native_content' ? [row] : state(),
   );
   const service = createNativeService(true, call as typeof invoke);
-  render(
+  const view = render(
     createElement(ContentPanel, {
       service,
       id: 'instance',
@@ -2252,10 +2489,10 @@ test('content manager shows native metadata, requires closed game, and sends the
   );
   await screen.findByText('Fixture Mod');
   const toggle = screen.getByLabelText(
-    '启用模组 Fixture Mod',
-  ) as HTMLInputElement;
-  expect(toggle.disabled).toBe(true);
-  fireEvent.click(screen.getByLabelText('确认内容修改前游戏已关闭'));
+    '禁用模组 Fixture Mod',
+  ) as HTMLButtonElement;
+  expect(toggle.disabled).toBe(false);
+  expect(screen.queryByLabelText('确认内容修改前游戏已关闭')).toBeNull();
   fireEvent.click(toggle);
   await waitFor(() =>
     expect(call).toHaveBeenCalledWith('native_content_toggle', {
@@ -2265,6 +2502,119 @@ test('content manager shows native metadata, requires closed game, and sends the
       enabled: false,
     }),
   );
+  view.rerender(
+    createElement(ContentPanel, {
+      service,
+      id: 'instance',
+      kind: 'mods',
+      running: true,
+      onDownload: vi.fn(),
+      query: '',
+      onQuery: vi.fn(),
+    }),
+  );
+  expect(toggle.disabled).toBe(true);
+  service.stop();
+});
+test('mod row actions expose local details, reveal, cancel and revision-checked removal', async () => {
+  const row = {
+    file: 'fixture.jar',
+    name: 'Fixture Actions',
+    version: '2.0',
+    enabled: true,
+    editable: true,
+    bytes: 128,
+    revision: '128:42:1:2:3',
+  };
+  let rows = [row];
+  const call = vi.fn(async (command: string) => {
+    if (command === 'native_content') return rows;
+    if (command === 'native_mod_details')
+      return {
+        entry: row,
+        path: 'C:/Fixture/mods/fixture.jar',
+        note: '',
+        information: {
+          name: row.name,
+          version: row.version,
+          loader: 'NeoForge',
+          ids: ['fixture'],
+          authors: ['Fixture Author'],
+          description: 'Local description',
+          license: 'MIT',
+          dependencies: ['minecraft [1.21,)'],
+        },
+      };
+    if (command === 'native_mod_remove') {
+      rows = [];
+      return 'C:/Fixture/.easycraft-mod-trash/token/fixture.jar';
+    }
+    return state();
+  });
+  const service = createNativeService(true, call as typeof invoke);
+  await service.refresh();
+  render(
+    createElement(ContentPanel, {
+      service,
+      id: 'instance',
+      kind: 'mods',
+      running: false,
+      onDownload: vi.fn(),
+      query: '',
+      onQuery: vi.fn(),
+    }),
+  );
+  await screen.findByText('Fixture Actions');
+  expect(
+    (
+      screen.getByRole('button', {
+        name: '删除模组 Fixture Actions',
+      }) as HTMLButtonElement
+    ).disabled,
+  ).toBe(false);
+  fireEvent.click(
+    screen.getByRole('button', { name: '查看模组详情 Fixture Actions' }),
+  );
+  await screen.findByText('Fixture Author');
+  expect(screen.getByText('Local description')).toBeTruthy();
+  fireEvent.click(screen.getByRole('button', { name: '关闭弹窗' }));
+  fireEvent.click(
+    screen.getByRole('button', { name: '打开模组文件位置 Fixture Actions' }),
+  );
+  await waitFor(() =>
+    expect(call).toHaveBeenCalledWith('native_mod_reveal', {
+      id: 'instance',
+      file: row.file,
+      revision: row.revision,
+    }),
+  );
+  await waitFor(() =>
+    expect(
+      (
+        screen.getByRole('button', {
+          name: '删除模组 Fixture Actions',
+        }) as HTMLButtonElement
+      ).disabled,
+    ).toBe(false),
+  );
+  fireEvent.click(
+    screen.getByRole('button', { name: '删除模组 Fixture Actions' }),
+  );
+  fireEvent.click(screen.getByRole('button', { name: '取消' }));
+  expect(
+    call.mock.calls.some(([command]) => command === 'native_mod_remove'),
+  ).toBe(false);
+  fireEvent.click(
+    screen.getByRole('button', { name: '删除模组 Fixture Actions' }),
+  );
+  fireEvent.click(screen.getByRole('button', { name: '确认删除模组' }));
+  await screen.findByText(/模组已删除，回收文件/);
+  expect(call).toHaveBeenCalledWith('native_mod_remove', {
+    id: 'instance',
+    file: row.file,
+    revision: row.revision,
+  });
+  expect(service.snapshot().modRevision).toBeGreaterThan(0);
   service.stop();
 });
 test('a fresh status waits for the in-flight poll and then reads the host again', async () => {
@@ -2560,7 +2910,6 @@ test('local mod selection previews errors without importing until the player con
       onQuery: vi.fn(),
     }),
   );
-  fireEvent.click(screen.getByLabelText('确认内容修改前游戏已关闭'));
   fireEvent.click(screen.getByRole('button', { name: /选择本地模组/ }));
   await screen.findByRole('dialog', { name: '本地 Mod 安装预检' });
   expect(screen.getByText('本地模组缺少 library_b')).toBeTruthy();
@@ -2700,7 +3049,90 @@ test('resource browsing validates files, preserves results on network failure an
   ).toBeTruthy();
   service.stop();
 });
-test('world controls read discovered rules and save only after the closed-game acknowledgement', async () => {
+test('language autosaves and translation import preserves cancellation and exposes real errors', async () => {
+  let options = {
+    revision: 'a'.repeat(40),
+    language: 'en_US',
+    masterVolume: 0.75,
+    musicVolume: 0.5,
+    renderDistance: 12,
+    fullscreen: false,
+  };
+  let selection: boolean | string = false;
+  const call = vi.fn(
+    async (command: string, args?: Record<string, unknown>) => {
+      if (command === 'native_options') return structuredClone(options);
+      if (command === 'native_options_save') {
+        options = {
+          ...(args!.options as typeof options),
+          revision: 'b'.repeat(40),
+        };
+        return 'backup/options.txt';
+      }
+      if (command === 'native_content_pick') {
+        if (typeof selection === 'string') throw selection;
+        return selection;
+      }
+      if (command === 'native_translation_install') {
+        options = { ...options, language: 'zh_cn', revision: 'c'.repeat(40) };
+        return {
+          file: 'EasyCraft-CFPA-aaaaaaaaaaaaaaaa.zip',
+          source: 'CFPA 官方汉化资源',
+          matched: ['create'],
+          unmatched: ['other'],
+          skippedFiles: 0,
+        };
+      }
+      return state();
+    },
+  );
+  const service = createNativeService(true, call as typeof invoke);
+  render(
+    createElement(
+      UnsavedChanges,
+      null,
+      createElement(WorldSettingsPanel, {
+        service,
+        id: 'instance',
+        running: false,
+        section: 'options',
+      }),
+    ),
+  );
+  const select = await screen.findByLabelText('游戏语言');
+  expect((select as HTMLSelectElement).value).toBe('en_us');
+  fireEvent.change(select, { target: { value: 'zh_cn' } });
+  await waitFor(() => expect(options.language).toBe('zh_cn'), {
+    timeout: 2000,
+  });
+  expect(options.masterVolume).toBe(0.75);
+  const pick = screen.getByRole('button', { name: '导入汉化资源包' });
+  fireEvent.click(pick);
+  await waitFor(() =>
+    expect(call).toHaveBeenCalledWith('native_content_pick', {
+      id: 'instance',
+      kind: 'resourcepacks',
+    }),
+  );
+  expect(screen.queryByText(/汉化资源包已导入/)).toBeNull();
+  selection = '资源包描述无效';
+  await waitFor(() => expect((pick as HTMLButtonElement).disabled).toBe(false));
+  fireEvent.click(pick);
+  await screen.findByText('资源包描述无效');
+  selection = true;
+  fireEvent.click(pick);
+  await screen.findByText(/汉化资源包已导入/);
+  fireEvent.click(screen.getByRole('button', { name: '自动安装汉化' }));
+  await waitFor(() =>
+    expect(call).toHaveBeenCalledWith('native_translation_install', {
+      id: 'instance',
+    }),
+  );
+  await screen.findByText(/汉化资源包已安装并启用，覆盖范围可查看汉化匹配详情/);
+  service.stop();
+});
+
+test('world controls save directly with automatic backup and lock when running', async () => {
   let world: WorldSettings = {
     revision: 'a'.repeat(40),
     difficulty: 2,
@@ -2723,6 +3155,7 @@ test('world controls read discovered rules and save only after the closed-game a
         return {
           revision: 'missing',
           masterVolume: 1,
+          language: 'zh_cn',
           musicVolume: 1,
           renderDistance: 12,
           fullscreen: false,
@@ -2735,7 +3168,7 @@ test('world controls read discovered rules and save only after the closed-game a
     },
   );
   const service = createNativeService(true, call as typeof invoke);
-  render(
+  const view = render(
     createElement(WorldSettingsPanel, {
       service,
       id: 'instance',
@@ -2749,8 +3182,8 @@ test('world controls read discovered rules and save only after the closed-game a
   const save = screen.getByRole('button', {
     name: '保存世界设置与规则',
   }) as HTMLButtonElement;
-  expect(save.disabled).toBe(true);
-  fireEvent.click(screen.getByLabelText('确认游戏已关闭'));
+  expect(save.disabled).toBe(false);
+  expect(screen.queryByLabelText('确认游戏已关闭')).toBeNull();
   fireEvent.click(screen.getByLabelText('死亡不掉落'));
   fireEvent.change(screen.getByLabelText('随机刻速度'), {
     target: { value: '6' },
@@ -2758,6 +3191,14 @@ test('world controls read discovered rules and save only after the closed-game a
   fireEvent.click(save);
   await screen.findByText('已保存，原文件已备份：backup/level.dat');
   expect(world.gameRules.map((rule) => rule.value)).toEqual(['true', '6']);
+  view.rerender(
+    createElement(WorldSettingsPanel, {
+      service,
+      id: 'instance',
+      running: true,
+    }),
+  );
+  expect(save.disabled).toBe(true);
   service.stop();
 });
 test('world workspace reads only world data and clears the previous editor while changing selection', async () => {

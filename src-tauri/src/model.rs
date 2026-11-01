@@ -26,6 +26,8 @@ pub enum MemoryMode {
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Settings {
+    #[serde(default = "default_isolation")]
+    pub auto_translate_packs: bool,
     pub client_id: String,
     pub java_path: String,
     pub memory_mb: u32,
@@ -44,7 +46,10 @@ impl Default for Settings {
     fn default() -> Self {
         let java = std::env::var("EASYCRAFT_JAVA").unwrap_or_default();
         Self {
-            client_id: String::new(),
+            auto_translate_packs: true,
+            client_id: option_env!("EASYCRAFT_MICROSOFT_CLIENT_ID")
+                .unwrap_or_default()
+                .into(),
             java_path: java,
             memory_mb: 2048,
             memory_mode: MemoryMode::Auto,
@@ -58,6 +63,8 @@ impl Default for Settings {
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct LaunchOverrides {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub java_version: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub java_path: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -85,11 +92,15 @@ pub struct MemoryOverride {
 impl LaunchOverrides {
     pub fn is_empty(&self) -> bool {
         self.java_path.is_none()
+            && self.java_version.is_none()
             && self.memory.is_none()
             && self.game_isolation.is_none()
             && self.window_mode.is_none()
     }
     pub fn validate(&self) -> Result<()> {
+        if self.java_version.is_some() && self.java_path.is_none() {
+            return Err("Java 版本记录需要对应的可执行文件路径".into());
+        }
         if self
             .java_path
             .as_ref()
@@ -119,6 +130,10 @@ impl LaunchOverrides {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Instance {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version_folder: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub storage_root: Option<String>,
     pub id: String,
     pub name: String,
     pub version: String,
@@ -134,6 +149,65 @@ pub struct Instance {
     pub launch: LaunchOverrides,
 }
 impl Instance {
+    pub fn use_versions_layout(&mut self) {
+        let name: String = self
+            .name
+            .chars()
+            .map(|c| {
+                if c.is_control() || "\\/:*?\"<>|".contains(c) {
+                    '_'
+                } else {
+                    c
+                }
+            })
+            .take(60)
+            .collect();
+        self.version_folder = Some(format!(
+            "ec-{}-{}",
+            name.trim_end_matches(['.', ' ']),
+            &self.id[..8]
+        ));
+    }
+    pub fn minecraft_root(&self, root: &Path) -> Result<PathBuf> {
+        let base = self.storage_path(root)?;
+        if base
+            .file_name()
+            .is_some_and(|n| n.eq_ignore_ascii_case(".minecraft"))
+        {
+            Ok(base)
+        } else {
+            safe_path(&base, ".minecraft")
+        }
+    }
+    pub fn content_relative<'a>(&self, relative: &'a str) -> &'a str {
+        if self.version_folder.is_some() {
+            relative.strip_prefix("game/").unwrap_or(relative)
+        } else {
+            relative
+        }
+    }
+    pub fn content_directory(&self, directory: &Path) -> Result<PathBuf> {
+        if self.version_folder.is_some() {
+            Ok(directory.to_path_buf())
+        } else {
+            safe_path(directory, "game")
+        }
+    }
+    pub fn storage_path(&self, root: &Path) -> Result<PathBuf> {
+        match &self.storage_root {
+            Some(selected) => crate::local_import::checked_directory(Path::new(selected)),
+            None => Ok(root.to_path_buf()),
+        }
+    }
+    pub fn directory(&self, root: &Path) -> Result<PathBuf> {
+        if let Some(folder) = &self.version_folder {
+            if !folder.starts_with("ec-") || folder.contains(['/', '\\']) {
+                return Err("版本文件夹无效".into());
+            }
+            return safe_path(&self.minecraft_root(root)?, &format!("versions/{folder}"));
+        }
+        safe_path(&self.storage_path(root)?, &format!("instances/{}", self.id))
+    }
     pub fn isolated(&self) -> bool {
         self.launch.game_isolation.unwrap_or_else(|| {
             self.local
@@ -142,6 +216,23 @@ impl Instance {
         })
     }
     pub fn game_path(&self, root: &Path) -> Result<PathBuf> {
+        if self.version_folder.is_some() {
+            return if self.launch.game_isolation == Some(false) {
+                self.minecraft_root(root)
+            } else {
+                self.directory(root)
+            };
+        }
+        if self.storage_root.is_some() {
+            return safe_path(
+                &self.storage_path(root)?,
+                &if self.launch.game_isolation == Some(false) {
+                    "shared-game".into()
+                } else {
+                    format!("instances/{}/game", self.id)
+                },
+            );
+        }
         if let Some(local) = &self.local {
             let source = crate::local_import::checked_directory(Path::new(&local.root))?;
             let relative = match self.launch.game_isolation {
@@ -253,6 +344,7 @@ pub struct Version {
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Task {
+    pub planned_stages: Vec<String>,
     pub pending_instance: Option<String>,
     pub steps: Vec<TaskStep>,
     pub status: String,
@@ -266,6 +358,7 @@ pub struct Task {
 impl Default for Task {
     fn default() -> Self {
         Self {
+            planned_stages: vec![],
             pending_instance: None,
             steps: vec![],
             status: "idle".into(),

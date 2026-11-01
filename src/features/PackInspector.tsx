@@ -50,6 +50,9 @@ export function PackInspector({
   );
   const [selected, setSelected] = useState<string[]>([]);
   const [message, setMessage] = useState('');
+  const [destination, setDestination] = useState<string | null>(
+    initialPreview?.install?.storageRoot ?? null,
+  );
   const locked = busy || state?.task.status === 'running';
   const show = useCallback((value: PackPreview) => {
     setPreview(value);
@@ -59,6 +62,7 @@ export function PackInspector({
         .join(''),
     );
     setSelected([]);
+    setDestination(value.install?.storageRoot ?? null);
   }, []);
   const inspect = useCallback(
     async (file?: File, native = false, online = false) => {
@@ -112,6 +116,19 @@ export function PackInspector({
     ) ?? [];
   const optional = plan?.files.filter((file) => file.optional) ?? [];
   const platformCount = plan?.curseFiles?.length ?? 0;
+  async function chooseDestination(reset = false) {
+    if (!plan) return;
+    setBusy(true);
+    setError('');
+    try {
+      const value = await service.pickPackDestination(plan.token, reset);
+      if (reset || value) setDestination(value);
+    } catch (error) {
+      setError(error instanceof Error ? error.message : '选择安装位置失败');
+    } finally {
+      setBusy(false);
+    }
+  }
   async function install() {
     if (!plan) return;
     setBusy(true);
@@ -212,11 +229,13 @@ export function PackInspector({
                 <div className="pack-tags">
                   <span>Minecraft {plan.gameVersion}</span>
                   <span>
-                    {plan.forgeVersion
-                      ? 'Forge ' + plan.forgeVersion
-                      : plan.fabricVersion
-                        ? 'Fabric ' + plan.fabricVersion
-                        : '原版'}
+                    {plan.neoforgeVersion
+                      ? 'NeoForge ' + plan.neoforgeVersion
+                      : plan.forgeVersion
+                        ? 'Forge ' + plan.forgeVersion
+                        : plan.fabricVersion
+                          ? 'Fabric ' + plan.fabricVersion
+                          : '原版'}
                   </span>
                   <span>整合包 {plan.packVersion}</span>
                 </div>
@@ -270,9 +289,29 @@ export function PackInspector({
                 <div className="pack-destination">
                   <FolderOpen size={17} />
                   <div>
-                    <strong>安装到当前游戏库</strong>
-                    <p>{state?.dataRoot ?? '当前启动器数据目录'}</p>
+                    <strong>安装位置</strong>
+                    <p>
+                      {destination ?? state?.dataRoot ?? '当前启动器数据目录'}
+                    </p>
+                    <small>
+                      版本保存到 .minecraft/versions
+                      下；共享资源与下载缓存仍保留在启动器数据目录。
+                    </small>
                   </div>
+                  <button
+                    disabled={locked}
+                    onClick={() => void chooseDestination()}
+                  >
+                    更改位置
+                  </button>
+                  {destination && (
+                    <button
+                      disabled={locked}
+                      onClick={() => void chooseDestination(true)}
+                    >
+                      恢复默认
+                    </button>
+                  )}
                 </div>
                 {plan.recommendedMemoryMb && (
                   <p className="pack-memory">
@@ -306,9 +345,11 @@ export function PackInspector({
               )}
             </>
           ) : (
-            <p className="notice">
-              此归档当前仅支持内容预览，尚不能直接创建可启动实例。
-            </p>
+            <div className="notice" role="alert">
+              {preview.warnings.find((warning) =>
+                warning.startsWith('不可安装：'),
+              ) ?? '此归档当前仅支持内容预览，尚不能直接创建可启动实例。'}
+            </div>
           )}
           {plan && (
             <div className="pack-install-footer">

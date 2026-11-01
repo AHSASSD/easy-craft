@@ -14,7 +14,7 @@ const groups = [
     id: 'general',
     name: '显示与音画',
     icon: SlidersHorizontal,
-    description: '窗口、声音和画面',
+    description: '语言、窗口与音画',
   },
   {
     id: 'runtime',
@@ -49,7 +49,7 @@ export function InstanceSettings({
           <h2>实例设置</h2>
           <p>
             {instance?.name ?? '当前实例'} ·
-            启动设置单独保存，音画选项随游戏目录生效
+            显示与音画调整后自动保存，作用于当前实例
           </p>
         </div>
         <span className="scope-badge">

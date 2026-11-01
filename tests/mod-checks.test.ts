@@ -11,6 +11,7 @@ import {
 import { useModCheck, LaunchChecks } from '../src/features/LaunchChecks';
 import { InstanceOverview } from '../src/features/InstanceOverview';
 import { createNativeService } from '../src/app/native-service';
+import { instanceGameDirectory } from '../src/core/instance-settings';
 import type { invoke } from '@tauri-apps/api/core';
 import type {
   ModCheck,
@@ -22,6 +23,24 @@ import type {
 afterEach(() => {
   cleanup();
   vi.useRealTimers();
+});
+test('custom library paths take priority over managed loader cache paths', () => {
+  const instance = {
+    id: 'custom',
+    storageRoot: 'D:\\Games',
+    local: {
+      root: 'C:/Cache',
+      versionDirectory: 'instances/custom/game',
+      gameDirectory: 'instances/custom/game',
+    },
+    launch: { gameIsolation: true },
+  } as NativeInstance;
+  expect(instanceGameDirectory(instance, 'C:/Cache')).toBe(
+    'D:/Games/instances/custom/game',
+  );
+  expect(instanceGameDirectory(instance, 'C:/Cache', false)).toBe(
+    'D:/Games/shared-game',
+  );
 });
 const report = (id: string, complete = true): ModCheck => ({
   instanceId: id,
@@ -184,6 +203,7 @@ test('overview folder shortcuts use the controlled native folder route and expos
   });
   const service = {
     worlds: async () => [],
+    snapshot: () => ({ state: { dataRoot: 'C:/EasyCraftData' } }),
     openFolder,
   } as unknown as NativeService;
   const instance = {

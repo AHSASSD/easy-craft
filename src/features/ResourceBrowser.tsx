@@ -331,7 +331,13 @@ export function ResourceBrowser({
           version.gameVersions?.includes(result.game),
         ) ?? value.versions[0];
       setVersionId(initial?.id ?? '');
-      setOpenGroups({ [gameMajor(result.game)]: true });
+      setOpenGroups({
+        [gameMajor(
+          result.game === 'all'
+            ? (initial?.gameVersions?.[0] ?? '')
+            : result.game,
+        )]: true,
+      });
       setFile(
         initial?.files.find(
           (file) =>
@@ -365,7 +371,7 @@ export function ResourceBrowser({
   }
   const selected = detail?.versions.find((version) => version.id === versionId);
   function chooseVersion(id: string) {
-    setTargetOpen(kind !== 'modpack');
+    setTargetOpen(true);
     setVersionId(id);
     setFile(
       detail?.versions
@@ -494,7 +500,10 @@ export function ResourceBrowser({
               <DownSelect
                 label="在线资源游戏版本"
                 value={gameVersion}
-                options={gameVersions.map((value) => ({ value, label: value }))}
+                options={[
+                  { value: 'all', label: '全部版本' },
+                  ...gameVersions.map((value) => ({ value, label: value })),
+                ]}
                 onChange={(value) => onFilter(query, value)}
                 allowCustom
               />
@@ -579,19 +588,26 @@ export function ResourceBrowser({
       )}
       {detail ? (
         <>
-          <button
-            onClick={() => {
-              request.current++;
-              catalogRequest.current++;
-              setBusy(false);
-              setDetail(null);
-              setError('');
-              setPlan(null);
-              setMessage('');
-            }}
-          >
-            返回搜索结果
-          </button>
+          <div className="resource-detail-nav">
+            <button
+              onClick={() => {
+                request.current++;
+                catalogRequest.current++;
+                setBusy(false);
+                setDetail(null);
+                setError('');
+                setPlan(null);
+                setMessage('');
+              }}
+            >
+              返回搜索结果
+            </button>
+            {kind === 'modpack' && selected && (
+              <button className="primary" onClick={() => setTargetOpen(true)}>
+                安装此版本
+              </button>
+            )}
+          </div>
           <article
             className="card resource-detail"
             data-catalog-pending={catalogPhase === 'loading'}
@@ -601,7 +617,7 @@ export function ResourceBrowser({
             <p className="hint">
               {sourceName} · Minecraft {result?.game}
             </p>
-            <details>
+            <details className="resource-project-description">
               <summary>项目介绍（原文）</summary>
               <div className="resource-description">
                 {detail.body || '作者未提供介绍。'}
@@ -712,22 +728,24 @@ export function ResourceBrowser({
                     </section>
                   ))}
                 </section>
-                <label className="field-label">
-                  兼容版本
-                  <select
-                    aria-label="在线资源兼容版本"
-                    value={versionId}
-                    disabled={busy}
-                    onChange={(event) => chooseVersion(event.target.value)}
-                  >
-                    {detail.versions.map((version) => (
-                      <option key={version.id} value={version.id}>
-                        {version.name} · {version.number}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-                {selected && (
+                {kind !== 'modpack' && (
+                  <label className="field-label">
+                    兼容版本
+                    <select
+                      aria-label="在线资源兼容版本"
+                      value={versionId}
+                      disabled={busy}
+                      onChange={(event) => chooseVersion(event.target.value)}
+                    >
+                      {detail.versions.map((version) => (
+                        <option key={version.id} value={version.id}>
+                          {version.name} · {version.number}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                )}
+                {selected && kind !== 'modpack' && (
                   <>
                     <p>
                       格式/加载器：{selected.loaders.join('、')} · 环境：
@@ -1031,20 +1049,21 @@ export function ResourceBrowser({
                   </Modal>
                 )}
               </>
-            ) : (
+            ) : kind !== 'modpack' ? (
               <p className="notice">
-                {kind === 'modpack'
-                  ? '在下方获取选定归档并检查安装变更；整合包始终新建实例。'
-                  : '此版本暂没有可用的安装路径，请检查兼容条件。'}
+                此版本暂没有可用的安装路径，请检查兼容条件。
               </p>
-            )}
+            ) : null}
           </article>
         </>
       ) : result ? (
         <>
           <p className="hint">
-            结果：{result.query || '全部项目'} · Minecraft {result.game} · 共{' '}
-            {result.value.total} 项 · 查询于 {result.time}
+            结果：{result.query || '全部项目'} ·{' '}
+            {result.game === 'all'
+              ? '全部游戏版本'
+              : `Minecraft ${result.game}`}{' '}
+            · 共 {result.value.total} 项 · 查询于 {result.time}
             {result.query !== query ||
             result.game !== gameVersion ||
             result.category !== category ||
@@ -1084,7 +1103,9 @@ export function ResourceBrowser({
                       {sourceName} · {hit.author}
                     </span>
                     <span title={hit.gameVersions?.join('、')}>
-                      MC {result.game}
+                      {result.game === 'all'
+                        ? hit.gameVersions?.slice(-3).join(' / ') || '多版本'
+                        : `MC ${result.game}`}
                     </span>
                     <span>{displayDownloads(hit.downloads)}</span>
                     <span>更新 {displayDate(hit.updated)}</span>
@@ -1161,8 +1182,45 @@ export function ResourceBrowser({
           </p>
         </section>
       )}
-      {kind === 'modpack' && (
-        <>
+      {kind === 'modpack' && (targetOpen || incomingPack) && (
+        <Modal
+          title={`${saveOnly && !incomingPack ? '下载' : '安装'}整合包${selected ? ' · ' + selected.name : ''}`}
+          onClose={() => setTargetOpen(false)}
+        >
+          {selected && !incomingPack && (
+            <fieldset
+              className="install-target-mode pack-acquisition"
+              disabled={busy || installing}
+            >
+              <legend>获取方式</legend>
+              <label>
+                <input
+                  type="radio"
+                  name="pack-mode"
+                  checked={!saveOnly}
+                  onChange={() => {
+                    setSaveOnly(false);
+                    setError('');
+                    setMessage('');
+                  }}
+                />
+                安装为游戏实例
+              </label>
+              <label>
+                <input
+                  type="radio"
+                  name="pack-mode"
+                  checked={saveOnly}
+                  onChange={() => {
+                    setSaveOnly(true);
+                    setError('');
+                    setMessage('');
+                  }}
+                />
+                仅下载整合包归档
+              </label>
+            </fieldset>
+          )}
           {selected && (
             <label className="field-label">
               整合包归档文件
@@ -1182,24 +1240,57 @@ export function ResourceBrowser({
               </select>
             </label>
           )}
-          <PackInspector
-            key={`${detail?.id ?? ''}:${selected?.id ?? ''}:${file}`}
-            service={service}
-            incomingFile={incomingPack}
-            onFileConsumed={onPackConsumed}
-            onlineSource={
-              detail &&
-              selected &&
-              selected.files.some(
-                (item) =>
-                  item.filename === file &&
-                  /\.(mrpack|zip)$/i.test(item.filename),
-              )
-                ? { project: detail.id, version: selected.id, filename: file }
-                : undefined
-            }
-          />
-        </>
+          {saveOnly && selected && detail && !incomingPack ? (
+            <>
+              <p>保存原始 ZIP / MRPACK，不创建实例，也不下载包内依赖。</p>
+              {error && <p role="alert">{error}</p>}
+              {message && <p role="status">{message}</p>}
+              <button
+                className="primary"
+                disabled={busy || installing || !file}
+                onClick={() => {
+                  setBusy(true);
+                  setError('');
+                  setMessage('');
+                  void service
+                    .saveResource(detail.id, selected.id, file)
+                    .then((saved) => {
+                      if (saved)
+                        setMessage('整合包归档已保存，未创建游戏实例。');
+                    })
+                    .catch((e) =>
+                      setError(e instanceof Error ? e.message : String(e)),
+                    )
+                    .finally(() => setBusy(false));
+                }}
+              >
+                {busy ? '正在下载与校验…' : '选择文件夹并下载'}
+              </button>
+            </>
+          ) : (
+            <PackInspector
+              key={`${detail?.id ?? ''}:${selected?.id ?? ''}:${file}`}
+              service={service}
+              incomingFile={incomingPack}
+              onFileConsumed={() => {
+                setTargetOpen(true);
+                onPackConsumed?.();
+              }}
+              onStarted={() => setTargetOpen(false)}
+              onlineSource={
+                detail &&
+                selected &&
+                selected.files.some(
+                  (item) =>
+                    item.filename === file &&
+                    /\.(mrpack|zip)$/i.test(item.filename),
+                )
+                  ? { project: detail.id, version: selected.id, filename: file }
+                  : undefined
+              }
+            />
+          )}
+        </Modal>
       )}
     </section>
   );

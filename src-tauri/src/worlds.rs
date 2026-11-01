@@ -554,10 +554,57 @@ fn world_replacement(original: &[u8], settings: WorldSettings) -> Result<Vec<u8>
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ClientOptions {
     pub revision: String,
+    #[serde(default = "default_language")]
+    pub language: String,
     pub master_volume: f64,
     pub music_volume: f64,
     pub render_distance: u32,
     pub fullscreen: bool,
+}
+fn default_language() -> String {
+    "zh_cn".into()
+}
+fn valid_language(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 32
+        && value
+            .bytes()
+            .all(|c| c.is_ascii_alphanumeric() || c == b'_')
+}
+pub fn language_for_version(language: &str, version: &str) -> String {
+    let legacy = version
+        .strip_prefix("1.")
+        .and_then(|v| v.split('.').next())
+        .and_then(|v| v.parse::<u32>().ok())
+        .is_some_and(|minor| minor < 11);
+    let lower = language.to_ascii_lowercase();
+    if legacy {
+        if let Some((base, region)) = lower.split_once('_') {
+            return format!("{base}_{}", region.to_ascii_uppercase());
+        }
+    }
+    lower
+}
+// Only new installations call this. Existing and referenced game directories
+// retain their language; their options are changed only through the editor.
+pub fn initial_options(bytes: Option<&[u8]>, version: &str) -> Result<Vec<u8>> {
+    let text = std::str::from_utf8(bytes.unwrap_or_default()).map_err(|_| "游戏选项编码无效")?;
+    let newline = if text.contains("\r\n") { "\r\n" } else { "\n" };
+    let mut lines: Vec<_> = text
+        .lines()
+        .filter(|line| !line.trim_start_matches('\u{feff}').starts_with("lang:"))
+        .map(str::to_owned)
+        .collect();
+    lines.push(format!("lang:{}", language_for_version("zh_cn", version)));
+    Ok(format!("{}{newline}", lines.join(newline)).into_bytes())
+}
+pub fn initialize_options(root: &Path, version: &str) -> Result<()> {
+    // Called only when publishing a newly created standalone game instance.
+    let path = model::safe_path(root, "options.txt")?;
+    if !path.exists() {
+        model::write_file(root, "options.txt", &initial_options(None, version)?)?;
+    }
+    Ok(())
 }
 fn options_bytes(root: &Path) -> Result<Option<Vec<u8>>> {
     let path = model::safe_path(root, "options.txt")?;
@@ -570,9 +617,13 @@ fn parse_options(bytes: Option<&[u8]>) -> Result<ClientOptions> {
     let text = std::str::from_utf8(bytes.unwrap_or_default())
         .map_err(|_| "options.txt 不是有效 UTF-8，未修改")?;
     let map: HashMap<_, _> = text
+        .trim_start_matches('\u{feff}')
         .lines()
         .filter_map(|line| line.split_once(':'))
         .collect();
+    if map.get("lang").is_some_and(|v| !valid_language(v)) {
+        return Err("现有游戏语言代码无效，未修改".into());
+    }
     let number = |key: &str, default: f64| -> Result<f64> {
         let value = match map.get(key) {
             Some(value) => value.parse::<f64>().map_err(|_| "现有游戏选项数值无效")?,
@@ -600,6 +651,11 @@ fn parse_options(bytes: Option<&[u8]>) -> Result<ClientOptions> {
     };
     Ok(ClientOptions {
         revision: bytes.map(hash).unwrap_or_else(|| "missing".into()),
+        language: map
+            .get("lang")
+            .filter(|v| valid_language(v))
+            .map(|v| v.to_string())
+            .unwrap_or_else(default_language),
         master_volume: master,
         music_volume: music,
         render_distance: distance as u32,
@@ -614,6 +670,85 @@ pub fn save_options(root: &Path, options: ClientOptions) -> Result<String> {
     let original = options_bytes(root)?;
     let result = options_replacement(original.as_deref(), options)?;
     backed_write(root, "options.txt", original.as_deref(), &result)
+}
+pub(crate) fn activate_translation(
+    root: &Path,
+    file: &str,
+    version: &str,
+    revision: &str,
+) -> Result<()> {
+    if file.len() > 128
+        || file.contains(['/', '\\', '\n', '\r'])
+        || !file.starts_with("EasyCraft-CFPA-")
+        || !file.ends_with(".zip")
+    {
+        return Err("汉化资源文件名无效".into());
+    }
+    let _locks = lock_worlds(root)?;
+    let original = options_bytes(root)?;
+    if original
+        .as_deref()
+        .map(hash)
+        .unwrap_or_else(|| "missing".into())
+        != revision
+    {
+        return Err("游戏设置已变化，未覆盖；请重新读取后重试".into());
+    }
+    let text = std::str::from_utf8(original.as_deref().unwrap_or_default())
+        .map_err(|_| "游戏设置不是有效 UTF-8，未自动启用汉化")?;
+    let raw = text
+        .trim_start_matches('\u{feff}')
+        .lines()
+        .filter_map(|line| line.strip_prefix("resourcePacks:"))
+        .next_back();
+    let mut packs: Vec<String> = match raw {
+        Some(raw) => serde_json::from_str(raw).map_err(|_| "现有资源包列表格式无效，未覆盖")?,
+        None => vec![],
+    };
+    if packs.len() > 512 || packs.iter().any(|v| v.len() > 1024) {
+        return Err("现有资源包列表过大，未覆盖".into());
+    }
+    packs.retain(|v| {
+        let name = v.strip_prefix("file/").unwrap_or(v);
+        !name
+            .strip_prefix("EasyCraft-CFPA-")
+            .and_then(|v| v.strip_suffix(".zip"))
+            .is_some_and(|v| v.len() == 16 && v.bytes().all(|b| b.is_ascii_hexdigit()))
+    });
+    let legacy = version
+        .strip_prefix("1.")
+        .and_then(|v| v.split('.').next())
+        .and_then(|v| v.parse::<u32>().ok())
+        .is_some_and(|v| v <= 12);
+    let position = packs
+        .iter()
+        .position(|v| v == "vanilla")
+        .map(|i| i + 1)
+        .unwrap_or(0);
+    // Lowest external priority: the pack author's and player's translations win.
+    packs.insert(
+        position,
+        format!("{}{file}", if legacy { "" } else { "file/" }),
+    );
+    let newline = if text.contains("\r\n") { "\r\n" } else { "\n" };
+    let mut lines: Vec<_> = text
+        .lines()
+        .filter(|line| {
+            let plain = line.trim_start_matches('\u{feff}');
+            !plain.starts_with("lang:") && !plain.starts_with("resourcePacks:")
+        })
+        .map(str::to_owned)
+        .collect();
+    lines.push(format!("lang:{}", language_for_version("zh_cn", version)));
+    lines.push(format!(
+        "resourcePacks:{}",
+        serde_json::to_string(&packs).map_err(|_| "资源包设置编码失败")?
+    ));
+    let bytes = format!("{}{newline}", lines.join(newline));
+    if original.as_deref() != Some(bytes.as_bytes()) {
+        backed_write(root, "options.txt", original.as_deref(), bytes.as_bytes())?;
+    }
+    Ok(())
 }
 // Apply before Java creates its window; avoid enumerating worlds or rewriting
 // unrelated sound, video and Mod settings when choosing the launch window mode.
@@ -670,6 +805,9 @@ pub fn prepare_window(root: &Path, mode: model::WindowMode) -> Result<Option<Str
     backed_write(root, "options.txt", original.as_deref(), result.as_bytes()).map(Some)
 }
 fn options_replacement(original: Option<&[u8]>, options: ClientOptions) -> Result<Vec<u8>> {
+    if !valid_language(&options.language) {
+        return Err("游戏语言代码无效".into());
+    }
     if !options.master_volume.is_finite()
         || !options.music_volume.is_finite()
         || !(0.0..=1.0).contains(&options.master_volume)
@@ -684,6 +822,7 @@ fn options_replacement(original: Option<&[u8]>, options: ClientOptions) -> Resul
     let text = std::str::from_utf8(original.unwrap_or_default()).map_err(|_| "配置编码无效")?;
     let newline = if text.contains("\r\n") { "\r\n" } else { "\n" };
     let replacements = [
+        ("lang", options.language),
         ("soundCategory_master", options.master_volume.to_string()),
         ("soundCategory_music", options.music_volume.to_string()),
         ("renderDistance", options.render_distance.to_string()),
@@ -692,9 +831,11 @@ fn options_replacement(original: Option<&[u8]>, options: ClientOptions) -> Resul
     let mut lines: Vec<String> = text
         .lines()
         .filter(|line| {
-            !replacements
-                .iter()
-                .any(|(key, _)| line.split_once(':').is_some_and(|(old, _)| old == *key))
+            !replacements.iter().any(|(key, _)| {
+                line.trim_start_matches('\u{feff}')
+                    .split_once(':')
+                    .is_some_and(|(old, _)| old == *key)
+            })
         })
         .map(str::to_owned)
         .collect();
@@ -975,6 +1116,7 @@ fn restore_plan(
         let current = parse_options(original.as_deref())?;
         let mut saved = parse_options(Some(&saved))?;
         saved.revision.clone_from(&revision);
+        change(&mut changes, "游戏语言", &current.language, &saved.language);
         change(
             &mut changes,
             "主音量（0–1）",
@@ -1405,6 +1547,48 @@ mod tests {
         let mut invalid = load_options(&root).unwrap();
         invalid.master_volume = f64::NAN;
         assert!(save_options(&root, invalid).is_err());
+    }
+    #[test]
+    fn language_defaults_edit_backup_restore_and_legacy_codes() {
+        let root = root();
+        initialize_options(&root, "1.10.2").unwrap();
+        assert_eq!(load_options(&root).unwrap().language, "zh_CN");
+        let original = b"lang:fr_fr\r\nresourcePacks:[\"vanilla\",\"file/translation.zip\"]\r\ncustomMod:keep:colon\r\n";
+        fs::write(root.join("options.txt"), original).unwrap();
+        initialize_options(&root, "1.21.1").unwrap();
+        assert_eq!(fs::read(root.join("options.txt")).unwrap(), original);
+        let mut options = load_options(&root).unwrap();
+        options.language = "zh_cn".into();
+        let backup = save_options(&root, options).unwrap();
+        assert_eq!(fs::read(backup).unwrap(), original);
+        let result = fs::read_to_string(root.join("options.txt")).unwrap();
+        assert!(result.contains("lang:zh_cn\r\n"));
+        assert!(result.contains("customMod:keep:colon\r\n"));
+        assert!(result.contains("resourcePacks:[\"vanilla\",\"file/translation.zip\"]\r\n"));
+        for invalid in ["", "zh_cn\nfullscreen:true", "../../zh", "中文"] {
+            let mut value = load_options(&root).unwrap();
+            value.language = invalid.into();
+            assert!(save_options(&root, value).is_err());
+            assert_eq!(
+                fs::read_to_string(root.join("options.txt")).unwrap(),
+                result
+            );
+        }
+        let id = backups(&root, None).unwrap().entries[0].id.clone();
+        let plan = preview_backup(&root, None, &id).unwrap();
+        assert!(plan
+            .changes
+            .iter()
+            .any(|v| v.key == "游戏语言" && v.after == "fr_fr"));
+        assert_eq!(language_for_version("ZH_cn", "1.7.10"), "zh_CN");
+        assert_eq!(language_for_version("en_us", "1.10.2"), "en_US");
+        for version in ["1.11", "1.12.2", "1.21.1", "26.2", "26.4-snapshot-5"] {
+            assert_eq!(language_for_version("zh_CN", version), "zh_cn");
+        }
+        let fresh = initial_options(Some(original), "1.21.1").unwrap();
+        assert!(std::str::from_utf8(&fresh)
+            .unwrap()
+            .contains("lang:zh_cn\r\n"));
     }
     #[test]
     fn create_desktop_test_fixture() {

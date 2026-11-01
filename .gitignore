@@ -4,6 +4,7 @@ src-tauri/target/
 src-tauri/gen/
 test-results/
 playwright-report/
+.playwright-cli/
 output/
 *.local
 data/

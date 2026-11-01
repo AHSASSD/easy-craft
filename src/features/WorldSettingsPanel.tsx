@@ -6,8 +6,12 @@ import {
   RefreshCw,
   Search,
   ChevronRight,
+  Languages,
+  Upload,
+  Download,
 } from 'lucide-react';
-import { useEditor, useNavigationGuard } from './UnsavedChanges';
+import { useNavigationGuard } from './UnsavedChanges';
+import { useAutoEditor } from './useAutoEditor';
 import { WorldDatapacks } from './WorldDatapacks';
 import { ConfigBackups } from './ConfigBackups';
 import type {
@@ -16,6 +20,7 @@ import type {
   WorldEntry,
   WorldSettings,
   ConfigBackupPreview,
+  TranslationReport,
 } from '../core/native-contracts';
 
 const ruleNames: Record<string, string> = {
@@ -67,6 +72,22 @@ const ruleNames: Record<string, string> = {
   commandModificationBlockLimit: '命令修改方块数量上限',
   maxCommandForkCount: '命令分支上限',
 };
+const languages: Record<string, string> = {
+  zh_cn: '简体中文',
+  zh_tw: '繁體中文（台灣）',
+  zh_hk: '繁體中文（香港）',
+  en_us: 'English (US)',
+  en_gb: 'English (UK)',
+  ja_jp: '日本語',
+  ko_kr: '한국어',
+  de_de: 'Deutsch',
+  fr_fr: 'Français',
+  es_es: 'Español',
+  pt_br: 'Português (Brasil)',
+  ru_ru: 'Русский',
+  uk_ua: 'Українська',
+  it_it: 'Italiano',
+};
 export function WorldSettingsPanel({
   service,
   id,
@@ -87,12 +108,17 @@ export function WorldSettingsPanel({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [message, setMessage] = useState('');
-  const [closed, setClosed] = useState(false);
   const [query, setQuery] = useState('');
   const [worldQuery, setWorldQuery] = useState('');
   const [loading, setLoading] = useState(true);
+  const [autoTranslationDraft, setAutoTranslationDraft] = useState<
+    boolean | null
+  >(null);
   const [worldBase, setWorldBase] = useState('');
   const [optionsBase, setOptionsBase] = useState('');
+  const [translation, setTranslation] = useState<TranslationReport | null>(
+    null,
+  );
   const guard = useNavigationGuard();
   function receiveWorld(value: WorldSettings) {
     setWorld(value);
@@ -181,8 +207,8 @@ export function WorldSettingsPanel({
     setError('');
     setMessage('');
     try {
-      if (!closed || running)
-        throw new Error('请先退出游戏并勾选“确认游戏已关闭”');
+      if (running || !service.snapshot().available)
+        throw new Error('游戏或任务运行中，或本地服务暂不可用，请稍后保存');
       let backup = '';
       if (kind === 'world' && world) {
         backup = await service.saveWorld(id, worldId, world);
@@ -192,7 +218,13 @@ export function WorldSettingsPanel({
         backup = await service.saveOptions(id, options);
         receiveOptions(await service.options(id));
       }
-      setMessage(backup ? `已保存，原文件已备份：${backup}` : '已保存配置。');
+      setMessage(
+        section === 'options'
+          ? '已自动保存'
+          : backup
+            ? `已保存，原文件已备份：${backup}`
+            : '已保存配置。',
+      );
     } catch (error) {
       setError(error instanceof Error ? error.message : '保存失败');
       if (propagate) throw error;
@@ -205,7 +237,7 @@ export function WorldSettingsPanel({
   const dirtyOptions =
     section !== 'world' && !!options && optionsBase !== JSON.stringify(options);
   async function restore(preview: ConfigBackupPreview) {
-    if (!closed || running || dirtyWorld || dirtyOptions)
+    if (running || !service.snapshot().available || dirtyWorld || dirtyOptions)
       throw new Error('请先关闭游戏并保存或放弃当前修改，再恢复配置');
     setBusy(true);
     setError('');
@@ -222,7 +254,10 @@ export function WorldSettingsPanel({
       setBusy(false);
     }
   }
-  useEditor({
+  const auto = useAutoEditor({
+    key: JSON.stringify(section === 'options' ? options : [world, options]),
+    blocked: busy || running || !service.snapshot().available,
+    automatic: section === 'options',
     dirty: dirtyWorld || dirtyOptions,
     save: async () => {
       if (dirtyWorld) await save('world', true);
@@ -233,7 +268,42 @@ export function WorldSettingsPanel({
       if (optionsBase) setOptions(JSON.parse(optionsBase) as ClientOptions);
     },
   });
-  const locked = busy || running;
+  const locked = busy || running || !service.snapshot().available;
+  async function importTranslation(file?: File) {
+    if (locked) return;
+    setBusy(true);
+    setError('');
+    setMessage('');
+    try {
+      if (file) {
+        if (!file.name.toLowerCase().endsWith('.zip'))
+          throw Error('请选择资源包 ZIP；模组 JAR 请在模组页安装');
+        await service.importContentFile(id, 'resourcepacks', file);
+      } else if (!(await service.pickContent(id, 'resourcepacks'))) return;
+      setMessage('汉化资源包已导入，请在游戏的“资源包”中启用并调整优先级。');
+    } catch (error) {
+      setError(error instanceof Error ? error.message : '汉化包导入失败');
+    } finally {
+      setBusy(false);
+    }
+  }
+  async function installTranslation() {
+    if (locked) return;
+    setBusy(true);
+    setError('');
+    setMessage('');
+    setTranslation(null);
+    try {
+      const report = await service.installTranslation(id);
+      setTranslation(report);
+      receiveOptions(await service.options(id));
+      setMessage('汉化资源包已安装并启用，覆盖范围可查看汉化匹配详情。');
+    } catch (error) {
+      setError(error instanceof Error ? error.message : '自动汉化未完成');
+    } finally {
+      setBusy(false);
+    }
+  }
   const worldLoading = !!worldId && !world && !error;
   return (
     <div
@@ -242,14 +312,14 @@ export function WorldSettingsPanel({
       <div className="manager-heading">
         <div>
           <h2>
-            {section === 'options' ? '音画设置' : '存档'}{' '}
+            {section === 'options' ? '语言、声音与画面' : '存档'}{' '}
             {section !== 'options' && (
               <span className="manager-count">
                 {loading ? '…' : worlds.length}
               </span>
             )}
           </h2>
-          <p>
+          <p hidden={section === 'options'}>
             {section === 'options'
               ? '调整这个实例的声音与画面选项'
               : '选择一个世界，管理设置、数据包与配置备份'}
@@ -270,33 +340,33 @@ export function WorldSettingsPanel({
           {message}
         </p>
       )}
+      {auto.error && (
+        <p role="alert">
+          {auto.error}{' '}
+          <button onClick={() => void auto.retry().catch(() => {})}>
+            重试保存
+          </button>
+        </p>
+      )}
       {running && (
         <p className="notice">
           游戏或任务运行中，配置修改已锁定。退出后重新读取再修改。
         </p>
       )}
-      <div className="manager-protection-note">
-        <ShieldCheck size={18} />
-        <div>
-          <strong>保存前自动备份</strong>
-          <details>
-            <summary>了解修改范围</summary>
-            <p>
-              不修改区块、背包或未知字段。请先退出从其他启动器打开的同一实例；外部游戏停留主菜单时无法可靠检测。
-            </p>
-          </details>
+      {section !== 'options' && (
+        <div className="manager-protection-note">
+          <ShieldCheck size={18} />
+          <div>
+            <strong>保存前自动备份</strong>
+            <details>
+              <summary>了解修改范围</summary>
+              <p>
+                不修改区块、背包或未知字段。请先退出从其他启动器打开的同一实例；外部游戏停留主菜单时无法可靠检测。
+              </p>
+            </details>
+          </div>
         </div>
-      </div>
-      <label className="toggle-row manager-edit-gate">
-        <span>我已关闭此实例的 Minecraft，允许保存配置</span>
-        <input
-          aria-label="确认游戏已关闭"
-          type="checkbox"
-          checked={closed}
-          disabled={locked}
-          onChange={(event) => setClosed(event.target.checked)}
-        />
-      </label>
+      )}
       <div
         className={
           section === 'options' ? 'audio-settings-body' : 'world-manager-body'
@@ -357,6 +427,149 @@ export function WorldSettingsPanel({
           </aside>
         )}
         <div className="world-detail-pane">
+          {section !== 'world' && (
+            <section
+              className="card language-settings"
+              aria-label="游戏语言与汉化"
+              onDragOver={(event) => {
+                event.preventDefault();
+              }}
+              onDrop={(event) => {
+                event.preventDefault();
+                event.stopPropagation();
+                const files = event.dataTransfer.files;
+                if (files.length !== 1) {
+                  setError('请一次拖入一个汉化资源包 ZIP');
+                  return;
+                }
+                const file = files[0];
+                guard(() => void importTranslation(file));
+              }}
+            >
+              <h3>
+                <Languages size={18} />
+                语言与汉化
+              </h3>
+              <label>
+                游戏语言
+                <select
+                  aria-label="游戏语言"
+                  value={options?.language.toLowerCase() ?? 'zh_cn'}
+                  disabled={locked || !options}
+                  onChange={(event) =>
+                    options &&
+                    setOptions({ ...options, language: event.target.value })
+                  }
+                >
+                  {options && !languages[options.language.toLowerCase()] && (
+                    <option value={options.language.toLowerCase()}>
+                      {options.language}
+                    </option>
+                  )}
+                  {Object.entries(languages).map(([code, name]) => (
+                    <option key={code} value={code}>
+                      {name}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <div className="language-actions">
+                <button
+                  className="primary"
+                  disabled={locked}
+                  onClick={() => guard(() => void installTranslation())}
+                >
+                  <Download size={15} />
+                  自动安装汉化
+                </button>
+                <button
+                  disabled={locked}
+                  onClick={() => guard(() => void importTranslation())}
+                >
+                  <Upload size={15} />
+                  导入汉化资源包
+                </button>
+                <label className="visually-hidden">
+                  选择 ZIP
+                  <input
+                    type="file"
+                    accept=".zip"
+                    aria-label="导入本地汉化资源包"
+                    disabled={locked}
+                    onChange={(event) => {
+                      const file = event.target.files?.[0];
+                      event.target.value = '';
+                      if (file) guard(() => void importTranslation(file));
+                    }}
+                  />
+                </label>
+              </div>
+              <label className="toggle-row">
+                <span>新整合包缺少汉化时自动补充</span>
+                <input
+                  type="checkbox"
+                  aria-label="缺少汉化时自动补充"
+                  disabled={locked}
+                  checked={
+                    (autoTranslationDraft ??
+                      service.snapshot().state?.settings.autoTranslatePacks) !==
+                    false
+                  }
+                  onChange={(event) => {
+                    const enabled = event.target.checked;
+                    guard(() => {
+                      setAutoTranslationDraft(enabled);
+                      setBusy(true);
+                      setError('');
+                      const target = service.snapshot().state?.settings;
+                      if (!target) {
+                        setBusy(false);
+                        return;
+                      }
+                      void service
+                        .saveSettings({
+                          ...target,
+                          autoTranslatePacks: enabled,
+                        })
+                        .catch((error: unknown) =>
+                          setError(
+                            error instanceof Error
+                              ? error.message
+                              : '保存自动汉化设置失败',
+                          ),
+                        )
+                        .finally(() => {
+                          setBusy(false);
+                          setAutoTranslationDraft(null);
+                        });
+                    });
+                  }}
+                />
+              </label>
+              <p className="hint">
+                为当前版本和已启用模组匹配 CFPA
+                汉化；不包含任务书、脚本等专用补丁。
+              </p>
+              {translation && (
+                <details>
+                  <summary>汉化匹配详情</summary>
+                  <p>
+                    {translation.source} · {translation.file}
+                  </p>
+                  <p>匹配：{translation.matched.join('、')}</p>
+                  {!!translation.unmatched.length && (
+                    <p>CFPA 未匹配：{translation.unmatched.join('、')}</p>
+                  )}
+                  {!!translation.skippedFiles && (
+                    <p>{translation.skippedFiles} 个模组文件未能识别。</p>
+                  )}
+                  <p className="hint">
+                    匹配依据是资源命名空间，不能保证所有词条均有翻译。未匹配的模组可能已自带中文。已保留玩家原有资源包及其优先级。
+                  </p>
+                </details>
+              )}
+            </section>
+          )}
           <div className="world-columns">
             {section !== 'options' && (
               <section className="card world-detail-card">
@@ -551,7 +764,7 @@ export function WorldSettingsPanel({
                     )}
                     <button
                       className="primary"
-                      disabled={!closed}
+                      disabled={locked}
                       onClick={() => void save('world')}
                     >
                       保存世界设置
@@ -643,13 +856,6 @@ export function WorldSettingsPanel({
                       <p className="hint">
                         启动时以上方“启动显示方式”为准；选择“跟随游戏设置”后使用这里的全屏选项。
                       </p>
-                      <button
-                        className="primary"
-                        type="submit"
-                        disabled={!closed}
-                      >
-                        保存音画设置
-                      </button>
                     </fieldset>
                   </form>
                 )}
@@ -743,7 +949,7 @@ export function WorldSettingsPanel({
                 </p>
                 <button
                   className="primary"
-                  disabled={locked || !closed || world.hardcore}
+                  disabled={locked || world.hardcore}
                   onClick={() => void save('world')}
                 >
                   保存世界设置与规则
@@ -760,7 +966,6 @@ export function WorldSettingsPanel({
                 id={id}
                 worldId={worldId}
                 locked={locked}
-                closed={closed}
                 dirty={dirtyWorld || dirtyOptions}
                 onRestore={restore}
               />
@@ -774,7 +979,6 @@ export function WorldSettingsPanel({
                 service={service}
                 id={id}
                 locked={locked}
-                closed={closed}
                 dirty={dirtyWorld || dirtyOptions}
                 onRestore={restore}
               />

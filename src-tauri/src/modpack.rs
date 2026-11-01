@@ -57,6 +57,8 @@ pub struct Origin {
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Plan {
+    pub neoforge_version: String,
+    pub storage_root: Option<String>,
     pub recommended_memory_mb: Option<u32>,
     pub forge_version: String,
     pub curse_files: Vec<(u64, u64)>,
@@ -158,9 +160,6 @@ fn parse(input: Arc<Input>, preview: &mut packs::PackPreview) -> Result<Plan> {
             .filter(|v| crate::forge::valid_loader(v))
             .ok_or("此 CurseForge 加载器尚未支持")?
             .into();
-        if value["minecraft"]["version"] != "1.12.2" {
-            return Err("CurseForge Forge 安装目前先支持 1.12.2 旧格式安装器".into());
-        }
         for file in value["files"]
             .as_array()
             .filter(|v| v.len() <= 1000)
@@ -190,9 +189,11 @@ fn parse(input: Arc<Input>, preview: &mut packs::PackPreview) -> Result<Plan> {
     let dependencies = value["dependencies"].as_object().ok_or("缺少运行依赖")?;
     if dependencies
         .keys()
-        .any(|key| !["minecraft", "fabric-loader"].contains(&key.as_str()))
+        .any(|key| !["minecraft", "fabric-loader", "neoforge", "forge"].contains(&key.as_str()))
     {
-        return Err("当前仅支持原版或 Fabric 整合包；其他加载器依赖尚未接入".into());
+        return Err(
+            "此整合包加载器尚未支持；当前支持原版、Fabric、Forge 和 NeoForge MRPACK".into(),
+        );
     }
     let game_version = text(&value["dependencies"], "minecraft", 99)?;
     if !model::valid_id(&game_version) {
@@ -207,8 +208,32 @@ fn parse(input: Arc<Input>, preview: &mut packs::PackPreview) -> Result<Plan> {
     } else {
         String::new()
     };
+    let neoforge_version = if dependencies.contains_key("neoforge") {
+        let version = text(&value["dependencies"], "neoforge", 64)?;
+        if !crate::forge::valid_loader(&version) || !fabric_version.is_empty() {
+            return Err("NeoForge 版本无效或声明了多个加载器".into());
+        }
+        version
+    } else {
+        String::new()
+    };
+    if dependencies.contains_key("forge") {
+        forge_version = text(&value["dependencies"], "forge", 64)?;
+        if !crate::forge::valid_loader(&forge_version) {
+            return Err("Forge 版本无效".into());
+        }
+    }
+    if [&fabric_version, &forge_version, &neoforge_version]
+        .iter()
+        .filter(|version| !version.is_empty())
+        .count()
+        > 1
+    {
+        return Err("整合包不能同时声明多个加载器".into());
+    }
     let mut files = BTreeMap::new();
     let mut skipped = 0;
+    let mut skipped_world_locks = 0;
     for entry in value["files"].as_array().ok_or("缺少文件清单")? {
         let target = text(entry, "path", 512)?;
         path(&target)?;
@@ -275,6 +300,19 @@ fn parse(input: Arc<Input>, preview: &mut packs::PackPreview) -> Result<Plan> {
             if entry.is_dir() {
                 continue;
             }
+            model::validate_relative_path(target)?;
+            let components: Vec<_> = target.split('/').collect();
+            if components
+                .last()
+                .is_some_and(|v| v.eq_ignore_ascii_case("session.lock"))
+                && components
+                    .iter()
+                    .enumerate()
+                    .any(|(i, p)| p.eq_ignore_ascii_case("saves") && i + 2 < components.len())
+            {
+                skipped_world_locks += 1;
+                continue;
+            }
             path(target)?;
             let size = entry.size();
             let mut digest = Sha512::new();
@@ -330,12 +368,17 @@ fn parse(input: Arc<Input>, preview: &mut packs::PackPreview) -> Result<Plan> {
             "客户端不支持的 {skipped} 个文件不会安装；server-overrides 不用于客户端。"
         ));
     }
+    if skipped_world_locks > 0 {
+        preview.warnings.push(format!("已忽略教程/模板世界的 {skipped_world_locks} 个 session.lock 运行锁文件；世界内容仍会安装。"));
+    }
     preview.warnings.push(
         "仅新建隔离实例；不执行归档内脚本。可选文件默认不安装，覆盖目录按客户端层级合并。".into(),
     );
     drop(zip);
     drop(guard);
     Ok(Plan {
+        neoforge_version,
+        storage_root: None,
         recommended_memory_mb,
         forge_version,
         curse_files,
@@ -451,7 +494,44 @@ pub async fn online(
     .await?;
     let (artifact, expected) = online_artifact(project, version, filename, &value)?;
     host.progress("pack-archive", "下载并校验选定的整合包归档", 0, 1);
-    let cached = net::resource_download(&host.client, &host.root, &artifact, cancel).await?;
+    let archive_bytes = artifact.size.unwrap_or(0) as usize;
+    let reported = Mutex::new((Instant::now(), 0usize));
+    let observer = |update| {
+        let mut state = reported.lock().expect("archive progress poisoned");
+        let (bytes, force, label) = match update {
+            net::TransferUpdate::Cached => {
+                (archive_bytes, true, "复用已校验的整合包归档".to_string())
+            }
+            net::TransferUpdate::Verified => {
+                (archive_bytes, true, "整合包归档校验完成".to_string())
+            }
+            net::TransferUpdate::Bytes(bytes) => {
+                (bytes as usize, false, "下载整合包归档".to_string())
+            }
+            net::TransferUpdate::Retrying(attempt) => (
+                state.1,
+                true,
+                format!("整合包归档正在续传重试（第 {attempt} 次）"),
+            ),
+        };
+        state.1 = bytes;
+        if force || state.0.elapsed() >= Duration::from_millis(250) {
+            host.progress(
+                "pack-archive",
+                &format!(
+                    "{label} · {:.1}/{:.1} MiB",
+                    bytes as f64 / 1048576.0,
+                    archive_bytes as f64 / 1048576.0
+                ),
+                bytes,
+                archive_bytes,
+            );
+            state.0 = Instant::now();
+        }
+    };
+    let cached =
+        net::resource_download_observed(&host.client, &host.root, &artifact, cancel, &observer)
+            .await?;
     if cancel.is_cancelled() {
         return Err("归档检查已取消".into());
     }
@@ -521,13 +601,12 @@ impl Transaction {
         if !uuid(&self.token) || !uuid(&self.instance.id) {
             return Err("整合包事务标识无效".into());
         }
+        if published || self.in_place {
+            return self.instance.directory(root);
+        }
         model::safe_path(
-            root,
-            &if published || self.in_place {
-                format!("instances/{}", self.instance.id)
-            } else {
-                format!("pack-staging/{}", self.token)
-            },
+            &self.instance.storage_path(root)?,
+            &format!("pack-staging/{}", self.token),
         )
     }
     fn save(&self, root: &Path) -> Result<()> {
@@ -670,11 +749,53 @@ pub fn recover(root: &Path, instances: &[Instance]) -> Result<Vec<String>> {
 pub fn begin(root: &Path, plan: &Plan, instance: Instance) -> Result<Transaction> {
     begin_instance(root, &plan.token, instance)
 }
+pub fn ensure_game(root: &Path, transaction: &Transaction) -> Result<()> {
+    fs::create_dir_all(
+        transaction
+            .instance
+            .content_directory(&transaction.directory(root, false)?)?,
+    )
+    .map_err(|_| "无法创建实例游戏目录".into())
+}
+pub fn initialize_language(
+    root: &Path,
+    transaction: &mut Transaction,
+    cancel: &CancellationToken,
+) -> Result<()> {
+    if cancel.is_cancelled() {
+        return Err("安装已取消".into());
+    }
+    let directory = transaction.directory(root, false)?;
+    let relative = transaction.instance.content_relative("game/options.txt");
+    let path = model::safe_path(&directory, relative)?;
+    let original = if path.exists() {
+        if transaction.files.get(relative) != Some(&stamp(&path)?) {
+            return Err("游戏设置已被外部修改，未覆盖".into());
+        }
+        Some(fs::read(&path).map_err(|_| "无法读取新实例游戏设置")?)
+    } else {
+        None
+    };
+    let bytes = crate::worlds::initial_options(original.as_deref(), &transaction.instance.version)?;
+    if original.is_none() {
+        return copy(
+            root,
+            transaction,
+            "game/options.txt",
+            bytes.as_slice(),
+            None,
+            cancel,
+        );
+    }
+    model::write_file(&directory, relative, &bytes)?;
+    transaction.files.insert(relative.into(), stamp(&path)?);
+    transaction.save(root)
+}
 pub fn begin_instance(root: &Path, token: &str, instance: Instance) -> Result<Transaction> {
     if !uuid(token) || !uuid(&instance.id) {
         return Err("整合包事务标识无效".into());
     }
-    let directory = model::safe_path(root, &format!("instances/{}", instance.id))?;
+    let directory = instance.directory(root)?;
     fs::create_dir_all(directory.parent().ok_or("暂存父目录无效")?)
         .map_err(|_| "无法创建暂存父目录")?;
     fs::create_dir(&directory).map_err(|_| "暂存目录已存在，未覆盖")?;
@@ -700,6 +821,7 @@ pub(crate) fn copy(
     cancel: &CancellationToken,
 ) -> Result<()> {
     let directory = transaction.directory(root, false)?;
+    let relative = transaction.instance.content_relative(relative);
     let target = model::safe_path(&directory, relative)?;
     fs::create_dir_all(target.parent().ok_or("暂存文件目录无效")?)
         .map_err(|_| "无法创建暂存文件目录")?;
@@ -750,6 +872,9 @@ pub fn check_selection(plan: &Plan, selected: &[String]) -> Result<()> {
     if plan.created.elapsed() > Duration::from_secs(600) {
         return Err("整合包预览已过期，请重新检查".into());
     }
+    selection_membership(plan, selected)
+}
+fn selection_membership(plan: &Plan, selected: &[String]) -> Result<()> {
     let mut seen = HashSet::new();
     if selected.len() > 200
         || selected.iter().any(|path| {
@@ -807,7 +932,7 @@ pub async fn resolve_curse(host: &Host, plan: &mut Plan, cancel: &CancellationTo
         let size=row["fileLength"].as_u64().filter(|v|*v>0&&*v<=512*1024*1024).ok_or("Mod 文件大小无效")?;
         let destination=format!("pack-cache/curseforge-{project}-{file}.data");
         let url=if recovery_hash.is_some(){let mut url=reqwest::Url::parse(&format!("https://mediafilez.forgecdn.net/files/{}/{}/",file/1000,file%1000)).map_err(|_|"CDN 地址无效")?;url.path_segments_mut().map_err(|_|"CDN 地址无效")?.pop_if_empty().push(&name);url.to_string()}else{format!("https://www.curseforge.com/api/v1/mods/{project}/files/{file}/download")};
-        let cached=crate::pack_download::fetch(host,&url,&destination,Some(size),cancel).await?;
+        let cached=crate::pack_download::fetch_content(host,&url,&destination,Some(size),name.to_ascii_lowercase().ends_with(".jar"),cancel).await?;
         let recovered = recovery_hash.is_some();
         if let Some(hash)=recovery_hash {if !net::matches(&cached,&hash,Some(size))?{return Err("恢复的历史文件 SHA-1 不符，未安装".into());}}
         let sha512=resource_install::sum(&cached)?;
@@ -846,11 +971,21 @@ pub async fn stage(
     selected: &[String],
     cancel: &CancellationToken,
 ) -> Result<()> {
-    check_selection(plan, selected)?;
-    for (index, entry) in plan.files.iter().enumerate() {
-        if entry.optional && !selected.contains(&entry.path) {
-            continue;
-        }
+    // Host consumes and authorizes the preview before starting network work.
+    // A slow accepted installation must not expire while preparing resources.
+    selection_membership(plan, selected)?;
+    let cached = prefetch(host, plan, selected, cancel).await?;
+    // Keep a single central-directory index for the immutable snapshot. Reopening
+    // the ZIP for every override made large template worlds quadratic to stage.
+    let input = File::open(&plan.input.path).map_err(|_| "整合包快照不可读")?;
+    let mut archive =
+        zip::ZipArchive::new(std::io::BufReader::new(input)).map_err(|_| "整合包快照损坏")?;
+    let selected_files: Vec<_> = plan
+        .files
+        .iter()
+        .filter(|entry| !entry.optional || selected.contains(&entry.path))
+        .collect();
+    for (index, entry) in selected_files.iter().enumerate() {
         if cancel.is_cancelled() {
             return Err("整合包安装已取消".into());
         }
@@ -858,7 +993,7 @@ pub async fn stage(
             "pack-files",
             &format!("准备 {}", entry.path),
             index,
-            plan.files.len(),
+            selected_files.len(),
         );
         let relative = format!("game/{}", entry.path);
         match &entry.data {
@@ -870,19 +1005,8 @@ pub async fn stage(
                 Some((entry.size, &entry.sha512)),
                 cancel,
             )?,
-            Source::Download { url, sha1 } => {
-                let cached = net::resource_download(
-                    &host.client,
-                    &host.root,
-                    &net::Artifact {
-                        url: url.clone(),
-                        sha1: sha1.clone(),
-                        size: Some(entry.size),
-                        path: format!("pack-cache/{}.data", entry.sha512),
-                    },
-                    cancel,
-                )
-                .await?;
+            Source::Download { .. } => {
+                let cached = cached.get(&entry.sha512).ok_or("整合包文件尚未完成校验")?;
                 copy(
                     &host.root,
                     transaction,
@@ -893,11 +1017,7 @@ pub async fn stage(
                 )?;
             }
             Source::Archive(index) => {
-                let mut guard = plan.input.file.lock().map_err(|_| "整合包快照不可用")?;
-                let file = guard.as_mut().ok_or("整合包快照已释放")?;
-                file.rewind().map_err(|_| "整合包快照读取失败")?;
-                let mut zip = zip::ZipArchive::new(file).map_err(|_| "整合包快照损坏")?;
-                let file = zip.by_index(*index).map_err(|_| "覆盖条目已变化")?;
+                let file = archive.by_index(*index).map_err(|_| "覆盖条目已变化")?;
                 copy(
                     &host.root,
                     transaction,
@@ -910,7 +1030,8 @@ pub async fn stage(
         }
     }
     let directory = transaction.directory(&host.root, false)?;
-    fs::create_dir_all(model::safe_path(&directory, "game")?).map_err(|_| "无法创建游戏目录")?;
+    fs::create_dir_all(transaction.instance.content_directory(&directory)?)
+        .map_err(|_| "无法创建游戏目录")?;
     let provenance = serde_json::to_vec_pretty(&serde_json::json!({"pack":plan.name,"version":plan.pack_version,"archiveSha512":plan.archive_sha512,"origin":plan.origin,"files":plan.files.iter().filter(|entry| !entry.optional || selected.contains(&entry.path)).map(|entry| serde_json::json!({"path":entry.path,"sha512":entry.sha512,"source":entry.source})).collect::<Vec<_>>()})).map_err(|_| "来源记录编码失败")?;
     copy(
         &host.root,
@@ -920,14 +1041,108 @@ pub async fn stage(
         None,
         cancel,
     )?;
-    if plan.forge_version.is_empty() {
-        resource_install::validate_pack_mods(
+    {
+        host.progress(
+            "pack-files",
+            "整合包文件已准备完成",
+            selected_files.len(),
+            selected_files.len(),
+        );
+        host.progress("pack-validation", "检查整合包文件与模组声明", 0, 1);
+        let issues = resource_install::validate_pack_mods(
             &host.root,
-            &model::safe_path(&directory, "game")?,
+            &transaction.instance.content_directory(&directory)?,
             &transaction.instance,
         )?;
+        for issue in issues {
+            host.log(&format!("整合包依赖建议：{issue}"), &[]);
+        }
+        host.progress("pack-validation", "整合包检查完成", 1, 1);
     }
     Ok(())
+}
+async fn prefetch(
+    host: &Host,
+    plan: &Plan,
+    selected: &[String],
+    cancel: &CancellationToken,
+) -> Result<BTreeMap<String, PathBuf>> {
+    use futures_util::{stream, StreamExt, TryStreamExt};
+    let mut unique = BTreeMap::new();
+    for entry in plan
+        .files
+        .iter()
+        .filter(|v| !v.optional || selected.contains(&v.path))
+    {
+        if let Source::Download { url, sha1 } = &entry.data {
+            let artifact = net::Artifact {
+                url: url.clone(),
+                sha1: sha1.clone(),
+                size: Some(entry.size),
+                path: format!("pack-cache/{}.data", entry.sha512),
+            };
+            if let Some((previous, _)) =
+                unique.insert(entry.sha512.clone(), (artifact.clone(), entry.path.clone()))
+            {
+                if previous.sha1 != artifact.sha1 || previous.size != artifact.size {
+                    return Err("同一内容哈希声明了不同的校验信息".into());
+                }
+            }
+        }
+    }
+    let mut jobs: Vec<_> = unique.into_iter().collect();
+    jobs.sort_by_key(|(_, (artifact, _))| std::cmp::Reverse(artifact.size.unwrap_or(0)));
+    if jobs.is_empty() {
+        return Ok(BTreeMap::new());
+    }
+    let total_bytes = jobs
+        .iter()
+        .map(|(_, (a, _))| a.size.unwrap_or(0))
+        .sum::<u64>();
+    let total = jobs.len();
+    struct Progress {
+        bytes: Vec<u64>,
+        done: usize,
+        cached: usize,
+        retries: usize,
+        last: Instant,
+    }
+    let progress = Mutex::new(Progress {
+        bytes: vec![0; total],
+        done: 0,
+        cached: 0,
+        retries: 0,
+        last: Instant::now(),
+    });
+    host.progress(
+        "pack-download",
+        &format!("准备下载并校验 {total} 个文件，最多同时下载 6 个"),
+        0,
+        total_bytes as usize,
+    );
+    let work=stream::iter(jobs.into_iter().enumerate().map(|(index,(key,(artifact,display)))| {
+        let progress=&progress;
+        async move {
+            let observer=|update| {
+                let mut p=progress.lock().expect("download progress poisoned");
+                match update {
+                    net::TransferUpdate::Cached=>{p.bytes[index]=artifact.size.unwrap_or(0);p.cached+=1;p.done+=1;},
+                    net::TransferUpdate::Bytes(bytes)=>p.bytes[index]=bytes,
+                    net::TransferUpdate::Verified=>{p.bytes[index]=artifact.size.unwrap_or(0);p.done+=1;},
+                    net::TransferUpdate::Retrying(_)=>p.retries+=1,
+                }
+                if p.last.elapsed()>=Duration::from_millis(250) || p.done==total {
+                    let bytes=p.bytes.iter().sum::<u64>();
+                    host.progress("pack-download",&format!("文件校验 {}/{total} · {:.1}/{:.1} MiB · 复用 {} 个 · 重试 {} 次 · {display}",p.done,bytes as f64/1048576.0,total_bytes as f64/1048576.0,p.cached,p.retries),bytes as usize,total_bytes as usize);
+                    p.last=Instant::now();
+                }
+            };
+            let path=net::resource_download_observed(&host.client,&host.root,&artifact,cancel,&observer).await.map_err(|error|format!("下载 {display} 失败：{error}"))?;
+            Ok::<_,String>((key,path))
+        }
+    })).buffer_unordered(6);
+    let values: Vec<_> = work.try_collect().await?;
+    Ok(values.into_iter().collect())
 }
 pub fn publish(
     root: &Path,
@@ -961,6 +1176,9 @@ pub fn publish(
     }
     let mut updated = instances.to_vec();
     updated.push(transaction.instance.clone());
+    if cancel.is_cancelled() {
+        return Err("整合包安装已取消，未提交游戏库".into());
+    }
     model::save_json(root, "instances.json", &updated)?;
     // The atomic instance catalog is the commit marker; a retained journal is safe after this point.
     let _ = fs::remove_file(model::safe_path(root, &transaction.journal())?);
@@ -972,6 +1190,44 @@ mod tests {
     use super::*;
     use serde_json::json;
     use std::io::Cursor;
+    #[test]
+    fn new_instance_language_is_journaled_and_existing_game_files_are_preserved() {
+        for versions in [false, true] {
+            let root = root();
+            let mut item = instance();
+            item.version = "1.10.2".into();
+            if versions {
+                item.use_versions_layout();
+            }
+            let cancel = CancellationToken::new();
+            let mut tx = begin_instance(&root, &uuid::Uuid::new_v4().to_string(), item).unwrap();
+            copy(
+                &root,
+                &mut tx,
+                "game/options.txt",
+                b"lang:en_US\ncustom:keep\nresourcePacks:[]\n".as_slice(),
+                None,
+                &cancel,
+            )
+            .unwrap();
+            initialize_language(&root, &mut tx, &cancel).unwrap();
+            let installed = publish(&root, &tx, &[], &cancel).unwrap();
+            let bytes =
+                fs::read_to_string(installed[0].game_path(&root).unwrap().join("options.txt"))
+                    .unwrap();
+            assert!(bytes.contains("lang:zh_CN\n"));
+            assert!(bytes.contains("custom:keep\nresourcePacks:[]\n"));
+            assert!(!bytes.contains("en_US"));
+        }
+        let root = root();
+        let cancel = CancellationToken::new();
+        let mut tx = begin_instance(&root, &uuid::Uuid::new_v4().to_string(), instance()).unwrap();
+        initialize_language(&root, &mut tx, &cancel).unwrap();
+        assert!(inventory(&tx.directory(&root, false).unwrap()).unwrap().0 == tx.files);
+        cancel.cancel();
+        assert!(initialize_language(&root, &mut tx, &cancel).is_err());
+        rollback(&root, &tx).unwrap();
+    }
     #[test]
     fn online_archive_is_bound_to_project_version_file_and_verified_metadata() {
         let file = json!({
@@ -1139,6 +1395,110 @@ mod tests {
     fn manifest() -> Value {
         json!({"formatVersion":1,"game":"minecraft","name":"EC transaction fixture","versionId":"1.0.0","dependencies":{"minecraft":"1.21.1"},"files":[]})
     }
+    #[tokio::test]
+    async fn pack_prefetch_reuses_verified_content_and_deduplicates_destinations() {
+        use sha1::Digest;
+        let root = root();
+        let host = Host::new(root.clone()).unwrap();
+        let sha1 = sha1::Sha1::digest(b"test")
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect::<String>();
+        let sha512 = format!("{:x}", Sha512::digest(b"test"));
+        fs::create_dir_all(root.join("pack-cache")).unwrap();
+        fs::write(root.join(format!("pack-cache/{sha512}.data")), b"test").unwrap();
+        let entry = |path: &str| json!({"path":path,"fileSize":4,"hashes":{"sha1":sha1,"sha512":sha512},"downloads":["https://cdn.modrinth.com/data/test/content.jar"]});
+        let mut index = manifest();
+        index["files"] = json!([entry("mods/a.jar"), entry("mods/b.jar")]);
+        let bytes = archive(&index, &[]);
+        let plan = inspect(&root, bytes.as_slice()).unwrap().install.unwrap();
+        let cache = prefetch(&host, &plan, &[], &CancellationToken::new())
+            .await
+            .unwrap();
+        assert_eq!(cache.len(), 1);
+        assert_eq!(host.status().task.total, 4);
+        assert!(host.status().task.message.contains("复用 1 个"));
+        let mut optional = entry("mods/optional.jar");
+        optional["hashes"]["sha512"] = json!("c".repeat(128));
+        optional["env"] = json!({"client":"optional"});
+        index["files"] = json!([entry("mods/a.jar"), optional]);
+        let bytes = archive(&index, &[]);
+        let optional_plan = inspect(&root, bytes.as_slice()).unwrap().install.unwrap();
+        assert_eq!(
+            prefetch(&host, &optional_plan, &[], &CancellationToken::new())
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+        index["files"] = json!([entry("mods/a.jar"), entry("mods/b.jar")]);
+        index["files"][1]["hashes"]["sha1"] = json!("d".repeat(40));
+        let bytes = archive(&index, &[]);
+        let invalid = inspect(&root, bytes.as_slice()).unwrap().install.unwrap();
+        assert!(prefetch(&host, &invalid, &[], &CancellationToken::new())
+            .await
+            .unwrap_err()
+            .contains("同一内容哈希"));
+        drop((plan, optional_plan, invalid, host));
+        fs::remove_dir_all(root).unwrap();
+    }
+    #[tokio::test]
+    async fn an_authorized_install_can_finish_after_its_preview_expires() {
+        let root = root();
+        let host = Host::new(root.clone()).unwrap();
+        let bytes = archive(&manifest(), &[("overrides/config/test.cfg", b"fixture")]);
+        let mut plan = inspect(&root, bytes.as_slice()).unwrap().install.unwrap();
+        check_selection(&plan, &[]).unwrap(); // Same authorization performed by Host::start_pack.
+        let mut tx = begin(&root, &plan, instance()).unwrap();
+        plan.created = Instant::now() - Duration::from_secs(601);
+        assert!(
+            check_selection(&plan, &[]).is_err(),
+            "an unstarted stale preview must still be rejected"
+        );
+        stage(&host, &plan, &mut tx, &[], &CancellationToken::new())
+            .await
+            .unwrap();
+        rollback(&root, &tx).unwrap();
+        drop((plan, host));
+        fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn bundled_template_world_locks_are_skipped_without_losing_world_data() {
+        let root = root();
+        let bytes = archive(
+            &manifest(),
+            &[
+                (
+                    "overrides/config/yosbr/saves/Tutorial World/session.lock",
+                    b"stale lock",
+                ),
+                (
+                    "overrides/config/yosbr/saves/Tutorial World/level.dat",
+                    b"world fixture",
+                ),
+            ],
+        );
+        let preview = inspect(&root, bytes.as_slice()).unwrap();
+        let plan = preview
+            .install
+            .expect("template-world lock should not reject the pack");
+        assert_eq!(plan.files.len(), 1);
+        assert_eq!(
+            plan.files[0].path,
+            "config/yosbr/saves/Tutorial World/level.dat"
+        );
+        assert!(preview.warnings.iter().any(|v| v.contains("session.lock")));
+        for name in [
+            "overrides/config/session.lock",
+            "overrides/saves/World/../session.lock",
+            "overrides/.easycraft-private",
+        ] {
+            let bytes = archive(&manifest(), &[(name, b"invalid")]);
+            assert!(!inspect(&root, bytes.as_slice()).is_ok_and(|v| v.install.is_some()));
+        }
+        drop(plan);
+        fs::remove_dir_all(root).unwrap();
+    }
     #[test]
     fn curseforge_preview_freezes_exact_file_ids_loader_and_overrides() {
         let root = root();
@@ -1171,6 +1531,8 @@ mod tests {
     }
     fn instance() -> Instance {
         Instance {
+            version_folder: None,
+            storage_root: None,
             id: uuid::Uuid::new_v4().to_string(),
             name: "Pack fixture".into(),
             version: "1.21.1".into(),
@@ -1182,8 +1544,148 @@ mod tests {
             local: None,
         }
     }
+    #[test]
+    fn versions_layout_publish_recovery_and_shared_paths_preserve_legacy() {
+        let root = root();
+        let mut item = instance();
+        let old = item.game_path(&root).unwrap();
+        assert!(old.ends_with(format!("instances/{}/game", item.id)));
+        let selected = root.join("chosen");
+        fs::create_dir_all(&selected).unwrap();
+        item.storage_root = Some(selected.to_string_lossy().into());
+        item.name = "Pack: Test/世界".into();
+        let selected = crate::local_import::checked_directory(&selected).unwrap();
+        item.use_versions_layout();
+        let directory = item.directory(&root).unwrap();
+        assert_eq!(
+            directory.parent().unwrap(),
+            selected.join(".minecraft/versions")
+        );
+        let cancel = CancellationToken::new();
+        let mut tx =
+            begin_instance(&root, &uuid::Uuid::new_v4().to_string(), item.clone()).unwrap();
+        copy(
+            &root,
+            &mut tx,
+            "game/mods/fixture.jar",
+            b"fixture".as_slice(),
+            None,
+            &cancel,
+        )
+        .unwrap();
+        assert!(directory.join("mods/fixture.jar").exists());
+        assert!(!directory.join("game").exists());
+        rollback(&root, &tx).unwrap();
+        assert!(!directory.exists());
+        let mut tx =
+            begin_instance(&root, &uuid::Uuid::new_v4().to_string(), item.clone()).unwrap();
+        copy(
+            &root,
+            &mut tx,
+            "game/options.txt",
+            b"fullscreen:false".as_slice(),
+            None,
+            &cancel,
+        )
+        .unwrap();
+        let installed = publish(&root, &tx, &[], &cancel).unwrap();
+        assert_eq!(
+            fs::read(installed[0].game_path(&root).unwrap().join("options.txt")).unwrap(),
+            b"fullscreen:false"
+        );
+        item.name = "Renamed".into();
+        assert_eq!(item.directory(&root).unwrap(), directory);
+        item.launch.game_isolation = Some(false);
+        assert_eq!(item.game_path(&root).unwrap(), selected.join(".minecraft"));
+        item.storage_root = Some(selected.join(".minecraft").to_string_lossy().into());
+        assert_eq!(item.game_path(&root).unwrap(), selected.join(".minecraft"));
+        item.version_folder = Some("../outside".into());
+        assert!(item.directory(&root).is_err());
+    }
     fn download(path: &str, env: Value) -> Value {
         json!({"path":path,"hashes":{"sha1":"1".repeat(40),"sha512":"2".repeat(128)},"fileSize":12,"downloads":["https://cdn.modrinth.com/data/fixture/file.jar"],"env":env})
+    }
+    #[test]
+    fn custom_storage_publishes_recovers_and_preserves_foreign_files() {
+        let root = root();
+        let selected = root.join("selected-library");
+        fs::create_dir_all(&selected).unwrap();
+        fs::write(selected.join("keep.txt"), b"unrelated").unwrap();
+        let mut item = instance();
+        item.storage_root = Some(selected.to_string_lossy().into());
+        model::save_json(&root, "instances.json", &Vec::<Instance>::new()).unwrap();
+        let cancel = CancellationToken::new();
+        let mut tx =
+            begin_instance(&root, &uuid::Uuid::new_v4().to_string(), item.clone()).unwrap();
+        copy(
+            &root,
+            &mut tx,
+            "game/options.txt",
+            b"test".as_slice(),
+            None,
+            &cancel,
+        )
+        .unwrap();
+        assert_eq!(
+            item.game_path(&root).unwrap().canonicalize().unwrap(),
+            selected
+                .join(format!("instances/{}/game", item.id))
+                .canonicalize()
+                .unwrap()
+        );
+        assert!(!root.join(format!("instances/{}", item.id)).exists());
+        assert!(recover(&root, &[]).unwrap().is_empty());
+        assert!(!item.directory(&root).unwrap().exists());
+        assert_eq!(fs::read(selected.join("keep.txt")).unwrap(), b"unrelated");
+        let mut tx =
+            begin_instance(&root, &uuid::Uuid::new_v4().to_string(), item.clone()).unwrap();
+        copy(
+            &root,
+            &mut tx,
+            "game/options.txt",
+            b"complete".as_slice(),
+            None,
+            &cancel,
+        )
+        .unwrap();
+        let installed = publish(&root, &tx, &[], &cancel).unwrap();
+        assert_eq!(installed[0].storage_root, item.storage_root);
+        assert_eq!(
+            model::load_json::<Vec<Instance>>(&root, "instances.json").unwrap(),
+            installed
+        );
+        assert_eq!(
+            fs::read(item.game_path(&root).unwrap().join("options.txt")).unwrap(),
+            b"complete"
+        );
+        assert!(recover(&root, &installed).unwrap().is_empty());
+        assert_eq!(fs::read(selected.join("keep.txt")).unwrap(), b"unrelated");
+    }
+    #[test]
+    fn processor_loader_plans_accept_single_valid_forge_or_neoforge() {
+        let root = root();
+        for (loader, version) in [("forge", "47.3.22"), ("neoforge", "21.1.248")] {
+            let mut value = manifest();
+            value["dependencies"] = json!({"minecraft":"1.21.1",loader:version});
+            let preview = inspect(&root, archive(&value, &[]).as_slice()).unwrap();
+            let plan = preview
+                .install
+                .expect("official processor loader should have an install plan");
+            assert!(plan.fabric_version.is_empty());
+            assert_eq!(
+                if loader == "forge" {
+                    plan.forge_version
+                } else {
+                    plan.neoforge_version
+                },
+                version
+            );
+            value["dependencies"]["fabric-loader"] = json!("0.19.5");
+            assert!(inspect(&root, archive(&value, &[]).as_slice())
+                .unwrap()
+                .install
+                .is_none());
+        }
     }
     #[test]
     fn parser_merges_client_layers_and_rejects_ambiguous_or_unsupported_inputs() {
@@ -1253,13 +1755,13 @@ mod tests {
                 .any(|warning| warning.contains(expected)));
         }
         let mut unsupported = manifest();
-        unsupported["dependencies"]["forge"] = json!("47.0.0");
+        unsupported["dependencies"]["quilt-loader"] = json!("0.29.2");
         let preview = inspect(&root, archive(&unsupported, &[]).as_slice()).unwrap();
         assert!(preview.install.is_none());
         assert!(preview
             .warnings
             .iter()
-            .any(|warning| warning.contains("其他加载器")));
+            .any(|warning| warning.contains("加载器尚未支持")));
         let mut invalid = manifest();
         invalid["files"] = json!([download("a.txt", json!({"client":"unknown"}))]);
         assert!(inspect(&root, archive(&invalid, &[]).as_slice())

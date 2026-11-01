@@ -101,17 +101,12 @@ export function MemoryPanel({
     discard,
   });
   return (
-    <section className="card" aria-label="游戏内存管理">
+    <section className="card runtime-settings-card" aria-label="游戏内存管理">
       <h2>游戏内存 {!!state && dirty && <small>· 未保存</small>}</h2>
       {instanceId && (
-        <p>
-          仅此实例。
-          {inherit ? '当前继承全局内存配置。' : '当前使用实例内存覆盖。'}
-        </p>
+        <p>{inherit ? '当前继承全局内存设置。' : '仅对当前实例生效。'}</p>
       )}
-      <p>
-        自动模式按当前可用内存分配，并为系统和其他应用留出空间；启动时重新计算。
-      </p>
+      <p>自动分配会在启动时计算，并为系统和其他应用预留内存。</p>
       {!available && <p>内存检测与保存需要桌面版。</p>}
       {info && (
         <>
@@ -125,7 +120,7 @@ export function MemoryPanel({
             max={info.totalMb}
           />
           <p>
-            游戏最大堆内存：{target} MB · 建议预留至少 {info.reserveMb} MB
+            游戏内存上限：{target} MB · 为系统预留至少 {info.reserveMb} MB
           </p>
         </>
       )}
@@ -216,17 +211,18 @@ export function MemoryPanel({
             </p>
           )}
           <p className="hint">
-            这是 Java
-            最大堆上限，游戏总占用还包括渲染和原生内存。分配值与下方的工作集整理分别生效。
+            此值为 Java 堆上限，游戏实际总占用会更高。工作集整理不会改变此上限。
           </p>
-          <button type="submit" className="primary">
-            保存内存设置
-          </button>
-          {instanceId && (
-            <button type="button" onClick={discard}>
-              放弃内存修改并重新读取
+          <div className="button-row">
+            <button type="submit" className="primary">
+              保存内存设置
             </button>
-          )}
+            {instanceId && (
+              <button type="button" onClick={discard}>
+                放弃内存修改并重新读取
+              </button>
+            )}
+          </div>
           <details className="setting-help">
             <summary>高级内存维护</summary>
             <label className="toggle-row">

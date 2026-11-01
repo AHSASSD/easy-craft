@@ -1,169 +1,104 @@
-# Easy Craft · 独立竖栏与实例管理（开发中）
+# Easy Craft
 
-Windows x64 的 Minecraft Java 启动器。按已确认的 UI 方案使用“最左竖栏 → 实例/分类列表 → 右侧详情”，支持真实实例、下载、账户、内存和世界配置；亮色与暗色主题均可使用。进度与未完成项见 [实施记录](docs/IMPLEMENTATION_STATUS.md)，当前包版本标识仍为 V0.3.1。
+[English](./README.md) | [简体中文](./README.zh-CN.md)
 
-2026-10-29：已加入本地版本扫描/引用、实例隔离、实例工作区、模组声明预检、资源版本与安装目标选择，以及 Minecraft 1.12.2 / Forge CurseForge 整合包导入。已修复水星迫降的 Windows 图形库合并和旧版 Forge 依赖误报；详见 [根因与真实启动验证](docs/MERCURY_LAUNCH_FIX_2026-10-29.md)。文档中较早日期的探测记录只代表当时状态。
+A Minecraft Java Edition launcher for **Windows x64**, built with React, TypeScript, Tauri and Rust. Manage game instances, modpacks, local content and world settings from one workspace, with light and dark themes.
 
-## 运行桌面版
+**Development version: 0.3.1.** The latest source includes updates through November 1, 2026. Development builds have not completed a full release acceptance cycle. Microsoft sign-in still requires an Easy Craft application Client ID and real-account verification; CurseForge API access requires a separately configured API key.
 
-最新已验证的开发程序位于 `src-tauri/target/debug/easy-craft.exe`。现有 release 程序与安装包属于此前构建，不能代表本轮竖栏和资源安装进度；整版发布待后续验收。无需完整 Visual Studio；CLion、PyCharm 或其他编辑器都可以继续使用。
+## Features
 
-从 PowerShell 启动开发模式：
+- Instance library with search, directory grouping, renaming, local version scanning/import, isolation settings and persistent navigation.
+- Vanilla and Fabric installation, Forge/NeoForge installer support within the documented compatibility scope, and ZIP/MRPACK modpack inspection and installation. Downloads use checksums, resumable temporary files and transactional installation.
+- Modrinth browsing with resource versions, installation targets and dependency previews. Mods, resource packs, shader packs and world-specific datapacks have separate compatibility checks.
+- Automatic Java selection: reuse a compatible local runtime first, then download a verified Mojang Windows x64 runtime if necessary. Explicit instance Java paths are preserved. Downloads support cancellation and retry.
+- Per-instance Java and memory settings; automatic memory allocation and optional working-set maintenance.
+- Mod management, screenshots, supported world and audio/video settings, and configuration backup previews and restoration.
+- Optional CFPA translation resources after modpack installation. Existing translations are checked first; a translation failure does not undo a successful game installation.
+- Offline profiles and Microsoft device-code authentication implementation; account refresh tokens use Windows DPAPI encryption.
+- Task progress, failure suggestions and previewable diagnostic summaries. Known identities, tokens and local paths are filtered before copying; review reports before sharing.
+- Declarative local plugins for tools, appearance and instance checks, with enable/disable, dependency checks and recovery mode.
+
+## Current limits
+
+- Microsoft sign-in is not yet verified end to end with the project's own application registration. Offline profiles do not grant ownership or authenticate to online-mode servers or Realms.
+- Automatic Java channels cover 8, 16, 17, 21 and 25; complete download, verification, cancellation, retry and reuse were tested with Java 21. That runtime test did not launch Minecraft.
+- General mod translations do not cover every term, modpack quest book or script patch. Some mods already contain Chinese translations.
+- Configuration backups are **not full world backups**. Exit the game before editing world files. Hardcore worlds are read-only, and unsupported world formats are rejected.
+- Downloading resource/shader/datapacks does not guarantee in-game activation. Compatibility checks cover declared metadata, not every runtime interaction.
+- Plugins do not provide an arbitrary third-party code execution environment.
+- **Closing the launcher ends games started by it. Save and exit your world first.**
+
+See the dated [implementation records](docs/IMPLEMENTATION_STATUS.md) for supported combinations and evidence. Earlier documents describe the state at their respective dates.
+
+## Run locally
+
+Prepare Node.js/npm and the Windows toolchain described in [Windows toolchain setup](docs/WINDOWS_TOOLCHAIN.md). The repository uses a portable toolchain under `../build-tools/easycraft`; it is not included in Git. The PowerShell wrapper sets process-local paths without changing the global PATH.
+
+From the cloned repository:
 
 ```powershell
-cd 'E:\PCL2 code comparison\easy-craft'
 npm ci
-.\scripts\native.ps1 dev
+.\scripts\native.ps1 -Action dev
 ```
 
-本机工具已放在 `E:\PCL2 code comparison\build-tools\easycraft`。脚本只设置当前进程环境，不修改全局 PATH。新机器需要先准备同样的工具，见 [Windows 工具链](docs/WINDOWS_TOOLCHAIN.md)。
+The latest locally built desktop executable is `src-tauri/target/debug/easy-craft.exe`. Older release binaries or installers may not match current source.
 
-浏览器预览仍可使用 `npm run dev`，地址 <http://127.0.0.1:1420/>。**浏览器里的真实下载、登录和启动按钮禁用，不会用模拟功能代替。**
+For a browser preview:
 
-## 功能与边界
+```powershell
+npm run dev
+```
 
-- 最左侧为游戏库、设置、下载三个入口，中间栏目随入口切换；支持真实实例搜索、重命名、打开目录、右键菜单、调整/折叠栏目与导航记忆。主题偏好和导入的本地背景可跨重启保存。演示资料与模拟启动保留于 `/?demo=1`，也可从设置进入。
-- 实例的模组、资源与光影、截图页读取真实文件；Fabric Mod 可启停，ZIP/JAR 可受限导入，截图提供缩略图及查看。系统选择器与拖放/文件输入均支持最多 512 MiB；拖放按 1 MiB 分块接收，进度与取消在底部任务栏。未知文件保留，运行与占用时拒绝修改，重名不覆盖。
-- “实例 → 存档”读取真实 Java 存档：和平/简单/普通/困难、难度锁定、允许命令、默认游戏模式、时间、天气，以及存档已有的布尔/整数游戏规则。规则支持中英文搜索，其他文本规则只读；不会凭空添加版本不支持的规则。
-- 音画设置独立读写实例的 options.txt：主音量、音乐音量、渲染距离、全屏。默认游戏模式不覆盖现有玩家的独立模式。
-- 保存前校验文件版本与世界占用状态，备份原配置后只修改受支持字段；区块、背包及未知 NBT 字节保持不变。备份位于实例 game/.easycraft-backups/{UUID}/，并显示具体路径；它是配置备份，不是完整世界备份。外部游戏停在主菜单时无法可靠检测，保存前请退出该实例。
-- 世界与音画页面可查看有归属记录的备份、预览变更并确认恢复；恢复前再次备份，只应用已支持字段，保留当前未知数据。过期预览、篡改和跨目标备份拒绝写入；早期无归属备份保留，不自动推断目标。
-- 极限模式世界只读；26.1 更改后的难度布局暂不支持，读取时明确提示且不会覆盖文件。当前按存档目录名称显示列表。
-- 左下角头像直接打开账户弹窗，选择正版登录或离线登录，保存后显示当前真实身份；不必在下载中心寻找账户配置。
-- 头像从当前皮肤裁切脸部并叠加帽子层，以像素方式清晰显示；切换存档页保持位置和尺寸。正版档案返回的官方皮肤会缓存；离线账户可以选择 64×64 或 64×32 PNG，换图立即更新，也可在账户面板刷新。离线图片只改变启动器头像，不会替换游戏内皮肤；没有可用皮肤或文件损坏时显示默认头像。
-- “设置 → 启动”提供 Java 路径/检测与实际物理/可用内存，支持自动分配、手动滑块与数值输入；启动时应用最大堆上限并记入日志。
-- “游戏库 → 实例设置”可单独覆盖 Java 和内存配置，或恢复继承全局；仅影响所选实例，下次启动生效。保存时验证 Java 条件与配置修订，运行中不能修改。
-- 内存整理默认关闭：可单独整理启动器工作集，或在确认后整理当前权限可访问进程的工作集；还可选择启动前执行系统整理。不会结束进程、提权或清空内核缓存，不保证固定释放量，可能短暂卡顿。
-- “下载 → 原版游戏”提供官方正式版本清单与原版/Fabric 独立实例安装。
-- 下载中的五类 Modrinth 内容提供真实搜索、版本与依赖信息。Mod、资源包、光影包可选择目标实例，预览必需依赖与文件后安装；大小、SHA-1/SHA-512 验证后提交，来源记录和事务恢复保护已有文件。只新增或保留同内容文件，不自动替换旧版；Mod 首轮支持已验证的 Fabric 路径，复杂或不明确条件会拒绝。资源包/光影包下载不等于在游戏中启用。
-- 社区资源支持可搜索的版本/分类/排序，筛选区固定、条目显示来源及版本信息；详情按 Minecraft 大版本归组。Forge 安装器下载与 CurseForge 访问的历史探测见 [来源兼容性记录](docs/SOURCE_COMPATIBILITY.md)，当前 1.12.2 Forge 整合包支持见下方说明。
-- 数据包须选择实例及具体世界，校验存档版本、客户端数据包格式与 pack.mcmeta 后提交到该世界 datapacks/，保持 level.dat 不变；存档页可回读文件和进入下载。已验证文件校验与世界隔离，尚未验收游戏内启用和效果。
-- Fabric 稳定版本查询、官方元数据与 Maven 下载、依赖 SHA-1 校验、锁定配置、独立实例和实际启动。不会自动附带 Fabric API 或其他 Mod。
-- 本地 ZIP/MRPACK 通过系统选择器或拖入后显示安装摘要，支持原版/Fabric MRPACK 和 Minecraft 1.12.2 / Forge CurseForge 清单包；在线 Modrinth 整合包复用同一流程。确认后下载、校验、处理覆盖内容并创建独立实例，任务提供分步进度。失败回滚实例，保留可复用缓存，不覆盖已有实例。其他加载器/普通 ZIP 明确显示支持限制；历史下架文件只有存在精确校验记录时才尝试恢复。
-- 基础资源仅允许 Mojang/Minecraft 官方域名，Fabric 依赖仅允许其官方元数据/Maven 域名；禁止重定向到其他来源，逐文件 SHA-1 校验成功才提交缓存。
-- 限制并发、连接超时、有限重试、取消、临时文件续传和已校验缓存复用。损坏缓存会重新下载，实例清单只在安装成功后提交。
-- “设置 → 下载设置”提供缓存位置、数量与内容大小统计，以及检查、清单预览和明确确认后的清理。仅处理五类已识别的下载副本/接收临时文件，不清理游戏共享资源、已安装 Mod、存档或配置备份；变化、占用和未知文件保留，可从任务栏取消并查看部分结果。
-- “设置 → 个性化”支持任意六位十六进制强调色、恢复默认、背景图保存、遮罩强度、减少动态效果，以及桌面原生 80%–150% 六档界面缩放；偏好跨重启保留。自选颜色会派生适合深浅主题的文字、选中态和主按钮，保持可读。空间不足时，中间栏变为可展开浮层，主导航和账户入口仍可操作。
-- 世界/音画配置的备份面板提供旧备份保留管理：选择保留最近几份 → 校验并预览 → 明确确认后清理。至少保留一份可校验备份；未知、损坏、占用或含额外内容的备份保留，当前配置和其他目标不清理。可取消并报告部分结果，不自动删除备份。
-- 每个真实实例使用独立的 game/natives 目录；不删除或覆盖用户存档。
-- 检测所选 Java 的实际主版本与 64 位架构，启动前要求匹配实例元数据。已提供工作区 Java 21 和 Java 25；选择其他可信运行时需填写其 java.exe 完整路径。
-- Microsoft 设备码授权 → Xbox → XSTS → Minecraft 令牌、所有权与档案校验；取得设备码后自动打开官方授权页，支持复制设备码、重新打开和取消；启动时可刷新账户。完整真人授权仍需有效的自有公共客户端 Client ID。
-- 离线账户：无需 Microsoft 登录或 Client ID，自定义 3–16 位英文、数字或下划线用户名，按 Java 离线规则生成稳定 UUID。资源完整时启动器无需联网；首次下载、缺失或损坏资源的修复仍需网络。离线身份不代表正版授权，不能通过正版服务器或 Realms 的验证。
-- 刷新令牌只由 Rust 使用 Windows DPAPI 加密保存在 account.dpapi；前端不接收令牌，普通设置不存密码或 Client Secret。
-- 通过参数数组启动真实 Java 进程，展示退出状态与最近 200 条脱敏日志；可以结束游戏进程。
+Open [the local preview](http://127.0.0.1:1420/). Real downloads, authentication and game launch require the desktop app; browser previews do not simulate their success. Demo mode is available at `/?demo=1`.
 
-**关闭启动器会结束由它启动的游戏，请先保存并退出世界。**
+## First launch
 
-离线模式已经实际启动 Minecraft 1.21.1 的 Java 进程并观察到 OpenAL 引擎初始化，结束任务可回收进程。尚未创建世界、操作存档或验证多人游戏。Microsoft 本人授权与正版启动仍未进行端到端验收。
+1. Install a game version, import a supported modpack, or scan an existing installation. Installation does not require signing in first.
+2. Select a game account using the avatar or launch button. Offline names must contain 3–16 letters, digits or underscores and are case-sensitive.
+3. Launch the instance. Automatic Java mode finds or prepares a compatible runtime; select a trusted `java.exe` in instance settings when using a custom runtime.
+4. Adjust memory, isolation, local content or supported world settings as needed. Exit the game before editing world configuration.
 
-已有本地原版、Fabric、Forge 与 NeoForge 版本可扫描并引用，支持范围内的继承关系会合并后核对依赖；每个实例可选择隔离目录。新建安装支持原版、Fabric，以及 Minecraft 1.12.2 / Forge CurseForge 整合包；现代 Forge/NeoForge 安装器处理器、Quilt、自动下载 Java 的 UI 和任意第三方插件运行时尚未实现。旧版 Forge 的注解依赖仍明确标为未检查，静态预检不等于保证可运行。
+Changing an offline name or switching account identities changes the player UUID and can affect inventories, progress and ownership. Player data is not automatically migrated.
 
-## 使用顺序
+## Application credentials
 
-1. 进入“设置 → 启动”，检测并保存 Java。Minecraft 1.21.1 使用 Java 21。
-2. 点击左下角头像 → “离线登录” → 输入例如 `EasyPlayer` 的用户名 → “使用离线账户”，无需 Client ID。
-3. 需要正版账户时：同一弹窗选择“正版登录”，首次在登录配置中填写自有应用的 Client ID，点击登录并在微软官方页面授权。应用需支持个人账户、公共客户端设备授权，并能访问 Minecraft API；不要使用其他启动器的 Client ID。授权结果自动轮询，关闭弹窗不中断。
-4. 选择官方游戏版本，以及原版或 Fabric 后安装；Fabric 可刷新稳定版本。安装不要求先登录；成功后才显示为“已安装的真实实例”。
-5. 已保存离线账户或已完成 Microsoft 授权、Java 匹配后，在游戏库选择实例并点击“启动游戏”。需要调整已有世界时进入“存档”；音画位于“实例设置”。退出游戏后重新读取、调整并保存。
-6. 在设置中选择自动/手动内存、按需开启整理；系统整理仅在内存不足时使用，机械硬盘尤其可能卡顿。
+For distribution, set the public application GUID in `EASYCRAFT_MICROSOFT_CLIENT_ID` before building. New configurations and existing empty Client IDs use the bundled value; nonempty configurations remain unchanged. This is a **Client ID, not a Client Secret**. Application registration and real sign-in acceptance remain the distributor's responsibility. See [Microsoft's device-code flow documentation](https://learn.microsoft.com/entra/identity-platform/v2-oauth2-device-code).
 
-离线用户名区分大小写，决定玩家 UUID。更名或改用正版身份可能导致背包、进度、宠物归属不同；不会自动迁移存档身份。
+CurseForge access uses the host environment variable `EASYCRAFT_CURSEFORGE_API_KEY`, read at startup. Do not place an API key in source code, browser configuration, screenshots or public issues. Credential files and local game data are excluded from this repository.
 
-Client ID 不是 Client Secret。请不要向聊天或配置文件发送密码、令牌或 Client Secret。注册指引见 [Microsoft 官方设备码流程](https://learn.microsoft.com/entra/identity-platform/v2-oauth2-device-code)。
-
-## 构建与检查
+## Build and verify
 
 ```powershell
 npm run build
 npm run typecheck
-npm test
 npm run lint
-npm run format:check
+npm test
 npm run test:e2e
-.\scripts\native.ps1 check
-.\scripts\native.ps1 test
-.\scripts\native.ps1 clippy
-.\scripts\native.ps1 fmt
-.\scripts\native.ps1 build
-.\scripts\native.ps1 bundle
+.\scripts\native.ps1 -Action check
+.\scripts\native.ps1 -Action test
+.\scripts\native.ps1 -Action clippy
+.\scripts\native.ps1 -Action fmt
+.\scripts\native.ps1 -Action build
+.\scripts\native.ps1 -Action bundle
 ```
 
-- `build`：前端生产构建；native.ps1 build：可直接运行的调试桌面程序。
-- `bundle`：Release 程序和 NSIS 安装包，输出到 `src-tauri/target/release/bundle/nsis/`。
-- Edge 流程测试要求本机安装 Microsoft Edge。普通 Rust 测试不连接认证服务。
-- 公网集成检查单独执行，避免把联网结果混同于普通单测：
+- `build` in the native wrapper creates a debug desktop executable; `bundle` creates a release executable and NSIS installer under `src-tauri/target/release/bundle/nsis/`.
+- Browser tests require Microsoft Edge. Network/system integration tests are separate from regular tests; inspect the verification scripts before running them.
+- Latest recorded results: **150 backend tests, 112 frontend tests and 14 browser tests passed**. Twenty backend integration tests are ignored by default; the official Java runtime integration was explicitly run and passed.
+- Runtime-only desktop verification: set `EASYCRAFT_RUNTIME_UI_CHECK=1` for the process and run `node scripts/verify-usability-final.mjs`. It uses isolated fixtures and does not launch the game.
 
-```powershell
-.\scripts\native.ps1 test -Integration metadata
-.\scripts\native.ps1 test -Integration install
-node scripts/smoke-native.mjs
-.\scripts\native.ps1 test -Integration offline
-node scripts/smoke-native.mjs debug --launch-offline
-.\scripts\native.ps1 test -Integration fabric
-node scripts/smoke-native.mjs debug --launch-offline --fabric
-.\scripts\native.ps1 test -Integration resources
-node scripts/smoke-native.mjs debug --cached --resources --install-resources --install-dependencies --install-shader --launch-offline --fabric
-node scripts/smoke-native.mjs debug --cached --resources --install-datapack
-node scripts/smoke-native.mjs debug --cached --native-picker
-powershell -ExecutionPolicy Bypass -File scripts/fetch-modpack-fixture.ps1
-node scripts/smoke-native.mjs debug --cached --public-pack --launch-offline
-node scripts/smoke-native.mjs debug --cached --online-pack --launch-offline
-node scripts/smoke-native.mjs debug --cached --background
-node scripts/smoke-native.mjs debug --cached --instance-settings --launch-offline
-node scripts/smoke-native.mjs debug --cached --restore-config --launch-offline
-node scripts/smoke-native.mjs debug --cached --streamed-drop --public-pack --launch-offline
-node scripts/smoke-native.mjs debug --cached --cache-clear --launch-offline --fabric
-node scripts/smoke-native.mjs debug --cached --backup-retention --restore-config --cache-clear --launch-offline --fabric
-node scripts/smoke-native.mjs debug --cached --ui-scale --launch-offline --fabric
-```
+## Architecture and data
 
-安装集成测试会在 `.native/integration` 下载真实官方 1.21.1 资源、验证缓存修复和参数构造，不启动游戏。`-Integration offline` 将 HTTP 路由到不可用的本地代理，验证完整缓存无需联网即可准备离线参数。桌面检查使用该测试目录与临时 WebView2 调试端口，验证窗口、IPC、Java、官方清单、正版模式登录限制和离线配置；加 `--launch-offline` 才会实际启动游戏，观察初始化后结束进程。测试临时修改并还原测试目录的设置，不修改用户 data 目录，不进行 Microsoft 登录。
+`src/app` wires services; `src/features` contains UI workflows; `src/core/native-contracts.ts` defines the native interface. Rust modules in `src-tauri/src` implement authentication, downloads, installation, runtime preparation and file operations.
 
-当前结果见 [独立竖栏方案实施记录](docs/IMPLEMENTATION_STATUS.md)。此前结果保留于 [V0.3.1 验证与边界](docs/V0.3.1-VERIFICATION.md)、V0.3-VERIFICATION.md、V0.2-VERIFICATION.md 和 OFFLINE_MODE.md。
+Development uses the project's `data/` directory; standalone executables default to a sibling `data/` directory. Set `EASYCRAFT_DATA_DIR` to choose another location. `settings.json` and `instances.json` store configuration, while `account.dpapi` is bound to the Windows user. Native data is separate from browser demo storage. Invalid configuration files are retained with an error; do not delete the entire data directory to fix an account issue.
 
-## 架构
+## Documentation
 
-```text
-src/app/                 应用装配、原生桥接适配器、页面组合
-src/components/          标题栏、弹窗、皮肤头像
-src/features/            真实实例首页、世界设置、账户/内存、下载、演示
-src/core/contracts.ts    演示数据与服务契约
-src/core/native-contracts.ts 原生服务 DTO 与接口
-src/core/navigation.ts   分类、实例标签、搜索和位置记忆
-src/core/plugins/        插件内核、权限、生命周期与回收
-src/plugins/official/    演示实例、主题、模拟启动、原版服务
-src-tauri/src/host.rs    设置、实例事务、任务和游戏进程
-src-tauri/src/auth.rs    设备授权、令牌交换/刷新与 DPAPI
-src-tauri/src/net.rs     官方来源、校验下载、续传与重试
-src-tauri/src/minecraft.rs 元数据、平台规则、参数与 Java
-src-tauri/src/fabric.rs  Fabric 元数据、Maven 依赖与启动配置
-src-tauri/src/memory.rs  实际内存检测、自动分配与可选工作集整理
-src-tauri/src/packs.rs   ZIP/MRPACK 内容检查（不写入实例）
-src-tauri/src/modpack.rs MRPACK 固定计划、客户端文件、覆盖层级与新实例事务
-src-tauri/src/content.rs 本地内容扫描、启停、导入、截图与目录入口
-src-tauri/src/resources.rs Modrinth 搜索、项目和兼容版本查询
-src-tauri/src/resource_install.rs 固定依赖计划、JAR 条件校验、SHA-512 与事务恢复
-src-tauri/src/worlds.rs  受限 NBT 原位修改、音画选项、占用锁与有归属的配置备份恢复
-src-tauri/src/file_upload.rs  分块文件接收、固定目标、大小/顺序检查与临时文件生命周期
-src-tauri/src/cache.rs   下载副本与临时文件统计、哈希预览、按已核对句柄清理及保留报告
-src-tauri/src/backup_retention.rs 按配置目标保留最近备份、固定清单、保护副本与确认清理
-src-tauri/src/file_guard.rs 受控文件的稳定只读/删除句柄与流式校验，供两类清理复用
-src-tauri/src/skins.rs   官方皮肤下载缓存、离线头像 PNG 校验
-scripts/native.ps1      工作区便携工具链入口
-tests/                  前端单元/组件与浏览器流程测试
-```
+- [Architecture](docs/ARCHITECTURE.md) · [Implementation status](docs/IMPLEMENTATION_STATUS.md) · [Roadmap](docs/ROADMAP.md)
+- [Automatic Java](docs/AUTOMATIC_JAVA_RUNTIME_2026-11-01.md) · [Launch readiness](docs/FIRST_USE_LAUNCH_READINESS_2026-11-01.md)
+- [Translation and Java changes](docs/PACK_AUTO_TRANSLATION_AND_JAVA_2026-11-01.md) · [Plugin management](docs/PLUGIN_MANAGEMENT_2026-11-01.md)
+- [Plugin API](docs/PLUGIN_API.md) · [Runtime notices](docs/THIRD_PARTY_NOTICES.md) · [Native notices](docs/NATIVE_THIRD_PARTY_NOTICES.txt)
 
-原生 UI 只消费 NativeService，后续修改界面不需要重写下载或认证逻辑。只有随程序打包的可信官方插件可以执行，没有第三方代码沙箱。
-
-## 数据与文档
-
-开发脚本将真实数据放在项目的 data 目录。直接运行桌面程序时默认使用程序旁的 data；可以通过当前进程的 EASYCRAFT_DATA_DIR 指定其他目录。原生数据与浏览器演示的 localStorage 分开，V0.1 数据不会自动转换成真实实例。
-
-- settings.json：Client ID、Java 路径、内存/分配模式/整理开关、启动模式、离线用户名；无令牌。旧配置保留手动内存值，整理默认关闭，原账户数据保留。
-- instances.json：真实安装成功的实例清单。
-- account.dpapi：当前 Windows 用户绑定的加密账户，不能当作跨机器迁移文件。
-- assets/libraries/versions：官方资源缓存；instances/{UUID}/game：独立游戏目录。
-
-设置或实例清单无效时保留原文件并报错；不要通过删除 data 来解决单个账户问题，应使用界面的“退出正版账户”。
-
-[架构](docs/ARCHITECTURE.md) · [插件 API](docs/PLUGIN_API.md) · [执行记录](docs/PROGRESS.md) · [原生依赖](docs/NATIVE_DEPENDENCIES.md) · [路线图](docs/ROADMAP.md)
+Most detailed implementation records are currently in Simplified Chinese.

@@ -1,0 +1,9 @@
+{
+  "schemaVersion": 1,
+  "id": "community.compact-example",
+  "name": "轻巧工作区",
+  "version": "1.0.0",
+  "description": "本地布局插件示例：紧凑排版与 260 像素侧栏。",
+  "type": "layout",
+  "settings": { "layout": "compact", "sidebarWidth": 260 }
+}

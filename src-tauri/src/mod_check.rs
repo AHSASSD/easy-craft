@@ -7,7 +7,7 @@ use serde::Serialize;
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
-    io::{Read, Seek},
+    io::{BufRead, BufReader, Read, Seek},
     os::windows::fs::MetadataExt,
     path::{Path, PathBuf},
     time::{Instant, SystemTime, UNIX_EPOCH},
@@ -516,6 +516,36 @@ fn zip_text<R: Read + Seek>(zip: &mut zip::ZipArchive<R>, name: &str) -> Result<
     }
     Ok(Some(value))
 }
+pub(crate) fn jar_version<R: Read + Seek>(zip: &mut zip::ZipArchive<R>) -> Result<Option<String>> {
+    let entry = match zip.by_name("META-INF/MANIFEST.MF") {
+        Ok(entry) => entry,
+        Err(zip::result::ZipError::FileNotFound) => return Ok(None),
+        Err(_) => return Err("无法读取 JAR 主属性".into()),
+    };
+    // Signed manifests may have megabytes of per-entry digests. Only the bounded
+    // main section contains Implementation-Version; never expand those digests.
+    let mut reader = BufReader::new(entry.take(512 * 1024 + 1));
+    let mut main = String::new();
+    loop {
+        let mut line = String::new();
+        let count = reader
+            .read_line(&mut line)
+            .map_err(|_| "JAR 主属性不可读")?;
+        if main.len() + count > 512 * 1024 {
+            return Err("JAR 主属性超过 512 KiB".into());
+        }
+        if count == 0 || line.trim_end_matches(['\r', '\n']).is_empty() {
+            break;
+        }
+        main.push_str(&line);
+    }
+    let unfolded = main.replace("\r\n ", "").replace("\n ", "");
+    Ok(unfolded.lines().find_map(|line| {
+        let (key, value) = line.split_once(':')?;
+        key.eq_ignore_ascii_case("Implementation-Version")
+            .then(|| value.trim().to_string())
+    }))
+}
 fn read_forge<R: Read + Seek>(
     input: R,
     loader: &str,
@@ -527,7 +557,7 @@ fn read_forge<R: Read + Seek>(
         return Err("内置声明超过深度或数量上限".into());
     }
     let mut zip = zip::ZipArchive::new(input).map_err(|_| "不是有效 JAR/ZIP")?;
-    if zip.len() > 20000 {
+    if zip.len() > crate::packs::MAX_RESOURCE_ENTRIES {
         return Err("归档条目过多".into());
     }
     if loader == "forge-legacy" {
@@ -563,7 +593,6 @@ fn read_forge<R: Read + Seek>(
     } else {
         zip_text(&mut zip, "META-INF/mods.toml")?
     };
-    let manifest = zip_text(&mut zip, "META-INF/MANIFEST.MF")?.unwrap_or_default();
     if let Some(raw) = raw {
         let doc: toml::Value = toml::from_str(&raw).map_err(|_| "mods.toml 不是有效 TOML")?;
         let mods = doc
@@ -571,6 +600,13 @@ fn read_forge<R: Read + Seek>(
             .and_then(toml::Value::as_array)
             .filter(|v| v.len() <= 128)
             .ok_or("缺少有效 mods 声明")?;
+        let manifest_version = if mods.iter().any(|entry| {
+            entry.get("version").and_then(toml::Value::as_str) == Some("${file.jarVersion}")
+        }) {
+            jar_version(&mut zip)?
+        } else {
+            None
+        };
         let mut loader_dependencies = vec![];
         let language = text(&doc, "modLoader")?;
         if language == "javafml" || language == "lowcodefml" {
@@ -590,9 +626,8 @@ fn read_forge<R: Read + Seek>(
             let id = text(entry, "modId")?.to_string();
             let mut version = text(entry, "version")?.to_string();
             if version == "${file.jarVersion}" {
-                version = manifest
-                    .lines()
-                    .find_map(|line| line.strip_prefix("Implementation-Version: "))
+                version = manifest_version
+                    .as_deref()
                     .unwrap_or("${file.jarVersion}")
                     .trim()
                     .to_string();
@@ -745,6 +780,26 @@ fn maven_matches(version: &str, range: &str) -> Result<bool> {
     }
     Ok(false)
 }
+fn loader_matches(instance: &Instance, dependency: &Dependency, version: &str) -> Result<bool> {
+    let matched = maven_matches(version, &dependency.range)?;
+    if matched
+        || instance.version != "1.21.1"
+        || !instance
+            .local
+            .as_ref()
+            .is_some_and(|local| local.loader == "neoforge")
+    {
+        return Ok(matched);
+    }
+    // FancyModLoader's 1.21.1 VersionSupportMatrix explicitly accepts these
+    // fallback identities after the installed version fails the declared range.
+    // https://github.com/neoforged/FancyModLoader/blob/1.21.1/loader/src/main/java/net/neoforged/fml/loading/VersionSupportMatrix.java
+    match dependency.id.as_str() {
+        "minecraft" => maven_matches("1.21", &dependency.range),
+        "neoforge" => maven_matches("21.0.166", &dependency.range),
+        _ => Ok(false),
+    }
+}
 fn evaluate_forge(
     instance: &Instance,
     data: &ForgeFile,
@@ -811,7 +866,7 @@ fn evaluate_forge(
                 ));
                 continue;
             }
-            match maven_matches(&values[0], &dep.range) {
+            match loader_matches(instance, dep, &values[0]) {
                 Ok(matched)
                     if (dep.kind == "incompatible" || dep.kind == "discouraged") && matched =>
                 {
@@ -923,6 +978,121 @@ mod tests {
     }
     const MAIN: &str = "modLoader='javafml'\nloaderVersion='[47,)'\n[[mods]]\nmodId='main'\nversion='1.0'\n[[dependencies.main]]\nmodId='library'\nmandatory=true\nversionRange='[2,3)'\nside='BOTH'\n[[dependencies.main]]\nmodId='server_only'\nmandatory=true\nversionRange='[1,)'\nside='SERVER'";
     const LIB: &str = "modLoader='javafml'\n[[mods]]\nmodId='library'\nversion='2.0'";
+    #[test]
+    fn signed_manifest_does_not_hide_mods_or_required_dependencies() {
+        for version in ["2.0", "${file.jarVersion}"] {
+            let mut zip = zip::ZipWriter::new(Cursor::new(vec![]));
+            zip.start_file(
+                "META-INF/mods.toml",
+                zip::write::SimpleFileOptions::default(),
+            )
+            .unwrap();
+            zip.write_all(LIB.replace("2.0", version).as_bytes())
+                .unwrap();
+            zip.start_file(
+                "META-INF/MANIFEST.MF",
+                zip::write::SimpleFileOptions::default(),
+            )
+            .unwrap();
+            zip.write_all(b"Manifest-Version: 1.0\r\nImplementation-Version: 2.0\r\n\r\n")
+                .unwrap();
+            zip.write_all(
+                "Name: signed/class.class\r\nSHA-256-Digest: abc\r\n\r\n"
+                    .repeat(20000)
+                    .as_bytes(),
+            )
+            .unwrap();
+            let bytes = zip.finish().unwrap().into_inner();
+            let mut data = ForgeFile::default();
+            read_forge(Cursor::new(bytes), "forge", &mut data, 0, &mut 0).unwrap();
+            assert_eq!(data.mods[0].version, "2.0");
+            let mut root_mod = ForgeFile::default();
+            read_forge(
+                Cursor::new(jar(MAIN, None)),
+                "forge",
+                &mut root_mod,
+                0,
+                &mut 0,
+            )
+            .unwrap();
+            data.mods.extend(root_mod.mods);
+            let mut report = ModCheck {
+                instance_id: "fixture".into(),
+                issues: vec![],
+                unchecked: vec![],
+                details: None,
+            };
+            let mut details = Details {
+                checked_at: 0,
+                scope: String::new(),
+                complete: true,
+                scanned_files: 0,
+                parsed_files: 0,
+                reused_files: 0,
+                elapsed_ms: 0,
+            };
+            evaluate_forge(
+                &instance(Path::new("C:/fixture"), "forge"),
+                &data,
+                &mut report,
+                &mut details,
+            );
+            assert!(!report.issues.iter().any(|issue| issue.contains("library")));
+        }
+    }
+    #[test]
+    fn neoforge_1211_uses_loader_compatibility_matrix_without_hiding_real_errors() {
+        let mut item = instance(Path::new("C:/fixture"), "neoforge");
+        item.version = "1.21.1".into();
+        item.local.as_mut().unwrap().loader_version = "21.1.265".into();
+        let metadata = "modLoader='javafml'\n[[mods]]\nmodId='example'\nversion='1.0'\n[[dependencies.example]]\nmodId='minecraft'\ntype='required'\nversionRange='[1.21,1.21.1)'\n[[dependencies.example]]\nmodId='neoforge'\ntype='required'\nversionRange='[21.0.100,21.1)'";
+        let mut data = ForgeFile::default();
+        read_forge(
+            Cursor::new(jar(metadata, None)),
+            "neoforge",
+            &mut data,
+            0,
+            &mut 0,
+        )
+        .unwrap();
+        let check = |item: &Instance, data: &ForgeFile| {
+            let mut report = ModCheck {
+                instance_id: item.id.clone(),
+                issues: vec![],
+                unchecked: vec![],
+                details: None,
+            };
+            let mut details = Details {
+                checked_at: 0,
+                scope: String::new(),
+                complete: true,
+                scanned_files: 0,
+                parsed_files: 0,
+                reused_files: 0,
+                elapsed_ms: 0,
+            };
+            evaluate_forge(item, data, &mut report, &mut details);
+            report
+        };
+        assert!(check(&item, &data).issues.is_empty());
+        data.mods[0].dependencies[0].range = "[1.22,)".into();
+        assert!(check(&item, &data)
+            .issues
+            .iter()
+            .any(|issue| issue.contains("minecraft")));
+        data.mods[0].dependencies[0].range = "[1.21,1.21.1)".into();
+        item.local.as_mut().unwrap().loader = "forge".into();
+        assert!(check(&item, &data)
+            .issues
+            .iter()
+            .any(|issue| issue.contains("minecraft")));
+        item.local.as_mut().unwrap().loader = "neoforge".into();
+        item.version = "1.21.2".into();
+        assert!(check(&item, &data)
+            .issues
+            .iter()
+            .any(|issue| issue.contains("minecraft")));
+    }
     #[test]
     fn forge_cache_detects_add_change_remove_enable_and_force_without_touching_sources() {
         let root = root();

@@ -1,5 +1,6 @@
 import type { Observable } from './contracts';
 export type NativeSettings = {
+  autoTranslatePacks?: boolean;
   clientId: string;
   javaPath: string;
   memoryMb: number;
@@ -10,12 +11,15 @@ export type NativeSettings = {
   isolateNewInstances?: boolean;
 };
 export type LaunchOverrides = {
+  javaVersion?: number;
   windowMode?: 'windowed' | 'fullscreen' | 'inherit';
   gameIsolation?: boolean;
   javaPath?: string;
   memory?: Pick<NativeSettings, 'memoryMode' | 'memoryMb' | 'optimizeMemory'>;
 };
 export type NativeInstance = {
+  versionFolder?: string;
+  storageRoot?: string;
   local?: {
     root: string;
     versionDirectory: string;
@@ -35,6 +39,7 @@ export type NativeInstance = {
   launch?: LaunchOverrides;
 };
 export type NativeTask = {
+  plannedStages?: string[];
   pendingInstance?: string | null;
   steps?: {
     outcome?: 'fallback' | null;
@@ -237,6 +242,21 @@ export type ContentEntry = {
   bytes: number;
   revision: string;
 };
+export type ModDetails = {
+  entry: ContentEntry;
+  path: string;
+  note: string;
+  information: null | {
+    name: string;
+    version: string;
+    loader: string;
+    ids: string[];
+    authors: string[];
+    description: string;
+    license: string;
+    dependencies: string[];
+  };
+};
 export type GameRule = {
   key: string;
   kind: 'boolean' | 'integer' | 'text';
@@ -255,10 +275,18 @@ export type WorldSettings = {
 };
 export type ClientOptions = {
   revision: string;
+  language: string;
   masterVolume: number;
   musicVolume: number;
   renderDistance: number;
   fullscreen: boolean;
+};
+export type TranslationReport = {
+  file: string;
+  source: string;
+  matched: string[];
+  unmatched: string[];
+  skippedFiles: number;
 };
 export type DeviceCode = {
   verificationUri?: string;
@@ -279,6 +307,8 @@ export type PackPreview = {
   install?: PackInstallPlan;
 };
 export type PackInstallPlan = {
+  neoforgeVersion?: string;
+  storageRoot?: string | null;
   recommendedMemoryMb?: number | null;
   forgeVersion?: string;
   curseFiles?: [number, number][];
@@ -315,6 +345,7 @@ export interface NativeService extends Observable<NativeSnapshot> {
     gameVersions: string[];
   }>;
   downloadForge(game: string, loader: string): Promise<void>;
+  installForge(game: string, name: string, loader: string): Promise<void>;
   previewModFile(id: string, file: File): Promise<ResourcePlan>;
   pickModPlan(id: string): Promise<ResourcePlan | null>;
   modCheck(id: string, force?: boolean): Promise<ModCheck>;
@@ -346,6 +377,7 @@ export interface NativeService extends Observable<NativeSnapshot> {
     filters?: { category: string; index: string; source?: ResourceSource },
   ): Promise<ResourceSearch>;
   resourceCategories(kind: ResourceKind): Promise<string[]>;
+  installTranslation(id: string): Promise<TranslationReport>;
   openResource(
     kind: ResourceKind,
     project: string,
@@ -358,6 +390,9 @@ export interface NativeService extends Observable<NativeSnapshot> {
     options?: { source?: ResourceSource; allVersions?: boolean },
   ): Promise<ResourceDetail>;
   content(id: string, kind: ContentKind): Promise<ContentEntry[]>;
+  modDetails(id: string, file: string, revision: string): Promise<ModDetails>;
+  revealMod(id: string, file: string, revision: string): Promise<void>;
+  removeMod(id: string, file: string, revision: string): Promise<string>;
   toggleContent(
     id: string,
     file: string,
@@ -385,6 +420,7 @@ export interface NativeService extends Observable<NativeSnapshot> {
       | 'shaderpacks',
   ): Promise<void>;
   renameInstance(id: string, name: string): Promise<void>;
+  removeInstance(id: string, archive: boolean): Promise<string | null>;
   refresh(fresh?: boolean): Promise<void>;
   worlds(id: string): Promise<WorldEntry[]>;
   world(id: string, worldId: string): Promise<WorldSettings>;
@@ -432,6 +468,7 @@ export interface NativeService extends Observable<NativeSnapshot> {
     filename: string,
   ): Promise<PackPreview>;
   installPack(token: string, name: string, selected: string[]): Promise<void>;
+  pickPackDestination(token: string, reset?: boolean): Promise<string | null>;
   fabricVersions(version: string): Promise<string[]>;
   saveSettings(settings: NativeSettings): Promise<void>;
   saveInstanceLaunch(
@@ -440,6 +477,10 @@ export interface NativeService extends Observable<NativeSnapshot> {
     launch: LaunchOverrides,
   ): Promise<void>;
   probeJava(path: string): Promise<JavaInfo>;
+  pickJava(): Promise<JavaInfo | null>;
+  instanceFolderJava(id: string): Promise<JavaInfo>;
+  instanceJava(id: string): Promise<JavaInfo>;
+  prepareJava(id: string): Promise<JavaInfo>;
   memory(): Promise<MemoryInfo>;
   optimizeMemory(system?: boolean): Promise<MemoryInfo>;
   beginLogin(): Promise<DeviceCode>;

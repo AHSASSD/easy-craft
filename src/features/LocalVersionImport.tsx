@@ -105,7 +105,7 @@ export function LocalVersionImport({
         <p className="scan-intro">
           只添加一个版本时，可直接选择 versions 下的具体版本文件夹；选择
           .minecraft
-          才会扫描整个游戏库。默认直接添加原安装，不复制存档或联网，也可选择独立副本。
+          才会扫描整个游戏库。默认直接添加原安装，不复制存档；启动时自动补齐可下载的必要文件。
         </p>
       )}
       {!native.available && (
@@ -405,7 +405,7 @@ export function LocalVersionImport({
             </div>
             <p className="scan-import-note">
               {mode === 'reference'
-                ? '不复制存档、不联网。复用原安装的 Mod、资源和设置；启动后会在原目录正常读写。'
+                ? '复用原安装的 Mod、存档和设置；启动时自动补齐必要文件，游戏在原目录正常读写。'
                 : '副本模式会遍历与复制游戏内容，并按需联网补齐官方资源。Forge/NeoForge 请使用直接添加。'}
             </p>
           </div>

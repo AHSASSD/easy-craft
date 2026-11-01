@@ -184,10 +184,10 @@ fn filtered_search_url(
     {
         return Err("资源分类或排序无效".into());
     }
-    let mut facets = vec![
-        vec![format!("project_type:{}", kind.name())],
-        vec![format!("versions:{game}")],
-    ];
+    let mut facets = vec![vec![format!("project_type:{}", kind.name())]];
+    if game != "all" {
+        facets.push(vec![format!("versions:{game}")]);
+    }
     if matches!(kind, Kind::Mod) {
         facets.push(vec!["categories:fabric".into()]);
     }
@@ -410,7 +410,7 @@ pub async fn detail_with_scope(project: &str, kind: Kind, game: &str, all: bool)
         .query_pairs_mut()
         .append_pair("loaders", &json!(kind.loaders()).to_string())
         .append_pair("include_changelog", "false");
-    if !all {
+    if !all && game != "all" {
         versions_url
             .query_pairs_mut()
             .append_pair("game_versions", &json!([game]).to_string());

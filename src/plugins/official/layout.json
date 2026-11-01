@@ -2,9 +2,9 @@
   "id": "official.layout",
   "version": "1.0.0",
   "navigation": ["library", "download", "extensions", "settings"],
-  "overview": ["shortcuts", "worlds", "environment"],
+  "overview": ["worlds", "environment", "shortcuts"],
   "presets": {
-    "default": { "name": "经典双栏", "heroHeight": 190, "contentGap": 16 },
-    "compact": { "name": "紧凑工作区", "heroHeight": 140, "contentGap": 12 }
+    "default": { "name": "经典双栏", "heroHeight": 140, "contentGap": 12 },
+    "compact": { "name": "紧凑工作区", "heroHeight": 112, "contentGap": 10 }
   }
 }

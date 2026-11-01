@@ -6,8 +6,9 @@ import {
   FolderOpen,
   Globe2,
   Layers,
-  Settings,
-  ShieldCheck,
+  Image,
+  Pencil,
+  Trash2,
 } from 'lucide-react';
 import type {
   NativeInstance,
@@ -16,18 +17,20 @@ import type {
   WorldEntry,
 } from '../core/native-contracts';
 import layout from '../plugins/official/layout.json';
-import { instanceIsolated } from '../core/instance-settings';
+import {
+  instanceIsolated,
+  instanceGameDirectory,
+} from '../core/instance-settings';
 
 export function InstanceOverview({
   service,
   instance,
   settings,
-  identity,
   running,
   onWorlds,
-  onMods,
   onSettings,
-  onChecks,
+  onRename,
+  onRemove,
   report,
 }: {
   service: NativeService;
@@ -39,6 +42,8 @@ export function InstanceOverview({
   onMods(): void;
   onSettings(): void;
   onChecks(): void;
+  onRename?(): void;
+  onRemove?(): void;
   report(message: string): void;
 }) {
   const [worlds, setWorlds] = useState<WorldEntry[]>([]);
@@ -80,13 +85,13 @@ export function InstanceOverview({
     };
   }, [service, instance.id, running]);
   return (
-    <div className="library-details-grid overview-grid">
+    <div className="library-details-grid overview-grid overview-dashboard">
       {layout.overview.map((block) => {
         if (block === 'worlds')
           return (
             <section className="card overview-worlds" key={block}>
               <div className="section-heading">
-                <h2>我的世界</h2>
+                <h2>本地存档</h2>
                 <button className="text-button" onClick={onWorlds}>
                   查看全部 <ArrowUpRight size={14} />
                 </button>
@@ -116,10 +121,10 @@ export function InstanceOverview({
                 </div>
               ) : (
                 <div className="world-empty">
-                  <Globe2 size={28} />
+                  <Globe2 size={24} />
                   <div>
-                    <strong>第一个世界，从这里开始</strong>
-                    <p>进入游戏创建世界后，存档会出现在这里。</p>
+                    <strong>还没有存档</strong>
+                    <p>在游戏中创建后会显示在这里。</p>
                   </div>
                 </div>
               )}
@@ -140,12 +145,12 @@ export function InstanceOverview({
               <dl>
                 <dt>Java</dt>
                 <dd>
-                  需要 Java {instance.javaMajor} ·{' '}
+                  Java {instance.javaMajor} ·{' '}
                   {instance.local && !instance.launch?.javaPath
-                    ? '启动时自动匹配本机运行时'
+                    ? '自动匹配'
                     : settings.javaPath
-                      ? '启动时验证'
-                      : '尚未配置'}
+                      ? '启动时校验'
+                      : '未配置'}
                 </dd>
                 <dt>内存</dt>
                 <dd>
@@ -155,15 +160,21 @@ export function InstanceOverview({
                 </dd>
                 <dt>游戏目录</dt>
                 <dd>
-                  {instance.local ? '引用原安装 · ' : ''}
-                  {instanceIsolated(instance) ? '版本隔离' : '共享目录'}
+                  {instanceIsolated(instance) ? '版本隔离' : '共享游戏目录'}
+                  <small
+                    className="instance-storage-path"
+                    title={instanceGameDirectory(
+                      instance,
+                      service.snapshot().state?.dataRoot ?? '',
+                    )}
+                  >
+                    {instanceGameDirectory(
+                      instance,
+                      service.snapshot().state?.dataRoot ?? '',
+                    )}
+                  </small>
                 </dd>
-                <dt>启动身份</dt>
-                <dd title={identity}>{identity || '尚未选择账号'}</dd>
               </dl>
-              <button className="check-link" onClick={onChecks}>
-                <ShieldCheck size={16} /> 查看启动检查
-              </button>
             </section>
           );
         return (
@@ -174,88 +185,45 @@ export function InstanceOverview({
           >
             <div className="section-heading">
               <h2>常用操作</h2>
-              <span className="manager-count">
-                {instanceIsolated(instance) ? '独立游戏目录' : '共享游戏目录'}
-              </span>
+              <div className="overview-instance-actions">
+                <button disabled={running || !onRename} onClick={onRename}>
+                  <Pencil size={14} /> 重命名
+                </button>
+                <button
+                  className="overview-remove"
+                  disabled={running || !onRemove}
+                  onClick={onRemove}
+                >
+                  <Trash2 size={14} /> 移除实例
+                </button>
+              </div>
             </div>
             {!instanceIsolated(instance) && (
-              <p className="hint">
-                这些文件夹由多个实例共用，修改内容可能影响其他实例。
+              <p className="overview-shared-note">
+                共享目录的修改会影响其他使用它的实例。
               </p>
             )}
             <div className="folder-shortcut-grid">
               {(
                 [
-                  [
-                    'game',
-                    '游戏文件夹',
-                    '此实例实际使用的游戏文件',
-                    FolderOpen,
-                  ],
-                  ['mods', '模组文件夹', '放入或查看 Mod', Layers],
-                  ['saves', '存档文件夹', '查找、备份或迁移世界', Box],
-                  [
-                    'screenshots',
-                    '截图文件夹',
-                    '在文件管理器中查看截图',
-                    Camera,
-                  ],
+                  ['game', '游戏文件夹', FolderOpen],
+                  ['mods', '模组文件夹', Layers],
+                  ['saves', '存档文件夹', Box],
+                  ['screenshots', '截图文件夹', Camera],
+                  ['resourcepacks', '资源包文件夹', Image],
+                  ['shaderpacks', '光影包文件夹', Image],
                 ] as const
-              ).map(([folder, title, description, Icon]) => (
+              ).map(([folder, title, Icon]) => (
                 <button
                   key={folder}
                   disabled={running}
                   onClick={() => void openFolder(folder)}
                 >
-                  <Icon size={23} />
-                  <span>
-                    <strong>{title}</strong>
-                    <small>{description}</small>
-                  </span>
-                  <ArrowUpRight size={16} />
+                  <Icon size={16} />
+                  <span>{title}</span>
                 </button>
               ))}
             </div>
-            <div className="overview-manage-links">
-              <span>应用内管理</span>
-              <button onClick={onMods}>
-                <Layers size={16} />
-                管理模组
-              </button>
-              <button onClick={onWorlds}>
-                <Box size={16} />
-                管理存档
-              </button>
-              <button onClick={onSettings}>
-                <Settings size={16} />
-                实例设置
-              </button>
-            </div>
-            <details
-              className="more-folders"
-              onKeyDown={(event) => {
-                if (event.key === 'Escape') {
-                  event.currentTarget.open = false;
-                  event.currentTarget.querySelector('summary')?.focus();
-                }
-              }}
-            >
-              <summary>更多文件夹</summary>
-              <div className="button-row">
-                <button
-                  disabled={running}
-                  onClick={() => void openFolder('resourcepacks')}
-                >
-                  资源包文件夹
-                </button>
-                <button
-                  disabled={running}
-                  onClick={() => void openFolder('shaderpacks')}
-                >
-                  光影包文件夹
-                </button>
-              </div>
-            </details>
             {running && <p className="hint">游戏或任务结束后可打开文件夹。</p>}
             {folderError && (
               <p className="notice" role="status">

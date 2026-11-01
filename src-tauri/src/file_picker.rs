@@ -88,6 +88,11 @@ pub fn open(path: PathBuf, extensions: &[&str]) -> Result<(String, File)> {
 }
 
 pub fn pick(owner: isize, extensions: &[&str]) -> Result<Option<(String, File)>> {
+    pick_path(owner, extensions)?
+        .map(|path| open(path, extensions))
+        .transpose()
+}
+pub fn pick_path(owner: isize, extensions: &[&str]) -> Result<Option<PathBuf>> {
     unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) }
         .ok()
         .map_err(|_| "无法初始化系统文件选择器")?;
@@ -112,7 +117,11 @@ pub fn pick(owner: isize, extensions: &[&str]) -> Result<Option<(String, File)>>
                 .chain(Some(0))
                 .collect();
             dialog.SetFileTypes(&[COMDLG_FILTERSPEC {
-                pszName: w!("Minecraft 内容文件"),
+                pszName: if extensions == ["exe"] {
+                    w!("Java 可执行文件（java.exe）")
+                } else {
+                    w!("Minecraft 内容文件")
+                },
                 pszSpec: PCWSTR(filter.as_ptr()),
             }])?;
             if let Err(error) = dialog.Show(Some(HWND(owner as *mut _))) {
@@ -128,5 +137,5 @@ pub fn pick(owner: isize, extensions: &[&str]) -> Result<Option<(String, File)>>
         }
     })()
     .map_err(|_| "系统文件选择失败，请重试")?;
-    selected.map(|path| open(path, extensions)).transpose()
+    Ok(selected)
 }

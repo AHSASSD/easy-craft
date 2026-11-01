@@ -480,14 +480,11 @@ pub fn is_imported(host: &Host, key: &str) -> bool {
         if instance.local.as_ref().is_some_and(|v| v.source_key == key) {
             return true;
         }
-        read_json(
-            &host.root,
-            &format!(
-                "instances/{}/game/.easycraft-local-import.json",
-                instance.id
-            ),
-        )
-        .is_ok_and(|v| v["sourceKey"] == key)
+        instance
+            .game_path(&host.root)
+            .ok()
+            .and_then(|game| read_json(&game, ".easycraft-local-import.json").ok())
+            .is_some_and(|v| v["sourceKey"] == key)
     })
 }
 fn inspect(
@@ -609,7 +606,7 @@ fn inspect(
         value
     };
     let mut warnings = vec![
-        "默认直接添加原安装：复用原目录中的库、资源、Mod、存档与游戏设置，不遍历复制内容、不联网；游戏启动后在该目录正常读写。账号和第三方启动器私有配置不会导入。"
+        "默认直接添加原安装：复用原目录中的库、资源、Mod、存档与游戏设置，添加时不遍历复制内容、不联网；启动时自动补齐有官方来源与校验信息的必要文件，游戏在原目录正常读写。账号和第三方启动器私有配置不会导入。"
             .into(),
         "仅在选择复制为独立副本时逐文件校验与复制；原版/Fabric 副本可联网补齐官方资源。Forge/NeoForge 当前使用已经安装完成的本地版本，不执行安装器处理器。"
             .into(),
@@ -617,11 +614,10 @@ fn inspect(
     warnings.extend(content.warnings.clone());
     if !root.join("libraries").is_dir() {
         warnings
-            .push("共享 libraries 目录缺失，直接添加不会自动联网；请先在原启动器修复安装。".into());
+            .push("共享 libraries 目录缺失，启动时会尝试补齐有官方来源与校验信息的依赖。".into());
     }
     if !root.join("assets").is_dir() {
-        warnings
-            .push("共享 assets 目录缺失，直接添加不会自动联网；请先在原启动器修复资源。".into());
+        warnings.push("共享 assets 目录缺失，启动时会尝试补齐官方资源。".into());
     }
     warnings.push("副本模式仅复制常见游戏内容目录及 options/servers 文件；日志、启动器配置和其他自定义根目录文件不导入。".into());
     let name = directory
@@ -933,7 +929,9 @@ pub async fn prepare(
         crate::fabric::install_with_sources(host, &entry.id, &source.fabric, cancel, &source.roots)
             .await?
     };
-    let instance = Instance {
+    let mut instance = Instance {
+        version_folder: None,
+        storage_root: None,
         local: None,
         id: uuid::Uuid::new_v4().to_string(),
         name: unique_name(&selected.name, &host.status().instances),
@@ -944,6 +942,7 @@ pub async fn prepare(
         fabric_sha1,
         launch: Default::default(),
     };
+    instance.use_versions_layout();
     let mut transaction = modpack::begin_instance(
         &host.root,
         &uuid::Uuid::new_v4().to_string(),
@@ -1035,6 +1034,8 @@ fn reference(
         relative(&source.root, &source.game)?
     };
     let instance = Instance {
+        version_folder: None,
+        storage_root: None,
         id: uuid::Uuid::new_v4().to_string(),
         name: unique_name(&selected.name, &host.status().instances),
         version: source.info.game_version.clone(),
@@ -1171,6 +1172,68 @@ mod tests {
         let mut byte = [0];
         reader.read_exact(&mut byte).unwrap();
         assert_eq!(byte, [b'f']);
+    }
+    #[tokio::test]
+    #[ignore = "Explicit read-only real-pack fixture paths; registers in an isolated catalog and never starts Minecraft"]
+    async fn requested_real_packs_prepare_launch_without_writing_source_directories() {
+        let paths: Vec<PathBuf> = serde_json::from_str(
+            &std::env::var("EASYCRAFT_REAL_PACK_DIRECTORIES")
+                .expect("explicit fixture paths required"),
+        )
+        .unwrap();
+        assert!(!paths.is_empty() && paths.len() <= 8);
+        let data = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join(".native/chinese-packs-preparation")
+            .join(uuid::Uuid::new_v4().to_string());
+        let host = Host::new(data.clone()).unwrap();
+        let mut reports = vec![];
+        for source in paths {
+            let scan = scan(&host, &source, &CancellationToken::new()).unwrap();
+            assert_eq!(scan.preview.candidates.len(), 1);
+            let candidate = &scan.preview.candidates[0];
+            assert!(candidate.supported, "{:?}", candidate.issues);
+            let ready = prepare(
+                &host,
+                &scan,
+                &Selection {
+                    id: candidate.id.clone(),
+                    name: candidate.name.clone(),
+                    mode: ImportMode::Reference,
+                },
+                &CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+            let result = crate::local_launch::prepare(&host, &ready.instance, &CancellationToken::new())
+                .and_then(|prepared| {
+                    let settings = model::Settings { launch_mode: model::LaunchMode::Offline,
+                        offline_name: "PackTest".into(), ..Default::default() };
+                    let args = crate::minecraft::command_args(&host, &ready.instance, &prepared,
+                        &model::offline_profile("PackTest")?, "0", &settings)?;
+                    if args.iter().any(|arg| arg.contains("${")) {
+                        return Err("启动参数仍有未解析变量".into());
+                    }
+                    crate::local_launch::command_arguments(&host.root, &ready.instance, &args)?;
+                    Ok(serde_json::json!({ "classpathFiles": prepared.classpath.len(),
+                        "nativeArchives": prepared.native_archives.len(), "argumentCount": args.len() }))
+                });
+            println!("{}: {result:?}", candidate.name);
+            reports
+                .push(serde_json::json!({"name":candidate.name,"source":source,"result":result}));
+            modpack::rollback(&host.root, &ready.transaction).unwrap();
+        }
+        fs::write(
+            data.join("results.json"),
+            serde_json::to_vec_pretty(&reports).unwrap(),
+        )
+        .unwrap();
+        println!("Reports: {}", data.display());
+        assert!(
+            reports.iter().all(|row| row["result"].get("Ok").is_some()),
+            "launch preparation failed; see results.json"
+        );
     }
     #[tokio::test]
     #[ignore = "Explicit real-installation reference import and launch preparation; never starts Minecraft"]
@@ -1776,6 +1839,8 @@ mod tests {
         let plan = scan(&host, &source, &cancel).unwrap();
         let selected = &plan.sources[0];
         let instance = Instance {
+            version_folder: None,
+            storage_root: None,
             id: uuid::Uuid::new_v4().to_string(),
             name: "Copied".into(),
             version: "1.21.1".into(),

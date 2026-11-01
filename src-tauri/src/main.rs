@@ -13,26 +13,98 @@ mod file_picker;
 mod file_upload;
 mod forge;
 mod host;
+mod java_runtime;
+mod loader_install;
 mod local_import;
 mod local_launch;
 mod memory;
 mod minecraft;
 mod mod_check;
+mod mod_info;
 mod model;
 mod modpack;
 mod net;
 mod pack_download;
 mod packs;
+mod plugins;
 mod resource_install;
 mod resources;
 mod skins;
 #[cfg(test)]
 mod tests;
+mod translation;
 mod worlds;
 use host::Host;
 use model::Result;
 use std::sync::Arc;
 use tauri::State;
+
+#[tauri::command]
+fn native_plugin_preview(raw: String) -> Result<plugins::Manifest> {
+    plugins::parse(&raw)
+}
+
+#[tauri::command]
+async fn native_plugins(host: State<'_, Arc<Host>>) -> Result<plugins::Snapshot> {
+    let host = host.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || plugins::list(&host.root))
+        .await
+        .map_err(|_| "插件记录读取失败".into())
+}
+#[tauri::command]
+async fn native_plugin_change(
+    host: State<'_, Arc<Host>>,
+    operation: plugins::Operation,
+) -> Result<plugins::Snapshot> {
+    let host = host.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        host.plugin_task("管理本地插件", |cancel| {
+            plugins::change(&host, operation, cancel)
+        })
+    })
+    .await
+    .map_err(|_| "插件操作未完成，原数据已保留".to_string())?
+}
+#[tauri::command]
+async fn native_plugin_json(
+    host: State<'_, Arc<Host>>,
+    id: String,
+    input: String,
+) -> Result<String> {
+    let host = host.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        host.plugin_task("运行 JSON 工具", |cancel| {
+            plugins::format_json(&host, &id, &input, cancel)
+        })
+    })
+    .await
+    .map_err(|_| "插件工具执行失败".to_string())?
+}
+#[tauri::command]
+async fn native_plugin_check(
+    host: State<'_, Arc<Host>>,
+    plugin: String,
+    id: String,
+) -> Result<resource_install::ModCheck> {
+    let host = host.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        host.plugin_task("实例扩展：检查模组声明", |cancel| {
+            plugins::authorize(&host, &plugin, "instance.mod-check", Some(&id))?;
+            host.progress("plugin-mod-check", "读取当前实例模组声明", 0, 1);
+            if cancel.is_cancelled() {
+                return Err("检查已取消".into());
+            }
+            let result = host.plugin_mod_check(&id)?;
+            if cancel.is_cancelled() {
+                return Err("检查已取消，结果未采用".into());
+            }
+            host.progress("plugin-committed", "实例模组声明检查完成", 1, 1);
+            Ok(result)
+        })
+    })
+    .await
+    .map_err(|_| "实例扩展检查失败".to_string())?
+}
 
 #[tauri::command]
 async fn native_mod_check(
@@ -224,6 +296,15 @@ async fn native_fabric_catalog(
 fn native_forge_download(host: State<'_, Arc<Host>>, game: String, loader: String) -> Result<()> {
     host.start_forge_download(game, loader)
 }
+#[tauri::command]
+fn native_forge_install(
+    host: State<'_, Arc<Host>>,
+    game: String,
+    name: String,
+    loader: String,
+) -> Result<()> {
+    host.start_install_forge(game, name, loader)
+}
 
 #[tauri::command]
 async fn native_content(
@@ -252,6 +333,48 @@ async fn native_content_toggle(
     })
     .await
     .map_err(|_| "模组修改任务失败".to_string())?
+}
+#[tauri::command]
+async fn native_mod_details(
+    host: State<'_, Arc<Host>>,
+    id: String,
+    file: String,
+    revision: String,
+) -> Result<content::Details> {
+    let host = host.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        host.instance_files(&id, |root| content::details(root, &file, &revision))
+    })
+    .await
+    .map_err(|_| "模组详情读取失败".to_string())?
+}
+#[tauri::command]
+async fn native_mod_reveal(
+    host: State<'_, Arc<Host>>,
+    id: String,
+    file: String,
+    revision: String,
+) -> Result<()> {
+    let host = host.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        host.instance_files(&id, |root| content::reveal(root, &file, &revision))
+    })
+    .await
+    .map_err(|_| "文件位置打开失败".to_string())?
+}
+#[tauri::command]
+async fn native_mod_remove(
+    host: State<'_, Arc<Host>>,
+    id: String,
+    file: String,
+    revision: String,
+) -> Result<String> {
+    let host = host.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        host.instance_files(&id, |root| content::remove_mod(root, &file, &revision))
+    })
+    .await
+    .map_err(|_| "模组删除任务失败".to_string())?
 }
 #[tauri::command]
 async fn native_content_import(
@@ -387,8 +510,30 @@ fn native_instance_rename(host: State<'_, Arc<Host>>, id: String, name: String) 
     host.rename_instance(&id, &name)
 }
 #[tauri::command]
+fn native_instance_remove(
+    host: State<'_, Arc<Host>>,
+    id: String,
+    archive: bool,
+) -> Result<Option<String>> {
+    host.remove_instance(&id, archive)
+}
+#[tauri::command]
 fn native_status(host: State<'_, Arc<Host>>) -> host::Status {
     host.status()
+}
+#[tauri::command]
+async fn native_instance_java(
+    host: State<'_, Arc<Host>>,
+    id: String,
+) -> Result<minecraft::JavaInfo> {
+    host.instance_java(&id).await
+}
+#[tauri::command]
+async fn native_java_prepare(
+    host: State<'_, Arc<Host>>,
+    id: String,
+) -> Result<minecraft::JavaInfo> {
+    host.prepare_java(&id).await
 }
 #[tauri::command]
 async fn native_worlds(host: State<'_, Arc<Host>>, id: String) -> Result<Vec<worlds::WorldEntry>> {
@@ -435,14 +580,29 @@ async fn native_options(host: State<'_, Arc<Host>>, id: String) -> Result<worlds
 async fn native_options_save(
     host: State<'_, Arc<Host>>,
     id: String,
-    options: worlds::ClientOptions,
+    mut options: worlds::ClientOptions,
 ) -> Result<String> {
     let host = host.inner().clone();
+    let version = host
+        .status()
+        .instances
+        .into_iter()
+        .find(|v| v.id == id)
+        .ok_or("实例不存在")?
+        .version;
+    options.language = worlds::language_for_version(&options.language, &version);
     tauri::async_runtime::spawn_blocking(move || {
         host.instance_files(&id, |root| worlds::save_options(root, options))
     })
     .await
     .map_err(|_| "游戏选项保存失败".to_string())?
+}
+#[tauri::command]
+async fn native_translation_install(
+    host: State<'_, Arc<Host>>,
+    id: String,
+) -> Result<translation::Report> {
+    host.install_translation(&id).await
 }
 #[tauri::command]
 async fn native_avatar(host: State<'_, Arc<Host>>) -> Result<Option<String>> {
@@ -664,6 +824,29 @@ fn native_local_import(
     host.inner().clone().start_local_import(token, selected)
 }
 #[tauri::command]
+async fn native_pack_destination(
+    window: tauri::WebviewWindow,
+    host: State<'_, Arc<Host>>,
+    token: String,
+    reset: Option<bool>,
+) -> Result<Option<String>> {
+    if reset == Some(true) {
+        return host.pack_destination(&token, None);
+    }
+    let owner = window.hwnd().map_err(|_| "无法读取窗口")?.0 as isize;
+    let host = host.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let Some(directory) =
+            file_picker::pick_directory_named(owner, "选择整合包安装位置（将在其中新建独立实例）")?
+        else {
+            return Ok(None);
+        };
+        host.pack_destination(&token, Some(&directory))
+    })
+    .await
+    .map_err(|_| "安装位置选择失败".to_string())?
+}
+#[tauri::command]
 fn native_pack_install(
     host: State<'_, Arc<Host>>,
     token: String,
@@ -718,6 +901,43 @@ async fn native_memory_optimize(
 #[tauri::command]
 async fn native_java(path: String) -> Result<minecraft::JavaInfo> {
     minecraft::probe_java(&path).await
+}
+#[tauri::command]
+async fn native_java_pick(window: tauri::WebviewWindow) -> Result<Option<minecraft::JavaInfo>> {
+    let owner = window.hwnd().map_err(|_| "无法读取窗口")?.0 as isize;
+    let path =
+        tauri::async_runtime::spawn_blocking(move || file_picker::pick_path(owner, &["exe"]))
+            .await
+            .map_err(|_| "Java 文件选择失败")??;
+    let Some(path) = path else { return Ok(None) };
+    minecraft::probe_java(path.to_str().ok_or("Java 路径编码无效")?)
+        .await
+        .map(Some)
+}
+#[tauri::command]
+async fn native_java_instance_folder(
+    host: State<'_, Arc<Host>>,
+    id: String,
+) -> Result<minecraft::JavaInfo> {
+    let instance = host
+        .status()
+        .instances
+        .into_iter()
+        .find(|v| v.id == id)
+        .ok_or("实例不存在")?;
+    let root = instance.game_path(&host.root)?;
+    for relative in [
+        "java/bin/java.exe",
+        "jre/bin/java.exe",
+        "runtime/bin/java.exe",
+        "bin/java.exe",
+    ] {
+        let path = model::safe_path(&root, relative)?;
+        if path.is_file() {
+            return minecraft::probe_java(path.to_str().ok_or("Java 路径编码无效")?).await;
+        }
+    }
+    Err("此实例目录中未找到 Java；可选择指定 java.exe".into())
 }
 #[tauri::command]
 fn native_install(
@@ -790,11 +1010,22 @@ fn main() {
     tauri::Builder::default()
         .manage(state)
         .invoke_handler(tauri::generate_handler![
+            native_plugin_preview,
+            native_plugins,
+            native_plugin_change,
+            native_plugin_json,
+            native_plugin_check,
             native_status,
+            native_instance_java,
+            native_java_prepare,
             native_instance_rename,
+            native_instance_remove,
             native_content,
             native_mod_check,
             native_content_toggle,
+            native_mod_details,
+            native_mod_reveal,
+            native_mod_remove,
             native_content_import,
             native_content_pick,
             native_mod_pick_plan,
@@ -825,6 +1056,7 @@ fn main() {
             native_file_upload_finish,
             native_file_upload_abort,
             native_pack_pick,
+            native_pack_destination,
             native_local_scan_pick,
             native_local_import,
             native_pack_install,
@@ -833,6 +1065,7 @@ fn main() {
             native_resource_categories,
             native_resource_save,
             native_open_resource,
+            native_translation_install,
             native_resource_detail,
             native_resource_plan,
             native_curseforge_plan,
@@ -844,11 +1077,14 @@ fn main() {
             native_fabric_games,
             native_fabric_catalog,
             native_forge_download,
+            native_forge_install,
             native_version_catalog,
             native_settings,
             native_memory,
             native_memory_optimize,
             native_java,
+            native_java_pick,
+            native_java_instance_folder,
             native_install,
             native_fabric_versions,
             native_launch,

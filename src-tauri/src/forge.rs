@@ -3,7 +3,6 @@ use crate::{
     model::{self, Result},
     net,
 };
-use futures_util::StreamExt;
 use serde::Serialize;
 use tokio_util::sync::CancellationToken;
 #[derive(Serialize)]
@@ -101,30 +100,7 @@ pub async fn download(
     let url = format!(
         "https://maven.minecraftforge.net/net/minecraftforge/forge/{game}-{loader}/{filename}"
     );
-    let response = tokio::select! {_ = cancel.cancelled()=>return Err("下载已取消".into()), r=host.client.get(net::forge_url(&format!("{url}.sha1"))?).send()=>r.map_err(|_|"无法读取 Forge 官方校验值")?};
-    if !response.status().is_success() {
-        return Err(format!(
-            "Forge 校验服务 HTTP {}",
-            response.status().as_u16()
-        ));
-    }
-    let mut stream = response.bytes_stream();
-    let mut bytes = vec![];
-    while let Some(chunk) =
-        tokio::select! {_ = cancel.cancelled()=>return Err("下载已取消".into()),v=stream.next()=>v}
-    {
-        let chunk = chunk.map_err(|_| "Forge 校验值接收失败")?;
-        if bytes.len() + chunk.len() > 1024 {
-            return Err("Forge 校验值过大".into());
-        }
-        bytes.extend_from_slice(&chunk);
-    }
-    let hash = std::str::from_utf8(&bytes)
-        .map_err(|_| "Forge 校验值格式无效")?
-        .trim();
-    if !model::valid_sha1(hash) {
-        return Err("Forge 官方 SHA-1 无效".into());
-    }
+    let hash = net::forge_checksum(&host.client, &format!("{url}.sha1"), cancel).await?;
     let response = tokio::select! { _ = cancel.cancelled() => return Err("下载已取消".into()), result = host.client.head(net::forge_url(&url)?).send() => result.map_err(|_| "无法读取 Forge 安装器大小")? };
     if !response.status().is_success() {
         return Err(format!(
@@ -133,19 +109,14 @@ pub async fn download(
         ));
     }
     let size = declared_size(response.headers())?;
-    host.progress(
-        "forge-download",
-        "下载并校验 Forge 官方安装器（尚不执行安装器）",
-        0,
-        1,
-    );
+    host.progress("forge-download", "下载并校验 Forge 官方安装器", 0, 1);
     let path = net::forge_download(
         &host.client,
         &host.root,
         &net::Artifact {
             path: format!("downloads/forge/{filename}"),
             url,
-            sha1: hash.into(),
+            sha1: hash,
             size: Some(size),
         },
         cancel,
